@@ -7,12 +7,14 @@ from web3.contract import Contract
 from web3.utils.abi import get_abi_input_types
 from web3.utils.contracts import encode_transaction_data, find_matching_fn_abi
 
+from raiden import constants
 from raiden.constants import EthClient
 from raiden.exceptions import (
     InsufficientFunds,
     ReplacementTransactionUnderpriced,
     TransactionAlreadyPending,
 )
+from raiden.utils import typing
 from raiden.utils.filters import decode_event
 
 
@@ -23,11 +25,14 @@ class ClientErrorInspectResult(Enum):
     TRANSACTION_UNDERPRICED = 3
     TRANSACTION_PENDING = 4
     ALWAYS_FAIL = 5
+    TRANSACTION_ALREADY_IMPORTED = 7
 
 
-def inspect_client_error(val_err: ValueError, eth_node: str) -> ClientErrorInspectResult:
+def inspect_client_error(val_err: ValueError, eth_node: EthClient) -> ClientErrorInspectResult:
     # both clients return invalid json. They use single quotes while json needs double ones.
-    json_response = str(val_err).replace("'", '"')
+    # Also parity may return something like: 'data': 'Internal("Error message")' which needs
+    # special processing
+    json_response = str(val_err).replace("'", '"').replace('("', '(').replace('")', ')')
     try:
         error = json.loads(json_response)
     except json.JSONDecodeError:
@@ -50,6 +55,8 @@ def inspect_client_error(val_err: ValueError, eth_node: str) -> ClientErrorInspe
                 return ClientErrorInspectResult.INSUFFICIENT_FUNDS
             elif 'another transaction with same nonce in the queue' in error['message']:
                 return ClientErrorInspectResult.TRANSACTION_UNDERPRICED
+            elif 'Transaction with the same hash was already imported' in error['message']:
+                return ClientErrorInspectResult.TRANSACTION_ALREADY_IMPORTED
         elif error['code'] == -32015 and 'Transaction execution error' in error['message']:
             return ClientErrorInspectResult.ALWAYS_FAIL
 
@@ -69,7 +76,13 @@ class ContractProxy:
         self.jsonrpc_client = jsonrpc_client
         self.contract = contract
 
-    def transact(self, function_name: str, startgas: int, *args, **kargs):
+    def transact(
+            self,
+            function_name: str,
+            startgas: int,
+            *args,
+            **kargs,
+    ) -> typing.TransactionHash:
         data = ContractProxy.get_transaction_data(self.contract.abi, function_name, args)
 
         try:
@@ -96,6 +109,25 @@ class ContractProxy:
                     'The transaction has already been submitted. Please '
                     'wait until is has been mined or increase the gas price.',
                 )
+            elif action == ClientErrorInspectResult.TRANSACTION_ALREADY_IMPORTED:
+                # This is like TRANSACTION_PENDING is for geth but happens in parity
+                # Unlike with geth this can also happen without multiple transactions
+                # being sent via RPC -- due to probably some parity bug:
+                # https://github.com/raiden-network/raiden/issues/3211
+                # We will try to not crash by looking into the local parity
+                # transaction pool to retrieve the transaction hash
+                hex_address = to_checksum_address(self.jsonrpc_client.address)
+                txhash = self.jsonrpc_client.parity_get_pending_transaction_hash_by_nonce(
+                    address=hex_address,
+                    nonce=self.jsonrpc_client._available_nonce,
+                )
+                if not txhash:
+                    raise TransactionAlreadyPending(
+                        'Transaction was submitted via parity but parity saw it as'
+                        ' already pending. Could not find the transaction in the '
+                        'local transaction pool. Bailing ...',
+                    )
+                return txhash
 
             raise e
 
@@ -150,12 +182,30 @@ class ContractProxy:
     def encode_function_call(self, function: str, args: List = None):
         return self.get_transaction_data(self.contract.abi, function, args)
 
-    def estimate_gas(self, function: str, *args):
+    def estimate_gas(self, block_identifier, function: str, *args) -> typing.Optional[int]:
+        """Returns a gas estimate for the function with the given arguments or
+        None if the function call will fail due to Insufficient funds or
+        the logic in the called function."""
         fn = getattr(self.contract.functions, function)
+        address = to_checksum_address(self.jsonrpc_client.address)
+        if self.jsonrpc_client.eth_node == constants.EthClient.GETH:
+            # Unfortunately geth does not follow the ethereum JSON-RPC spec and
+            # does not accept a block identifier argument for eth_estimateGas
+            # parity and py-evm (trinity) do.
+            #
+            # Geth only runs estimateGas on the pending block and that's why we
+            # should also enforce parity, py-evm and others to do the same since
+            # we can't customize geth.
+            #
+            # Spec: https://github.com/ethereum/wiki/wiki/JSON-RPC#eth_estimategas
+            # Geth Issue: https://github.com/ethereum/go-ethereum/issues/2586
+            # Relevant web3 PR: https://github.com/ethereum/web3.py/pull/1046
+            block_identifier = None
         try:
-            return fn(*args).estimateGas({
-                'from': to_checksum_address(self.jsonrpc_client.address),
-            })
+            return fn(*args).estimateGas(
+                transaction={'from': address},
+                block_identifier=block_identifier,
+            )
         except ValueError as err:
             action = inspect_client_error(err, self.jsonrpc_client.eth_node)
             will_fail = action in (

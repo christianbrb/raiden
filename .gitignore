@@ -46,6 +46,7 @@ nosetests.xml
 coverage.xml
 *,cover
 .pytest_cache/
+mypy-out.txt
 
 # Pyenv
 .python-version
@@ -91,3 +92,9 @@ raiden-debug.log*
 # direnv virtual envs
 .direnv
 .envrc
+
+# tools
+tools/circleci/
+
+# venvs
+venv/

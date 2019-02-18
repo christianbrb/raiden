@@ -92,7 +92,7 @@ Querying Information About Your Raiden Node
 
    .. http:example:: curl wget httpie python-requests
 
-      GET /api/1/address HTTP/1.1
+      GET /api/v1/address HTTP/1.1
       Host: localhost:5001
 
    **Example Response**:
@@ -119,7 +119,7 @@ Deploying
 
    .. http:example:: curl wget httpie python-requests
 
-      PUT /api/1/tokens/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8 HTTP/1.1
+      PUT /api/v1/tokens/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8 HTTP/1.1
       Host: localhost:5001
 
    **Example Response**:
@@ -153,7 +153,7 @@ Querying Information About Channels and Tokens
 
    .. http:example:: curl wget httpie python-requests
 
-      GET /api/1/channels HTTP/1.1
+      GET /api/v1/channels HTTP/1.1
       Host: localhost:5001
 
    **Example Response**:
@@ -188,7 +188,7 @@ Querying Information About Channels and Tokens
 
    .. http:example:: curl wget httpie python-requests
 
-      GET /api/1/channels/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8 HTTP/1.1
+      GET /api/v1/channels/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8 HTTP/1.1
       Host: localhost:5001
 
    **Example Response**:
@@ -224,7 +224,7 @@ Querying Information About Channels and Tokens
 
    .. http:example:: curl wget httpie python-requests
 
-      GET /api/1/channels/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
+      GET /api/v1/channels/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
       Host: localhost:5001
 
    **Example Response**:
@@ -260,7 +260,7 @@ Querying Information About Channels and Tokens
 
    .. http:example:: curl wget httpie python-requests
 
-      GET /api/1/tokens HTTP/1.1
+      GET /api/v1/tokens HTTP/1.1
       Host: localhost:5001
 
    **Example Response**:
@@ -286,7 +286,7 @@ Querying Information About Channels and Tokens
 
    .. http:example:: curl wget httpie python-requests
 
-      GET /api/1/tokens/0x61bB630D3B2e8eda0FC1d50F9f958eC02e3969F6/partners HTTP/1.1
+      GET /api/v1/tokens/0x61bB630D3B2e8eda0FC1d50F9f958eC02e3969F6/partners HTTP/1.1
       Host: localhost:5001
 
    **Example Response**:
@@ -312,6 +312,73 @@ Querying Information About Channels and Tokens
    :resjsonarr address partner_address: The partner we have a channel with
    :resjsonarr link channel: A link to the channel resource
 
+.. http:get:: /api/(version)/pending_transfers
+
+   Returns a list of all transfers that have not been completed yet.
+
+   **Example Request**:
+
+   .. http:example:: curl wget httpie python-requests
+
+      GET /api/v1/pending_transfers HTTP/1.1
+      Host: localhost:5001
+
+   See below for an example response.
+
+.. http:get:: /api/(version)/pending_transfers/(token_address)
+
+   Like above, but limited to pending transfers of the specified token.
+
+   **Example Request**:
+
+   .. http:example:: curl wget httpie python-requests
+
+      GET /api/v1/pending_transfers/0xd0A1E359811322d97991E03f863a0C30C2cF029C HTTP/1.1
+      Host: localhost:5001
+
+   See below for an example response.
+
+.. http:get:: /api/(version)/pending_transfers/(token_address)/(partner_address)
+
+   Like above, but limited to the specified channel.
+
+   **Example Request**:
+
+   .. http:example:: curl wget httpie python-requests
+
+      GET /api/v1/pending_transfers/0xd0A1E359811322d97991E03f863a0C30C2cF029C/0x2c4b0Bdac486d492E3cD701F4cA87e480AE4C685 HTTP/1.1
+      Host: localhost:5001
+
+   **Example Response**:
+
+   .. sourcecode:: http
+
+      HTTP/1.1 200 OK
+      Content-Type: application/json
+
+      [
+         {
+            "channel_identifier": "255",
+            "initiator": "0x5E1a3601538f94c9e6D2B40F7589030ac5885FE7",
+            "locked_amount": "119",
+            "payment_identifier": "1",
+            "role": "initiator",
+            "target": "0x00AF5cBfc8dC76cd599aF623E60F763228906F3E",
+            "token_address": "0xd0A1E359811322d97991E03f863a0C30C2cF029C",
+            "token_network_identifier": "0x111157460c0F41EfD9107239B7864c062aA8B978",
+            "transferred_amount": "331"
+         }
+
+      ]
+
+   :statuscode 200: Successful query
+   :statuscode 404: The queried channel or token was not found
+   :statuscode 500: Internal Raiden node error
+   :resjsonarr string role: One of "initiator", "mediator" and "target"
+
+
+
+
 Channel Management
 ==================
 
@@ -323,7 +390,7 @@ Channel Management
 
    .. http:example:: curl wget httpie python-requests
 
-      PUT /api/1/channels HTTP/1.1
+      PUT /api/v1/channels HTTP/1.1
       Host: localhost:5001
       Content-Type: application/json
 
@@ -382,7 +449,7 @@ Channel Management
 
    .. http:example:: curl wget httpie python-requests
 
-      PATCH /api/1/channels/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
+      PATCH /api/v1/channels/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
       Host: localhost:5001
       Content-Type: application/json
 
@@ -394,7 +461,7 @@ Channel Management
 
    .. http:example:: curl wget httpie python-requests
 
-      PATCH /api/1/channels/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
+      PATCH /api/v1/channels/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
       Host: localhost:5001
       Content-Type: application/json
 
@@ -455,7 +522,7 @@ Connection Management
 
    .. http:example:: curl wget httpie python-requests
 
-      GET /api/1/connections HTTP/1.1
+      GET /api/v1/connections HTTP/1.1
       Host: localhost:5001
 
    **Example Response**:
@@ -497,7 +564,7 @@ Connection Management
 
    .. http:example:: curl wget httpie python-requests
 
-      PUT /api/1/connections/0x2a65Aca4D5fC5B5C859090a6c34d164135398226 HTTP/1.1
+      PUT /api/v1/connections/0x2a65Aca4D5fC5B5C859090a6c34d164135398226 HTTP/1.1
       Host: localhost:5001
       Content-Type: application/json
 
@@ -526,7 +593,7 @@ Connection Management
 
    .. http:example:: curl wget httpie python-requests
 
-      DELETE /api/1/connections/0x2a65Aca4D5fC5B5C859090a6c34d164135398226 HTTP/1.1
+      DELETE /api/v1/connections/0x2a65Aca4D5fC5B5C859090a6c34d164135398226 HTTP/1.1
       Host: localhost:5001
       Content-Type: application/json
 
@@ -565,7 +632,7 @@ Payments
 
    .. http:example:: curl wget httpie python-requests
 
-      POST /api/1/payments/0x2a65Aca4D5fC5B5C859090a6c34d164135398226/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
+      POST /api/v1/payments/0x2a65Aca4D5fC5B5C859090a6c34d164135398226/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
       Host: localhost:5001
       Content-Type: application/json
 
@@ -603,202 +670,16 @@ Payments
 Querying Events
 ===============
 
-Events are kept by the node. A normal user should only care about the events exposed for payments. Those events show if a payment failed or if it was successful. But at the moment we expose all of the events in the REST api mainly for debugging purposes.
+Events are kept by the node. A normal user should only care about the events exposed for payments. Those events show if a payment failed or if it was successful.
 
-In Raiden we distinguish between two types of events: ``blockchain_events`` and ``raiden_events``.
-``blockchain_events`` are events that are being emitted by the smart contracts.
-``raiden_events`` are events happening in the Raiden node.
-
-The payment events are a very small subset of ``raiden_events``.
-
-.. NOTE::
-      All blockchain and raiden event endpoints except for the payment ones are for debugging only and might get removed in the future. They are placed under the ``_debug`` document in the REST URI.
-
-Blockchain events can be filtered down by providing the query string arguments ``from_block``
-and/or ``to_block`` to only query events from a limited range of blocks. The block number
-argument needs to be in the range of 0 to UINT64_MAX. Any block number outside this range will
-be rejected.
 For ``raiden_events`` you can provide a ``limit`` and an ``offset`` number which would define the limit of results to return and the offset from which to return results respectively.
 
 ``raiden_events`` contain a timestamp field, ``log_time``, indicating when they were written to the write-ahead log.
 The format of ``log_time`` is ISO8601 with milliseconds.
 
-.. http:get:: /api/(version)/_debug/blockchain_events/network
-
-   Query for token network creations.
-
-   .. NOTE::
-      The network registry used is the default registry. The default registry is
-      preconfigured and can be edited from the raiden configuration file.
-
-   **Example Request**:
-
-   .. http:example:: curl wget httpie python-requests
-
-      GET /api/1/_debug/blockchain_events/network HTTP/1.1
-      Host: localhost:5001
-
-   **Example Response**:
-
-   .. sourcecode:: http
-
-      HTTP/1.1 200 OK
-      Content-Type: application/json
-
-      [
-        {
-            args: {
-                token_address: "0x2E2A012D28cC95ed6A254fe14501722925719e72",
-                token_network_address: "0x398a45A94292E850932deD44F1db20cA494400db"
-            },
-            event: "TokenNetworkCreated",
-            logIndex: 3,
-            transactionIndex: 7,
-            transactionHash: "0xf162f616f241679f954385c8a63450f554aa34a97dedf2eb5e7b19ef3c78d31a",
-            address: "0xDfD10bAe9CCC5EBf11bc6309A0645eFe9f979584",
-            blockHash: "0xb6b0fa7080293bf0649ce86e9bb6e13dbf92ca8ced52a550df8c790b67c84131",
-            block_number: 3745593
-        }, ...
-      ]
-
-   :statuscode 200: For successful query
-   :statuscode 400: If the provided query string is malformed
-   :statuscode 409: If the given block number argument is invalid
-   :statuscode 500: Internal Raiden node error
-
-.. http:get:: /api/(version)/_debug/blockchain_events/tokens/(token_address)
-
-   Query for all blockchain events happening on a token network.
-
-   **Example Request**:
-
-   .. http:example:: curl wget httpie python-requests
-
-      GET /api/1/_debug/blockchain_events/tokens/0x0f114A1E9Db192502E7856309cc899952b3db1ED HTTP/1.1
-      Host: localhost:5001
-
-   **Example Response**:
-
-   .. sourcecode:: http
-
-      HTTP/1.1 200 OK
-      Content-Type: application/json
-
-    [
-        {
-            args: {
-                channel_identifier: "0xce2283dd884aeec753d534968683193bdfb8f92d3e134a992a9b43ee0dd4a613",
-                participant1: "0x3C46570896F3eC1323280Df466716d1076a7162B",
-                participant2: "0x13AE1c7fb262be079d7850d435D75a9bFC141b8e",
-                settle_timeout: 600
-            },
-            event: "ChannelOpened",
-            logIndex: 6,
-            transactionIndex: 10,
-            transactionHash: "0x021d0cc04a1e2aa182b38c5d20396b1b3a5aa1a2da255c0fa006d67d0fd1f5d8",
-            address: "0x7692624c0C43285D51c0DdDfb2A6388f5002762E",
-            blockHash: "0x5249788b4d34b9f6104f33aa1d8b6dab254adc0c038501ca8e974acb46e75fa3",
-            block_number: 3750320
-        },
-        {
-            args: {
-                channel_identifier: "0xcc89e8554f9031bf23d5b2cf1fc26d3cd3dbde4ebbcbf7248a51432d5bc8916c",
-                participant1: "0x7A664079423fa25B87014EB53282F34c7AC7B87E",
-                participant2: "0x000D91Cf263a11F9BfCeE3752E5B03FC1196CE98",
-                settle_timeout: 500
-            },
-            event: "ChannelOpened",
-            logIndex: 9,
-            transactionIndex: 17,
-            transactionHash: "0x60c7c4480b5d3d0d7f94f42ad70f77a2b44613b3eb001503272f758613893370",
-            address: "0x7692624c0C43285D51c0DdDfb2A6388f5002762E",
-            blockHash: "0xce6741d45439abfcf8a3af0dde480e9b2bf17a61a1bec52a99e946f5921c4278",
-            block_number: 3750140
-        }, ...
-    ]
-
-   :statuscode 200: For successful query
-   :statuscode 404: The given token address is not a valid eip55-encoded Ethereum address or does not exist
-   :statuscode 409: If the given block number or token_address arguments are invalid
-   :statuscode 500: Internal Raiden node error
-
-.. http:get:: /api/(version)/_debug/blockchain_events/payment_networks/(token_address)/channels/(partner_address)
-
-   Query for ``blockchain_events`` tied to all the channels which are part of the token network.
-   If the partner_address is not provided it will show the events for all the channels.
-
-   **Example Request**:
-
-   .. http:example:: curl wget httpie python-requests
-
-      GET /api/1/_debug/blockchain_events/payment_networks/0x0f114A1E9Db192502E7856309cc899952b3db1ED/channels HTTP/1.1
-      Host: localhost:5001
-
-  **Example Response**:
-
-  .. sourcecode:: http
-
-     HTTP/1.1 200 OK
-     Content-Type: application/json
-
-    [
-        {
-            args: {
-                channel_identifier: "0xa152038763d73b05df7b036f477236b527ad14a249e4077fb4048d845226ac43",
-                participant1_amount: 60,
-                participant2_amount: 955
-            },
-            event: "ChannelSettled",
-            logIndex: 3,
-            transactionIndex: 2,
-            transactionHash: "0x6460c83a8005b3c04179e4d63817d7c5877e0d3ed514a60b25cfd8368330d7f4",
-            address: "0x7692624c0C43285D51c0DdDfb2A6388f5002762E",
-            blockHash: "0x988abf5d672a9d6e07a2210ca5f4391bf9ef38e65896457f1bf95024d4f172f0",
-            block_number: 3694882
-        }, ...
-    ]
 
 
-  **Example Request**:
-
-   .. http:example:: curl wget httpie python-requests
-
-      GET /api/1/_debug/blockchain_events/payment_networks/0x0f114A1E9Db192502E7856309cc899952b3db1ED/channels/0x82641569b2062B545431cF6D7F0A418582865ba7 HTTP/1.1
-      Host: localhost:5001
-
-  **Example Response**:
-
-  .. sourcecode:: http
-
-     HTTP/1.1 200 OK
-     Content-Type: application/json
-
-    [
-        {
-            args: {
-                channel_identifier: "0xa152038763d73b05df7b036f477236b527ad14a249e4077fb4048d845226ac43",
-                participant1: "0x82641569b2062B545431cF6D7F0A418582865ba7",
-                participant2: "0x8A0cE8bDA200D64d858957080bf7eDDD3371135F",
-                settle_timeout: 600
-            },
-            event: "ChannelOpened",
-            logIndex: 1,
-            transactionIndex: 1,
-            transactionHash: "0x6c1ea37c2d401244e336863a2c7e149a2b364655b6423af472e48044878db107",
-            address: "0x7692624c0C43285D51c0DdDfb2A6388f5002762E",
-            blockHash: "0xcc88f89b3278b7abcb49eeabfe055df5de60449eac5876e77ebf0fcb7ab968f8",
-            block_number: 3694177
-        }, ...
-    ]
-
-  :statuscode 200: For successful query
-  :statuscode 404:
-   - The given token and / or partner addresses are not valid eip55-encoded Ethereum addresses, or
-   - The channel for the given partner does not exist
-  :statuscode 409: If the given block number argument is invalid
-  :statuscode 500: Internal Raiden node error
-
-.. http:get:: /api/1/payments/(token_address)/(target_address)
+.. http:get:: /api/v1/payments/(token_address)/(target_address)
 
      Query the payment history. This includes successful (EventPaymentSentSuccess) and failed (EventPaymentSentFailed) sent payments as well as received payments (EventPaymentReceivedSuccess).
      ``token_address`` and ``target_address`` are optional and will filter the list of events accordingly.
@@ -807,7 +688,7 @@ The format of ``log_time`` is ISO8601 with milliseconds.
 
     .. http:example:: curl wget httpie python-requests
 
-       GET /api/1/payments/0x0f114A1E9Db192502E7856309cc899952b3db1ED/0x82641569b2062B545431cF6D7F0A418582865ba7  HTTP/1.1
+       GET /api/v1/payments/0x0f114A1E9Db192502E7856309cc899952b3db1ED/0x82641569b2062B545431cF6D7F0A418582865ba7  HTTP/1.1
        Host: localhost:5001
 
     **Example Response**:
@@ -817,87 +698,31 @@ The format of ``log_time`` is ISO8601 with milliseconds.
       HTTP/1.1 200 OK
       Content-Type: application/json
 
-     [
-         {
-             event: "EventPaymentReceivedSuccess",
-             amount: 5,
-             initiator: "0x82641569b2062B545431cF6D7F0A418582865ba7",
-             identifier: 1,
-             log_time: "2018-10-30T07:03:52.193"
-         },
-         {
-             event: "EventPaymentSentSuccess",
-             amount: 35,
-             target: "0x82641569b2062B545431cF6D7F0A418582865ba7",
-             identifier: 2,
-             log_time: "2018-10-30T07:04:22.293"
-         },
-         {
-             event: "EventPaymentSentSuccess",
-             amount: 20,
-             target: "0x82641569b2062B545431cF6D7F0A418582865ba7"
-             identifier: 3,
-             log_time: "2018-10-30T07:10:13.122"
-         }
-     ]
+      [
+          {
+              "event": "EventPaymentReceivedSuccess",
+              "amount": 5,
+              "initiator": "0x82641569b2062B545431cF6D7F0A418582865ba7",
+              "identifier": 1,
+              "log_time": "2018-10-30T07:03:52.193"
+          },
+          {
+              "event": "EventPaymentSentSuccess",
+              "amount": 35,
+              "target": "0x82641569b2062B545431cF6D7F0A418582865ba7",
+              "identifier": 2,
+              "log_time": "2018-10-30T07:04:22.293"
+          },
+          {
+              "event": "EventPaymentSentSuccess",
+              "amount": 20,
+              "target": "0x82641569b2062B545431cF6D7F0A418582865ba7"
+              "identifier": 3,
+              "log_time": "2018-10-30T07:10:13.122"
+          }
+      ]
 
   :statuscode 200: For successful query
   :statuscode 404: The given token and / or partner addresses are not valid eip55-encoded Ethereum addresses
   :statuscode 409: If the given block number or token_address arguments are invalid
-  :statuscode 500: Internal Raiden node error
-
-
-Now for the internal Raiden events:
-
-.. http:get:: /api/(version)/_debug/raiden_events
-
-   Query for Raiden internal node events.
-
-   **Example Request**:
-
-   .. http:example:: curl wget httpie python-requests
-
-      GET /api/1/_debug/raiden_events HTTP/1.1
-      Host: localhost:5001
-
-  **Example Response**:
-
-  .. sourcecode:: http
-
-     HTTP/1.1 200 OK
-     Content-Type: application/json
-
-    [{
-        'event': 'SendLockedTransfer',
-        'log_time': '2018-09-07T14:49:18.852',
-        'message_identifier': 17084435898865420397,
-        'recipient': '0x636f37d785257d919931acff318f70fb7da4f903',
-        'transfer': '<LockedTransferUnsignedState id:43 '
-                      'token:0xb2eef045d5c05cfc9b351a59cc5c4597de6487e2 '
-                      'balance_proof:<BalanceProofUnsignedState nonce:1 '
-                      'transferred_amount:0 locked_amount:200 locksroot:e12a619f '
-                      'token_network:edf18937 channel_identifier:1 chain_id: 337> '
-                      'lock:<HashTimeLockState amount:200 expiration:56 '
-                      'secrethash:8747cef6> '
-                      'target:0x636f37d785257d919931acff318f70fb7da4f903>'
-     },
-     {
-        'event': 'SendSecretReveal',
-        'log_time': '2018-09-07T14:49:20.351,
-        'message_identifier': 9182020688704924936,
-        'recipient': '0x636f37d785257d919931acff318f70fb7da4f903',
-        'secret': '0xcefe6d325fc2b01f47d303417ddd14d788a31c0b078610b427a85b2141bc514d',
-        'secrethash': '0x8747cef6a143f0bd123070ea75479f7e09a451a08ce731fb572211d8bda11b3a'
-     },
-     {
-        'amount': 200,
-        'event': 'EventPaymentSentSuccess',
-        'identifier': 43,
-        'log_time': '2018-09-07T14:49:23.664',
-        'payment_network_identifier': '0x41ac2632d8c233784783e50ec6678cdc43f74c76',
-        'target': '0x636F37d785257D919931ACFf318F70fB7Da4f903',
-        'token_network_identifier': '0xedf18937be4064dfbe3e307bd193e812b723ac6f'
-     }, ...]
-
-  :statuscode 200: For successful query
   :statuscode 500: Internal Raiden node error

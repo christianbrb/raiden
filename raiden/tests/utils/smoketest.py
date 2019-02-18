@@ -73,7 +73,7 @@ def ensure_executable(cmd):
 
 def run_restapi_smoketests():
     """Test if REST api works. """
-    url = 'http://localhost:{port}/api/1/channels'.format(port=5001)
+    url = 'http://localhost:{port}/api/v1/channels'.format(port=5001)
 
     response = requests.get(url)
     assert response.status_code == HTTPStatus.OK
@@ -191,12 +191,12 @@ def get_private_key(keystore):
     return accmgr.get_privkey(addresses[0], DEFAULT_PASSPHRASE)
 
 
-def setup_testchain_and_raiden(transport, matrix_server, print_step):
+def setup_testchain_and_raiden(transport, matrix_server, print_step, contracts_version):
     print_step('Starting Ethereum node')
 
     ensure_executable('geth')
 
-    free_port = get_free_port('127.0.0.1', 27854)
+    free_port = get_free_port('127.0.0.1')
     rpc_port = next(free_port)
     p2p_port = next(free_port)
     base_datadir = os.environ['RST_DATADIR']
@@ -243,14 +243,12 @@ def setup_testchain_and_raiden(transport, matrix_server, print_step):
     try:
         # the marker is hardcoded in the genesis file
         random_marker = remove_0x_prefix(encode_hex(b'raiden'))
-        geth_wait_and_check(web3, [], random_marker)
-
-        for process in processes_list:
-            process.poll()
-
-            if process.returncode is not None:
-                raise ValueError(f'geth process failed with exit code {process.returncode}')
-
+        geth_wait_and_check(
+            web3=web3,
+            accounts_addresses=[],
+            random_marker=random_marker,
+            processes_list=processes_list,
+        )
     except (ValueError, RuntimeError) as e:
         # If geth_wait_and_check or the above loop throw an exception make sure
         # we don't end up with a rogue geth process running in the background
@@ -261,8 +259,9 @@ def setup_testchain_and_raiden(transport, matrix_server, print_step):
     print_step('Deploying Raiden contracts')
 
     client = JSONRPCClient(web3, get_private_key(keystore))
-    # for smoketest use the precompiled contracts
-    contract_manager = ContractManager(contracts_precompiled_path())
+    contract_manager = ContractManager(
+        contracts_precompiled_path(contracts_version),
+    )
 
     contract_addresses = deploy_smoketest_contracts(
         client=client,
@@ -282,12 +281,12 @@ def setup_testchain_and_raiden(transport, matrix_server, print_step):
         registry_address=contract_addresses[CONTRACT_TOKEN_NETWORK_REGISTRY],
         contract_manager=contract_manager,
     )
-    registry.add_token(to_canonical_address(token.contract.address))
+    registry.add_token(
+        token_address=to_canonical_address(token.contract.address),
+        given_block_identifier='latest',
+    )
 
     print_step('Setting up Raiden')
-
-    if matrix_server == 'auto':
-        matrix_server = 'http://localhost:8008'
 
     endpoint_registry_contract_address = to_checksum_address(
         contract_addresses[CONTRACT_ENDPOINT_REGISTRY],

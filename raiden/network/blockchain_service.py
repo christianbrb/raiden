@@ -1,5 +1,4 @@
 import gevent
-from cachetools.func import ttl_cache
 from eth_utils import is_binary_address
 from gevent.lock import Semaphore
 
@@ -12,8 +11,13 @@ from raiden.network.proxies import (
     TokenNetworkRegistry,
 )
 from raiden.network.rpc.client import JSONRPCClient
-from raiden.utils import privatekey_to_address
-from raiden.utils.typing import Address, ChannelID, T_ChannelID
+from raiden.utils.typing import (
+    Address,
+    ChannelID,
+    PaymentNetworkID,
+    T_ChannelID,
+    TokenNetworkAddress,
+)
 from raiden_contracts.contract_manager import ContractManager
 
 
@@ -23,9 +27,8 @@ class BlockChainService:
 
     def __init__(
             self,
-            privatekey_bin: bytes,
             jsonrpc_client: JSONRPCClient,
-            contract_manager: ContractManager = None,
+            contract_manager: ContractManager,
     ):
         self.address_to_discovery = dict()
         self.address_to_secret_registry = dict()
@@ -35,9 +38,10 @@ class BlockChainService:
         self.identifier_to_payment_channel = dict()
 
         self.client = jsonrpc_client
-        self.private_key = privatekey_bin
-        self.node_address = privatekey_to_address(privatekey_bin)
         self.contract_manager = contract_manager
+
+        # Ask for the network id only once and store it here
+        self.network_id = int(self.client.web3.version.network)
 
         self._token_creation_lock = Semaphore()
         self._discovery_creation_lock = Semaphore()
@@ -46,14 +50,15 @@ class BlockChainService:
         self._secret_registry_creation_lock = Semaphore()
         self._payment_channel_creation_lock = Semaphore()
 
+    @property
+    def node_address(self) -> Address:
+        return self.client.address
+
     def block_number(self) -> int:
         return self.client.block_number()
 
     def get_block(self, block_identifier):
         return self.client.web3.eth.getBlock(block_identifier=block_identifier)
-
-    def inject_contract_manager(self, contract_manager: ContractManager):
-        self.contract_manager = contract_manager
 
     def is_synced(self) -> bool:
         result = self.client.web3.eth.syncing
@@ -96,8 +101,11 @@ class BlockChainService:
         return self.client.web3.eth.getBlock(block_number, False)
 
     def next_block(self) -> int:
+        target_block_number = self.block_number() + 1
+        self.wait_until_block(target_block_number=target_block_number)
+
+    def wait_until_block(self, target_block_number):
         current_block = self.block_number()
-        target_block_number = current_block + 1
 
         while current_block < target_block_number:
             current_block = self.block_number()
@@ -143,13 +151,13 @@ class BlockChainService:
             if address not in self.address_to_token_network_registry:
                 self.address_to_token_network_registry[address] = TokenNetworkRegistry(
                     jsonrpc_client=self.client,
-                    registry_address=address,
+                    registry_address=PaymentNetworkID(address),
                     contract_manager=self.contract_manager,
                 )
 
         return self.address_to_token_network_registry[address]
 
-    def token_network(self, address: Address) -> TokenNetwork:
+    def token_network(self, address: TokenNetworkAddress) -> TokenNetwork:
         if not is_binary_address(address):
             raise ValueError('address must be a valid address')
 
@@ -157,7 +165,7 @@ class BlockChainService:
             if address not in self.address_to_token_network:
                 self.address_to_token_network[address] = TokenNetwork(
                     jsonrpc_client=self.client,
-                    manager_address=address,
+                    token_network_address=address,
                     contract_manager=self.contract_manager,
                 )
 
@@ -179,7 +187,7 @@ class BlockChainService:
 
     def payment_channel(
             self,
-            token_network_address: Address,
+            token_network_address: TokenNetworkAddress,
             channel_id: ChannelID,
     ) -> PaymentChannel:
 
@@ -201,8 +209,3 @@ class BlockChainService:
                 )
 
         return self.identifier_to_payment_channel[dict_key]
-
-    @property
-    @ttl_cache(ttl=30)
-    def network_id(self) -> int:
-        return int(self.client.web3.version.network)

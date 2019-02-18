@@ -5,10 +5,10 @@ import re
 import sys
 import time
 from itertools import zip_longest
-from typing import Iterable, List, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import gevent
-from coincurve import PrivateKey
+from eth_keys import keys
 from eth_utils import (
     add_0x_prefix,
     decode_hex,
@@ -23,11 +23,16 @@ import raiden
 from raiden import constants
 from raiden.exceptions import InvalidAddress
 from raiden.utils import typing
-from raiden_libs.utils.signing import sha3
+from raiden.utils.signing import sha3  # noqa
 
 
 def random_secret():
-    return os.urandom(32)
+    """ Return a random 32 byte secret except the 0 secret since it's not accepted in the contracts
+    """
+    while True:
+        secret = os.urandom(32)
+        if secret != constants.EMPTY_HASH:
+            return secret
 
 
 def ishash(data: bytes) -> bool:
@@ -42,14 +47,20 @@ def is_supported_client(
         client_version: str,
 ) -> typing.Tuple[bool, typing.Optional[constants.EthClient]]:
     if client_version.startswith('Parity'):
+        matches = re.search(r'//v(\d+)\.(\d+)\.(\d+)', client_version)
+        if matches is None:
+            return False, None
         major, minor, patch = [
-            int(x) for x in re.search(r'//v(\d+)\.(\d+)\.(\d+)', client_version).groups()
+            int(x) for x in matches.groups()
         ]
         if (major, minor, patch) >= (1, 7, 6):
             return True, constants.EthClient.PARITY
     elif client_version.startswith('Geth'):
+        matches = re.search(r'/v(\d+)\.(\d+)\.(\d+)', client_version)
+        if matches is None:
+            return False, None
         major, minor, patch = [
-            int(x) for x in re.search(r'/v(\d+)\.(\d+)\.(\d+)', client_version).groups()
+            int(x) for x in matches.groups()
         ]
         if (major, minor, patch) >= (1, 7, 2):
             return True, constants.EthClient.GETH
@@ -69,9 +80,9 @@ def address_checksum_and_decode(addr: str) -> typing.Address:
     if not is_checksum_address(addr):
         raise InvalidAddress('Address must be EIP55 checksummed')
 
-    addr = decode_hex(addr)
-    assert len(addr) in (20, 0)
-    return addr
+    addr_bytes = decode_hex(addr)
+    assert len(addr_bytes) in (20, 0)
+    return typing.Address(addr_bytes)
 
 
 def data_encoder(data: bytes, length: int = 0) -> str:
@@ -118,23 +129,11 @@ def privatekey_to_publickey(private_key_bin: bytes) -> bytes:
     """ Returns public key in bitcoins 'bin' encoding. """
     if not ishash(private_key_bin):
         raise ValueError('private_key_bin format mismatch. maybe hex encoded?')
-    private_key = PrivateKey(private_key_bin)
-    return private_key.public_key.format(compressed=False)
-
-
-def publickey_to_address(publickey: bytes) -> bytes:
-    return sha3(publickey[1:])[12:]
+    return keys.PrivateKey(private_key_bin).public_key.to_bytes()
 
 
 def privatekey_to_address(private_key_bin: bytes) -> typing.Address:
-    return publickey_to_address(privatekey_to_publickey(private_key_bin))
-
-
-def privtopub(private_key_bin: bytes) -> bytes:
-    """ Returns public key in bitcoins 'bin_electrum' encoding. """
-    raw_pubkey = privatekey_to_publickey(private_key_bin)
-    assert raw_pubkey.startswith(b'\x04')
-    return raw_pubkey[1:]
+    return keys.PrivateKey(private_key_bin).public_key.to_canonical_address()
 
 
 def get_project_root() -> str:
@@ -149,17 +148,7 @@ def get_relative_path(file_name) -> str:
     return file_name.replace(prefix + '/', '')
 
 
-def get_contract_path(contract_name: str) -> str:
-    contract_path = os.path.join(
-        get_project_root(),
-        'smart_contracts',
-        contract_name,
-    )
-    assert os.path.isfile(contract_path)
-    return get_relative_path(contract_path)
-
-
-def get_system_spec():
+def get_system_spec() -> typing.Dict[str, str]:
     """Collect information about the system and installation.
     """
     import pkg_resources
@@ -181,7 +170,11 @@ def get_system_spec():
     try:
         version = pkg_resources.require(raiden.__name__)[0].version
     except (pkg_resources.ContextualVersionConflict, pkg_resources.DistributionNotFound):
-        version = None
+        raise RuntimeError(
+            'Cannot detect Raiden version. Did you do python setup.py?  '
+            'Refer to https://raiden-network.readthedocs.io/en/latest/'
+            'overview_and_guide.html#for-developers',
+        )
 
     system_spec = {
         'raiden': version,
@@ -256,18 +249,19 @@ def merge_dict(to_update: dict, other_dict: dict):
             to_update[key] = value
 
 
-def optional_address_to_string(address: typing.Address = None) -> typing.Optional[str]:
+def optional_address_to_string(
+        address: Optional[Union[typing.Address, typing.TokenAddress]] = None,
+) -> typing.Optional[str]:
     if address is None:
         return None
 
     return to_checksum_address(address)
 
 
-def safe_gas_limit(*estimates) -> int:
-    """ Calculates a safe gas limit for a number of estimates.
-
-    Even though it's not documented, it does happen that estimate_gas returns `None`.
-    This function takes care of this and adds a security margin as well.
+def safe_gas_limit(*estimates: int) -> int:
+    """ Calculates a safe gas limit for a number of gas estimates
+    including a security margin
     """
-    calculated_limit = max(gas or 0 for gas in estimates)
+    assert None not in estimates, 'if estimateGas returned None it should not reach here'
+    calculated_limit = max(estimates)
     return int(calculated_limit * constants.GAS_FACTOR)

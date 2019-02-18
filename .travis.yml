@@ -4,8 +4,6 @@ stages:
   - name: test
   - name: integration
     if: (type = cron OR NOT commit_message =~ /\[no ci integration\]/) AND NOT commit_message =~ /\[ci nightly\]/ AND tag IS NOT present
-  - name: deploy
-    if: type = cron OR commit_message =~ /\[ci nightly\]/ OR tag IS present AND tag =~ /^v[\d]+\.[\d]+\.[\d]+/
 
 templates:
   job-template-test: &job-template-test
@@ -18,6 +16,8 @@ templates:
       - .travis/install.sh
     script:
       - .travis/run.sh
+    after_success:
+      - if [[ ${RUN_COVERAGE} = run_coverage ]]; then coveralls; else true; fi
     sudo: true
 
   job-template-integration: &job-template-integration
@@ -27,23 +27,18 @@ dist: xenial
 sudo: false
 language: python
 python:
-  - '3.6'
+  - '3.7'
 
 env:
   global:
-  - GETH_URL_LINUX='https://gethstore.blob.core.windows.net/builds/geth-linux-amd64-1.8.13-225171a4.tar.gz'
-  - GETH_URL_MACOS='https://gethstore.blob.core.windows.net/builds/geth-darwin-amd64-1.8.13-225171a4.tar.gz'
-  - GETH_VERSION='1.8.13'
+  - GETH_URL_LINUX='https://gethstore.blob.core.windows.net/builds/geth-linux-amd64-1.8.22-7fa3509e.tar.gz'
+  - GETH_URL_MACOS='https://gethstore.blob.core.windows.net/builds/geth-darwin-amd64-1.8.22-7fa3509e.tar.gz'
+  - GETH_VERSION='1.8.22'
   - SOLC_URL_LINUX='https://github.com/ethereum/solidity/releases/download/v0.4.23/solc-static-linux'
   - SOLC_URL_MACOS='https://www.dropbox.com/s/4amq3on2ds1dq36/solc_0.4.23?dl=0'
   - SOLC_VERSION='v0.4.23'
+  - RUN_COVERAGE=$(.travis/coverage.sh)
   - COVERALLS_PARALLEL=true
-  # `GITHUB_ACCESS_TOKEN` - read only access token to increase GitHub API rate limits
-  # Format: `GITHUB_ACCESS_TOKEN=<username>:<token>`
-  - secure: "riRxis2NVGAjgl3jXOnMCXCpfWhOK7Q5B7CCRC0xPk+CyuHEOjIAvmueZwCrWt6i4jjlPeqpsLzDp7j56QG94hfGAs1sBq7aZQ6qVSqjCsj5IYPdAYRq8nivgHWjQuPoDWKsKOcEw44lUXUrWXvOf9T+AM+numz/feISdchqFr+OhVYv0g8mDQlFwAMcIwu4DpazECV/LlQxFR3iP7GDF6tU7NDx5uzCYzRU2vg4sSZWJJLHLs9gCpAqlEiKL3n5QhonQwJ7qbgOTlJaJNrI1qhOw29LjcVqIMxkM1VJ1hx61e55WzM/OquijMJCNrNVCQ8m3RP//bxoGoMrj9FFI+8qT9TSPjvSXWyZQxak30zZE7szF1Zfu/Cd9f56D/28leQ+KuJh8SvK53x04eNxn0y+amSElHlL1NgOJ86XNTdZM6xcYGEbt6Fy0Ia5CyGkUUw+gsLVAjSghC/iQsZgmXyjSsDCRBpYO79mR2r3S240Zb1DIhi9OX5W1IO6DOGlzjOdrRehmMZ2T4trM+Rz0q06g9D1Wxn69IP/wYACgydO0B55BjD6bEtspot/yh7aHH8MFEqeYLpskXwg4CjZ6HMfccfo/KM3kElVQpFQO3JCguhCX8zb3P4o49pInr6icDMBQfnDWkSDi1MCY8GnbTyB9dL1T9J7bTje7vaCvdk="
-  - DO_S3_ACCESS_KEY=MK22XIZDUYA3EWBHGAKD
-  # DO_S3_SECRET_KEY - used to upload nightlies to our Digital Ocean space
-  - secure: "VWk0BofxSK5P9CYFQ7gn14pROSMepryDb7dHTuLa3ZjM0aIQyQoWTUlmbir2kmXBveob55IIGZQCGX+ez7qCgMR8+RQx+9ejJxpRZCKzFDeQKQf8xVbL6IUB6yQbOL832LCIR4+t8OfLWxCHPqIpNSF0WR9OlUNxsyZY41aIN3YdKi0UojKJrPIloTSMrcwQISmY0d45nbCJwaTtcjn8JJ4uJHJ6lynyj1W+RlQ5nFDiuFAOibmQPZHZozNqiu6WblaKlm7aMvAiB9RrzPn8dIYNaMUaRgw+UPJpb85KjICPzJ1w/24zKZf5L5U02yFRUkrEMUuS8GmYQZwLuTM3o8dds4KiMX+3bXoqMj/7pIv1hYuhbbZmYu4sEDwrLOSWO+bnatV7ZijTA0HYcLDXPASicl+NfdHbOwjfApbkZ97abYFbD8Cid5l+7KEMUaD1E3n2ItwOADY38xfg++l8SzyS4stmQSI39uMdLPSh2bBS2kFUYC+0i1Ooh2XSvuZmnWLBNbLll1lWufErqdRE5QxkIZl+ld7M1Re4kQSA8hoovYy63EiQsEsx/n+j9MvhwFVY8juSmtDAWyhXaArgsrgJTFG4c+IQOppWxjT9zF5JqNQnJtTLRHkuLwnvPoEGL8ysq4+xh7iYsmK8PQih8WtQc9MeIro/DDad0Sn0BD0="
 cache:
   pip: true
   directories:
@@ -54,6 +49,8 @@ notifications:
   webhooks:
   # Chat notification
   - secure: IXBsyQtH29Vkh+Pe2exrbE3L8FJMQFqJ8ZRxkACts7cQtB8Iz1vyjWg9nYE9ZuCj/JWEeMZd/09JvwwKUj8ZEzwj59gFwVQFwTAxJbiDLRsn7WpdI5Q2fQ9ZPZIAbPo/mJejeHC+z3d5UgY72hbhqWuPJAa4ApWWKE5mPFUIr9uxgs01ReWs/y5HaPawQkSQAKVWWsS5R52Oyr9CYQNbfqfWcoLvzdiIZpsBi2r4ZK3NGrBZPGo4b+PkDkWjuBhMJ0FVABFCJT/bT2ORFsmsCDwZ4I3vOrKtJGDybmwONZqr0ymfYo1lbcUp0mE0zJ0ApyRtLqEFiTzaQqenlAZmBAtpDZVvpxFuDwZgFxafpNutO3Aj3Xbfe+aaooPfHA7SoxmxG/3gWY+OyaME8EDePfBHM0c1gGsNHmbPLt8k0lmwYKlNTFtFFyRAbL3700j19utkGroOK6CUYbed9YD96UehQTj7HN8rpLTZzSMh39c1JHVyqxsUZKkhQgY4GPgx2RAIiCVrwc6wN3Ebtwft0hA2UhvDodsc/qBAyz/YnSp2oKZKagLy5747torZybtNOGKCaV2fT3mSTxV2UNwPJ/N94dlTquJNx3StHT0IqD3Kfo5HYKJKHeri6lttTDul3rjAs1xxB2aAMutsyg7dRbBMmuKlK9gAtoS3UKthQdk=
+  # coveralls 'parallel build done' trigger
+  - secure: "eFjTor3HH4OiMkBYJAbiri09AV86KbMoPi9khESCOTicM/AnofrAdObguxa4v/s1d2AXbpaEpvy59R2ZaocucwSnw2UoCa/VgTPZf8FOazShn001g0PN2LS6hQFxCTFDowOHZKx9P2jqoUf17rtUDDbGfin6L/aaykJ9MCXxJKY+jlf8roDGArbaXHqntkhphNYuFsmaHHqQqjuRUdCB+Ys8BAQavsePWpyJ0kjlPo4UuSasn6OpRnrz7E6K/3tziFJB0l4hTghU2wzDYF9V+eF9jIyoqoUkcgqTeyjjAO2Rf1If20gQerf09wC8xl965VLgzZ/oQCp4WpIFzorJielLwdE498N0S/gZ0GktqO3jPfS97JaH2+ZkSb2yUdTSLxTHCva9mgqpnQAK8AOEndjMUupbc0UXe440MJzX1wT6IaQ2IwibRwADWAgUqOu5XSaV+rWPvKbBl54NwO7yAVxV20PbKqJMFAYiuVKnRRqnLDhKsZpPxEf0nfrbu/VARKeVuWEg6LkaBFPA4r+EjCQFhT/hwB/DFjoYSCf5PpFcvwL1Tl2gpQcxFhDHKHAITLwYCVCiQHkG1MdQt4fTaBUEm+BcmIbZ4FVfTYbCdys7Hge6RTKxVl8Xe7jDgibHXF4wTPHR81crX9Xk3nUm6VwJzluaTUi1OKj8Nathqbk="
 
 jobs:
   include:
@@ -63,6 +60,7 @@ jobs:
       script:
         - git rev-parse HEAD
         - make lint
+        - make mypy
 
     - stage: test
       <<: *job-template-test
@@ -84,6 +82,12 @@ jobs:
       env:
         - TEST='raiden/tests/unit'
 
+    - stage: test
+      <<: *job-template-test
+      env:
+        - TEST='raiden/tests/fuzz'
+        - TRANSPORT_OPTIONS='--hypothesis-show-statistics'
+
     - stage: integration
       <<: *job-template-integration
       if: (type = cron OR NOT commit_message =~ /\[ci / OR commit_message =~ /\[ci integration-general\]/)
@@ -96,7 +100,7 @@ jobs:
       if: (type = cron OR NOT commit_message =~ /\[ci / OR commit_message =~ /\[ci integration-general\]/)
       env:
         - TEST='raiden/tests/integration --ignore=raiden/tests/integration/transfer --ignore=raiden/tests/integration/long_running --ignore=raiden/tests/integration/api --ignore=raiden/tests/integration/contracts --ignore=raiden/tests/integration/cli'
-        - TRANSPORT_OPTIONS='--transport=matrix --local-matrix=${HOME}/.bin/run_synapse.sh'
+        - TRANSPORT_OPTIONS='--transport=matrix'
         - RUN_SYNAPSE=1
 
     - stage: integration
@@ -111,7 +115,7 @@ jobs:
       if: (type = cron OR NOT commit_message =~ /\[ci / OR commit_message =~ /\[ci integration-transfer\]/)
       env:
         - TEST='raiden/tests/integration/transfer'
-        - TRANSPORT_OPTIONS='--transport=matrix --local-matrix=${HOME}/.bin/run_synapse.sh'
+        - TRANSPORT_OPTIONS='--transport=matrix'
         - RUN_SYNAPSE=1
 
     - stage: integration
@@ -120,14 +124,16 @@ jobs:
       env:
         - TEST='raiden/tests/integration/long_running'
         - TRANSPORT_OPTIONS='--transport=udp'
+        - RUN_COVERAGE=no_coverage
 
     - stage: integration
       <<: *job-template-integration
       if: (type = cron OR NOT commit_message =~ /\[ci / OR commit_message =~ /\[ci integration-long-running\]/)
       env:
         - TEST='raiden/tests/integration/long_running'
-        - TRANSPORT_OPTIONS='--transport=matrix --local-matrix=${HOME}/.bin/run_synapse.sh'
+        - TRANSPORT_OPTIONS='--transport=matrix'
         - RUN_SYNAPSE=1
+        - RUN_COVERAGE=no_coverage
 
     - stage: integration
       <<: *job-template-integration
@@ -147,7 +153,7 @@ jobs:
       if: (type = cron OR NOT commit_message =~ /\[ci / OR commit_message =~ /\[ci integration-api\]/)
       env:
         - TEST='raiden/tests/integration/api'
-        - TRANSPORT_OPTIONS='--transport=matrix --local-matrix=${HOME}/.bin/run_synapse.sh'
+        - TRANSPORT_OPTIONS='--transport=matrix'
         - RUN_SYNAPSE=1
 
     - stage: integration
@@ -155,109 +161,5 @@ jobs:
       if: (type = cron OR NOT commit_message =~ /\[ci / OR commit_message =~ /\[ci integration-cli\]/)
       env:
         - TEST='raiden/tests/integration/cli'
-        - TRANSPORT_OPTIONS='--transport=matrix --local-matrix=${HOME}/.bin/run_synapse.sh'
+        - TRANSPORT_OPTIONS='--transport=matrix'
         - RUN_SYNAPSE=1
-
-    - stage: deploy
-      before_install:
-        - mkdir -p $HOME/.bin
-        - export PATH=$PATH:$HOME/.bin
-        # Shallow clones break setuptools_scm. See: https://github.com/pypa/setuptools_scm/issues/93
-        - git fetch --unshallow
-        - git pull --tags
-        - .travis/before_install.sh
-      install: .travis/install.sh
-      script:
-        - source .travis/set_tag.sh
-        - REPO=${TRAVIS_REPO_SLUG} RAIDENVERSION=${TRAVIS_COMMIT} make bundle-docker
-        - tar -C build -xvzf build/archive/raiden-${ARCHIVE_TAG}-linux.tar.gz
-        - echo raiden-${ARCHIVE_TAG}-linux.tar.gz > build/archive/_LATEST-linux.txt
-        # Make sure the produced binary works
-        # Skip smoketest until raiden-network/raiden#2384 is fixed
-        #- dist/raiden-${ARCHIVE_TAG}-macOS smoketest
-
-      deploy:
-      - provider: releases
-        api_key:
-          secure: O85yltVQ1OacJQoNQWDJqOsXuSb+x7IMJTtUPuFM5iAOIGLmzhk0/qzJInixCGbAfWMYT4wTjA6OfxeiAWYzC5pCgqedZOsjp+8bXjn2Ek443Y+FBay3g38ebn3KBFBat3iMOamdrFSGTENugdG418GdK6yFVYpyCCUJXWLBcBUPOi7BlakI8TkznsaCad7OVRrPfMHWRe11WI3b4fajPnH/M7JRdDpT5GTisEchwKzYHnBttYySDZcQS3gtAEK7Srg9AkdEYCW3DOkmW4DeEgrQAQVcHHAV7eZREC1M3SrsrCotEqhEmIy29akOVKpOZtYWMxNFIsScDt39Y2hJLXRo1NjN0RBgIOg+Asl3B1cuK3Zfzc30r+Fyfkl9yFXpC35xddh2dHz5PFyssmtVZMEdxECtQT0DN08FB1JNdBbz3tfNw84IvR2ymYcQdRFWQM51rBUjUGspzDftAdITKkk3Z67jgYnaVvL0iBMbuuFjZDs8375IjIo7hxJ5UY7YWLV8Ic2r89wq5Dw7EsL5cyc4BVfj1kByZ1BJ6sZEKaqVdDdEc1Bv2/SYk6Da/muPB9gYK8Baw1gumLvrVS65EUVvwGmnq0zKrKmvTLl0aNPRNInaOVOloK63HdOwJhiLRn50YfCARrX+5kKBIQxdtNtmfPmdYJ3cm5bNhaXQ8fs=
-        file: build/archive/raiden-*-linux.tar.gz
-        file_glob: true
-        skip_cleanup: true
-        on:
-          tags: true
-          repo: raiden-network/raiden
-          branch: master
-
-      - provider: script
-        skip_cleanup: true
-        script: .travis/upload_to_s3.sh $DO_S3_ACCESS_KEY $DO_S3_SECRET_KEY build/archive/ raiden-nightlies ams3.digitaloceanspaces.com
-        on:
-          repo: raiden-network/raiden
-          all_branches: true
-
-      - provider: pypi
-        skip_cleanup: true
-        user: raiden_pypi_automated
-        password:
-          secure: "OmiPc1z0Vx/ABOe78U9sfReVMrktJVzsC2/vi3yIQkCkocdihibLyS+yFXNww7+Sf8+SBWLg3OgvgbKkhX9jQADmeA7ZGJYrci+wIyu4YNHPyWpj7liDngJhjo7uCUoOgf9HrwjzfrOWYVh2H6+I4ylgRZ+Av9kj7MNzYlzhWhgqvQ1QJvTmJ7FlKBdINSr7ic7iu5I1S5pAJGMsKXcitXigJMlKk4XWqjuO1etLqalW1XYD005ueOg0r6dt3YmHYoo1S/CeTbPCj5lNcfHstRBSGbKU6Z61FfK7lSWPOgE2lZiDSnuIJQR130d7xtw5a8e31XvTsoQz2QuYJtxvjgXwRGdZnuMgs3F+APCJZobtS3Tt5A4jw/Rf2yKOimobWgNHSEOcspteTEn0VMeNIGuVWheDHLAMARU+sxjtCSbERi36UJFfVYwxVfayC0s1dlrUHZ7nqvo6OFIa1khtyPUFzAVjzU6FLlcvKuRQRwREyLrN/CeDL75xQecQj4fYq8BJ4qkcai6ZYQr6cCq3weL+dhl68lrfO48csJ9KG7hOHeKuYLIUgq4hfHkS1ZsptQpESzq79sIfGeRoHtpZCdM7yn9xgL+P7svEHhqVVExGS+zI5SZ6gtZMI8JTgMODTqktrhRmKvyk/jU20GfUhOG6SDQKOrHr45iLUJ5TSq8="
-        python: 3.6
-        distributions: sdist bdist_wheel
-        on:
-          tags: true
-          repo: raiden-network/raiden
-          branch: master
-
-    - stage: deploy
-      os: osx
-      language: generic
-      osx_image: xcode8.3
-      env: TEST=""
-      before_install:
-        - sysctl -n machdep.cpu.brand_string
-        - mkdir -p $HOME/.bin
-        - export PATH=$HOME/.bin:$HOME/Library/Python/3.6/bin:/usr/local/bin/:$PATH
-        # Shallow clones break setuptools_scm. See: https://github.com/pypa/setuptools_scm/issues/93
-        - git fetch --unshallow
-        - git pull --tags
-        - .travis/before_install.sh
-      install:
-        - .travis/install.sh
-        # pdbpp interferes with pyinstaller, uninstall it
-        - pip uninstall -y pdbpp
-      before_script:
-        - python setup.py build
-        - RAIDEN_NPM_MISSING_FATAL=1 python setup.py compile_webui
-      script:
-        - source .travis/set_tag.sh
-        - mkdir -p dist/archive
-        - pyinstaller --noconfirm --clean raiden.spec
-        - zip -9 --junk-paths dist/archive/raiden-${ARCHIVE_TAG}-macOS.zip dist/raiden*
-        - echo raiden-${ARCHIVE_TAG}-macOS.zip > dist/archive/_LATEST-macOS.txt
-        # Skip smoketest for now, because smoketest can't use anything from raiden.tests
-        #- dist/raiden-${ARCHIVE_TAG}-macOS smoketest
-        # "Fix" Travis issues #6307 #6522 #9486
-        - shell_session_update() { :; };
-      deploy:
-        - provider: releases
-          api_key:
-            secure: O85yltVQ1OacJQoNQWDJqOsXuSb+x7IMJTtUPuFM5iAOIGLmzhk0/qzJInixCGbAfWMYT4wTjA6OfxeiAWYzC5pCgqedZOsjp+8bXjn2Ek443Y+FBay3g38ebn3KBFBat3iMOamdrFSGTENugdG418GdK6yFVYpyCCUJXWLBcBUPOi7BlakI8TkznsaCad7OVRrPfMHWRe11WI3b4fajPnH/M7JRdDpT5GTisEchwKzYHnBttYySDZcQS3gtAEK7Srg9AkdEYCW3DOkmW4DeEgrQAQVcHHAV7eZREC1M3SrsrCotEqhEmIy29akOVKpOZtYWMxNFIsScDt39Y2hJLXRo1NjN0RBgIOg+Asl3B1cuK3Zfzc30r+Fyfkl9yFXpC35xddh2dHz5PFyssmtVZMEdxECtQT0DN08FB1JNdBbz3tfNw84IvR2ymYcQdRFWQM51rBUjUGspzDftAdITKkk3Z67jgYnaVvL0iBMbuuFjZDs8375IjIo7hxJ5UY7YWLV8Ic2r89wq5Dw7EsL5cyc4BVfj1kByZ1BJ6sZEKaqVdDdEc1Bv2/SYk6Da/muPB9gYK8Baw1gumLvrVS65EUVvwGmnq0zKrKmvTLl0aNPRNInaOVOloK63HdOwJhiLRn50YfCARrX+5kKBIQxdtNtmfPmdYJ3cm5bNhaXQ8fs=
-          file: dist/archive/raiden-*-macOS.zip
-          file_glob: true
-          skip_cleanup: true
-          on:
-            tags: true
-            repo: raiden-network/raiden
-            branch: master
-        - provider: script
-          script: .travis/update_formula.sh
-          skip_cleanup: true
-          on:
-            tags: true
-            repo: raiden-network/raiden
-            branch: master
-        - provider: script
-          script: .travis/upload_to_s3.sh "$DO_S3_ACCESS_KEY" "$DO_S3_SECRET_KEY" dist/archive/ raiden-nightlies ams3.digitaloceanspaces.com
-          skip_cleanup: true
-          on:
-            repo: raiden-network/raiden
-            all_branches: true

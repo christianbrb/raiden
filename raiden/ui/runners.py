@@ -25,7 +25,7 @@ from raiden.exceptions import (
 )
 from raiden.log_config import configure_logging
 from raiden.network.sockfactory import SocketFactory
-from raiden.tasks import check_gas_reserve, check_version
+from raiden.tasks import check_gas_reserve, check_network_id, check_version
 from raiden.utils import get_system_spec, merge_dict, split_endpoint, typing
 from raiden.utils.echo_node import EchoNode
 from raiden.utils.runnable import Runnable
@@ -97,6 +97,9 @@ class NodeRunner:
         except (EthNodeCommunicationError, RequestsConnectionError):
             print(ETHEREUM_NODE_COMMUNICATION_ERROR)
             sys.exit(1)
+        except RuntimeError as e:
+            click.secho(str(e), fg='red')
+            sys.exit(1)
         except EthNodeInterfaceError as e:
             click.secho(str(e), fg='red')
             sys.exit(1)
@@ -115,16 +118,17 @@ class NodeRunner:
 
         if self._options['rpc']:
             rest_api = RestAPI(self._raiden_api)
+            (api_host, api_port) = split_endpoint(self._options['api_address'])
             api_server = APIServer(
                 rest_api,
+                config={'host': api_host, 'port': api_port},
                 cors_domain_list=domain_list,
                 web_ui=self._options['web_ui'],
                 eth_rpc_endpoint=self._options['eth_rpc_endpoint'],
             )
-            (api_host, api_port) = split_endpoint(self._options['api_address'])
 
             try:
-                api_server.start(api_host, api_port)
+                api_server.start()
             except APIServerPortInUseError:
                 click.secho(
                     f'ERROR: API Address {api_host}:{api_port} is in use. '
@@ -150,11 +154,18 @@ class NodeRunner:
 
         # spawn a greenlet to handle the version checking
         version = get_system_spec()['raiden']
-        if version is not None:
-            tasks.append(gevent.spawn(check_version, version))
+        tasks.append(gevent.spawn(check_version, version))
 
         # spawn a greenlet to handle the gas reserve check
         tasks.append(gevent.spawn(check_gas_reserve, app_.raiden))
+        # spawn a greenlet to handle the periodic check for the network id
+        tasks.append(gevent.spawn(
+            check_network_id,
+            app_.raiden.chain.network_id,
+            app_.raiden.chain.client.web3,
+        ))
+
+        # spawn a greenlet to handle the functions
 
         self._startup_hook()
 
@@ -181,12 +192,13 @@ class NodeRunner:
         except RaidenError as ex:
             click.secho(f'FATAL: {ex}', fg='red')
         except Exception as ex:
-            with NamedTemporaryFile(
+            file = NamedTemporaryFile(
                 'w',
                 prefix=f'raiden-exception-{datetime.utcnow():%Y-%m-%dT%H-%M}',
                 suffix='.txt',
                 delete=False,
-            ) as traceback_file:
+            )
+            with file as traceback_file:
                 traceback.print_exc(file=traceback_file)
                 click.secho(
                     f'FATAL: An unexpected exception occured. '
@@ -221,9 +233,12 @@ class UDPRunner(NodeRunner):
 
         (listen_host, listen_port) = split_endpoint(self._options['listen_address'])
         try:
-            with SocketFactory(
-                listen_host, listen_port, strategy=self._options['nat'],
-            ) as mapped_socket:
+            factory = SocketFactory(
+                listen_host,
+                listen_port,
+                strategy=self._options['nat'],
+            )
+            with factory as mapped_socket:
                 self._options['mapped_socket'] = mapped_socket
                 app = self._start_services()
 

@@ -2,7 +2,6 @@
 import random
 
 import gevent
-from coincurve import PrivateKey
 
 from raiden.constants import UINT64_MAX
 from raiden.message_handler import MessageHandler
@@ -22,12 +21,13 @@ from raiden.transfer.state import (
     NettingChannelState,
     balanceproof_from_envelope,
 )
-from raiden.utils import privatekey_to_address, sha3
+from raiden.utils import sha3
+from raiden.utils.signer import LocalSigner, Signer
 
 
-def sign_and_inject(message, key, address, app):
+def sign_and_inject(message, signer: Signer, app):
     """Sign the message with key and inject it directly in the app transport layer."""
-    message.sign(key)
+    message.sign(signer)
     MessageHandler().on_message(app.raiden, message)
 
 
@@ -43,9 +43,9 @@ def get_channelstate(app0, app1, token_network_identifier) -> NettingChannelStat
 def transfer(initiator_app, target_app, token, amount, identifier):
     """ Nice to read shortcut to make a transfer.
 
-    The transfer is either a DirectTransfer or a LockedTransfer, in both
-    cases all apps are synched, in the case of a LockedTransfer the secret
-    will be revealed.
+    The transfer is a LockedTransfer and we make sure,
+    all apps are synched. The secret
+    will also be revealed.
     """
     payment_network_identifier = initiator_app.raiden.default_registry.address
     token_network_identifier = views.get_token_network_identifier_by_token_address(
@@ -53,41 +53,13 @@ def transfer(initiator_app, target_app, token, amount, identifier):
         payment_network_identifier,
         token,
     )
-    async_result = initiator_app.raiden.mediated_transfer_async(
+    payment_status = initiator_app.raiden.mediated_transfer_async(
         token_network_identifier,
         amount,
         target_app.raiden.address,
         identifier,
     )
-    assert async_result.wait()
-
-
-def direct_transfer(
-        initiator_app,
-        target_app,
-        token_network_identifier,
-        amount,
-        identifier=None,
-        timeout=5,
-):
-    """ Nice to read shortcut to make a DirectTransfer. """
-
-    channel_state = views.get_channelstate_by_token_network_and_partner(
-        views.state_from_app(initiator_app),
-        token_network_identifier,
-        target_app.raiden.address,
-    )
-    assert channel_state, 'there is not a direct channel'
-
-    initiator_app.raiden.direct_transfer_async(
-        token_network_identifier,
-        amount,
-        target_app.raiden.address,
-        identifier,
-    )
-
-    # direct transfers don't have confirmation
-    gevent.sleep(timeout)
+    assert payment_status.payment_done.wait()
 
 
 def mediated_transfer(
@@ -103,13 +75,13 @@ def mediated_transfer(
     The secret will be revealed and the apps will be synchronized."""
     # pylint: disable=too-many-arguments
 
-    async_result = initiator_app.raiden.mediated_transfer_async(
+    payment_status = initiator_app.raiden.mediated_transfer_async(
         token_network_identifier,
         amount,
         target_app.raiden.address,
         identifier,
     )
-    assert async_result.wait(timeout), f'timeout for transfer id={identifier}'
+    assert payment_status.payment_done.wait(timeout), f'timeout for transfer id={identifier}'
     gevent.sleep(0.3)  # let the other nodes synch
 
 
@@ -259,8 +231,7 @@ def make_mediated_transfer(
     )
     mediated_transfer_msg = LockedTransfer.from_event(lockedtransfer)
 
-    sign_key = PrivateKey(pkey)
-    mediated_transfer_msg.sign(sign_key)
+    mediated_transfer_msg.sign(LocalSigner(pkey))
 
     # compute the signature
     balance_proof = balanceproof_from_envelope(mediated_transfer_msg)
@@ -298,7 +269,8 @@ def make_receive_transfer_mediated(
     if not isinstance(lock, HashTimeLockState):
         raise ValueError('lock must be of type HashTimeLockState')
 
-    address = privatekey_to_address(privkey.secret)
+    signer = LocalSigner(privkey)
+    address = signer.address
     if address not in (channel_state.our_state.address, channel_state.partner_state.address):
         raise ValueError('Private key does not match any of the participants.')
 
@@ -335,7 +307,7 @@ def make_receive_transfer_mediated(
         target=transfer_target,
         initiator=transfer_initiator,
     )
-    mediated_transfer_msg.sign(privkey)
+    mediated_transfer_msg.sign(signer)
 
     balance_proof = balanceproof_from_envelope(mediated_transfer_msg)
 
@@ -366,7 +338,8 @@ def make_receive_expired_lock(
     if not isinstance(lock, HashTimeLockState):
         raise ValueError('lock must be of type HashTimeLockState')
 
-    address = privatekey_to_address(privkey.secret)
+    signer = LocalSigner(privkey)
+    address = signer.address
     if address not in (channel_state.our_state.address, channel_state.partner_state.address):
         raise ValueError('Private key does not match any of the participants.')
 
@@ -391,15 +364,14 @@ def make_receive_expired_lock(
         recipient=channel_state.partner_state.address,
         secrethash=lock.secrethash,
     )
-    lock_expired_msg.sign(privkey)
+    lock_expired_msg.sign(signer)
 
     balance_proof = balanceproof_from_envelope(lock_expired_msg)
 
     receive_lockedtransfer = ReceiveLockExpired(
-        channel_state.partner_state.address,
-        balance_proof,
-        lock.secrethash,
-        random.randint(0, UINT64_MAX),
+        balance_proof=balance_proof,
+        secrethash=lock.secrethash,
+        message_identifier=random.randint(0, UINT64_MAX),
     )
 
     return receive_lockedtransfer

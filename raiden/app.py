@@ -1,8 +1,7 @@
-import os
-
 import structlog
-from eth_utils import decode_hex, to_checksum_address
+from eth_utils import to_checksum_address
 
+from raiden.constants import DISCOVERY_DEFAULT_ROOM
 from raiden.exceptions import InvalidSettleTimeout
 from raiden.network.blockchain_service import BlockChainService
 from raiden.network.proxies import Discovery, SecretRegistry, TokenNetworkRegistry
@@ -21,8 +20,8 @@ from raiden.settings import (
     DEFAULT_TRANSPORT_THROTTLE_FILL_RATE,
     DEFAULT_TRANSPORT_UDP_RETRY_INTERVAL,
     INITIAL_PORT,
+    RED_EYES_CONTRACT_VERSION,
 )
-from raiden.storage.versions import older_db_files_exist
 from raiden.utils import pex, typing
 from raiden_contracts.contract_manager import contracts_precompiled_path
 
@@ -31,10 +30,9 @@ log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
 
 class App:  # pylint: disable=too-few-public-methods
     DEFAULT_CONFIG = {
-        'privatekey_hex': '',
         'reveal_timeout': DEFAULT_REVEAL_TIMEOUT,
         'settle_timeout': DEFAULT_SETTLE_TIMEOUT,
-        'contracts_path': contracts_precompiled_path(),
+        'contracts_path': contracts_precompiled_path(RED_EYES_CONTRACT_VERSION),
         'database_path': '',
         'transport_type': 'udp',
         'blockchain': {
@@ -57,7 +55,7 @@ class App:  # pylint: disable=too-few-public-methods
             'matrix': {
                 # None causes fetching from url in raiden.settings.py::DEFAULT_MATRIX_KNOWN_SERVERS
                 'available_servers': None,
-                'discovery_room': 'discovery',
+                'global_rooms': [DISCOVERY_DEFAULT_ROOM],
                 'retries_before_backoff': DEFAULT_TRANSPORT_RETRIES_BEFORE_BACKOFF,
                 'retry_interval': DEFAULT_TRANSPORT_MATRIX_RETRY_INTERVAL,
                 'server': 'auto',
@@ -66,6 +64,11 @@ class App:  # pylint: disable=too-few-public-methods
         'rpc': True,
         'console': False,
         'shutdown_timeout': DEFAULT_SHUTDOWN_TIMEOUT,
+        'services': {
+            'pathfinding_service_address': None,
+            'pathfinding_max_paths': 3,
+            'monitoring_enabled': False,
+        },
     }
 
     def __init__(
@@ -85,23 +88,12 @@ class App:  # pylint: disable=too-few-public-methods
             query_start_block=query_start_block,
             default_registry=default_registry,
             default_secret_registry=default_secret_registry,
-            private_key_bin=decode_hex(config['privatekey_hex']),
             transport=transport,
             raiden_event_handler=raiden_event_handler,
             message_handler=message_handler,
             config=config,
             discovery=discovery,
         )
-
-        # Check if files with older versions of the DB exist, emit a warning
-        db_base_path = os.path.dirname(config['database_path'])
-        if older_db_files_exist(db_base_path):
-            log.warning(
-                'Older versions of the database exist in '
-                f'{db_base_path}. Since a newer breaking version is introduced, '
-                'it is advised that you leave all token networks before upgrading and '
-                'then proceed with the upgrade.',
-            )
 
         # check that the settlement timeout fits the limits of the contract
         invalid_settle_timeout = (

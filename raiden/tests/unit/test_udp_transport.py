@@ -8,7 +8,10 @@ from raiden.messages import SecretRequest
 from raiden.network.throttle import TokenBucket
 from raiden.network.transport.udp import UDPTransport
 from raiden.tests.utils.factories import ADDR, UNIT_SECRETHASH, make_address
-from raiden.tests.utils.transport import MockDiscovery, MockRaidenService
+from raiden.tests.utils.mocks import MockRaidenService
+from raiden.tests.utils.transport import MockDiscovery
+
+pytestmark = pytest.mark.usefixtures('skip_if_not_udp')
 
 
 @pytest.fixture

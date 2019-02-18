@@ -2,6 +2,7 @@ import importlib
 import inspect
 import pkgutil
 import time
+from copy import copy
 from datetime import timedelta
 from enum import Enum
 from typing import Any, TypeVar
@@ -48,7 +49,7 @@ class Task:
         _TASK_ID = _TASK_ID + 1
         self.id = str(_TASK_ID)
         self._runner = runner
-        self._config = config
+        self._config = copy(config)
         self._parent = parent
         self._abort_on_fail = abort_on_fail
         self.state = TaskState.INITIALIZED
@@ -59,7 +60,6 @@ class Task:
 
         runner.task_cache[self.id] = self
         runner.task_count += 1
-        log.debug('Task initialized', task=self)
 
     def __call__(self, *args, **kwargs):
         log.info('Starting task', task=self)
@@ -152,7 +152,6 @@ def get_task_class_for_type(task_type) -> T_Task:
 
 def register_task(task_name, task):
     global NAME_TO_TASK
-    log.debug(f'Registered task: {task_name}')
     NAME_TO_TASK[task_name] = task
 
 

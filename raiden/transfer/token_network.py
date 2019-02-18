@@ -1,10 +1,7 @@
-from raiden.transfer import channel, views
+from raiden.transfer import channel
 from raiden.transfer.architecture import TransitionResult
-from raiden.transfer.events import EventPaymentSentFailed
-from raiden.transfer.state import CHANNEL_STATE_UNUSABLE
 from raiden.transfer.state_change import (
     ActionChannelClose,
-    ActionTransferDirect,
     ContractReceiveChannelBatchUnlock,
     ContractReceiveChannelClosed,
     ContractReceiveChannelNew,
@@ -13,8 +10,8 @@ from raiden.transfer.state_change import (
     ContractReceiveRouteClosed,
     ContractReceiveRouteNew,
     ContractReceiveUpdateTransfer,
-    ReceiveTransferDirect,
 )
+from raiden.utils.typing import MYPY_ANNOTATION
 
 
 def subdispatch_to_channel_by_id(
@@ -250,68 +247,6 @@ def handle_closeroute(token_network_state, state_change):
     return TransitionResult(token_network_state, events)
 
 
-def handle_action_transfer_direct(
-        payment_network_identifier,
-        token_network_state,
-        state_change,
-        pseudo_random_generator,
-        block_number,
-):
-    receiver_address = state_change.receiver_address
-    channels = [
-        token_network_state.channelidentifiers_to_channels[channel_id]
-        for channel_id in token_network_state.partneraddresses_to_channelidentifiers[
-            receiver_address
-        ]
-    ]
-    channel_states = views.filter_channels_by_status(
-        channels,
-        [CHANNEL_STATE_UNUSABLE],
-    )
-    if channel_states:
-        iteration = channel.state_transition(
-            channel_states[-1],
-            state_change,
-            pseudo_random_generator,
-            block_number,
-        )
-        events = iteration.events
-    else:
-        failure = EventPaymentSentFailed(
-            payment_network_identifier,
-            state_change.token_network_identifier,
-            state_change.identifier,
-            receiver_address,
-            'Unknown partner channel',
-        )
-        events = [failure]
-
-    return TransitionResult(token_network_state, events)
-
-
-def handle_receive_transfer_direct(
-        token_network_state,
-        state_change,
-        pseudo_random_generator,
-        block_number,
-):
-    events = list()
-
-    channel_id = state_change.balance_proof.channel_identifier
-    channel_state = token_network_state.channelidentifiers_to_channels.get(channel_id)
-
-    if channel_state:
-        result = channel.state_transition(
-            channel_state,
-            state_change,
-            pseudo_random_generator,
-            block_number,
-        )
-        events.extend(result.events)
-
-    return TransitionResult(token_network_state, events)
-
-
 def handle_receive_transfer_refund(
         token_network_state,
         state_change,
@@ -345,6 +280,7 @@ def state_transition(
     # pylint: disable=too-many-branches,unidiomatic-typecheck
 
     if type(state_change) == ActionChannelClose:
+        assert isinstance(state_change, ActionChannelClose), MYPY_ANNOTATION
         iteration = handle_channel_close(
             token_network_state,
             state_change,
@@ -352,11 +288,13 @@ def state_transition(
             block_number,
         )
     elif type(state_change) == ContractReceiveChannelNew:
+        assert isinstance(state_change, ContractReceiveChannelNew), MYPY_ANNOTATION
         iteration = handle_channelnew(
             token_network_state,
             state_change,
         )
     elif type(state_change) == ContractReceiveChannelNewBalance:
+        assert isinstance(state_change, ContractReceiveChannelNewBalance), MYPY_ANNOTATION
         iteration = handle_balance(
             token_network_state,
             state_change,
@@ -364,6 +302,7 @@ def state_transition(
             block_number,
         )
     elif type(state_change) == ContractReceiveChannelClosed:
+        assert isinstance(state_change, ContractReceiveChannelClosed), MYPY_ANNOTATION
         iteration = handle_closed(
             token_network_state,
             state_change,
@@ -371,6 +310,7 @@ def state_transition(
             block_number,
         )
     elif type(state_change) == ContractReceiveChannelSettled:
+        assert isinstance(state_change, ContractReceiveChannelSettled), MYPY_ANNOTATION
         iteration = handle_settled(
             token_network_state,
             state_change,
@@ -378,6 +318,7 @@ def state_transition(
             block_number,
         )
     elif type(state_change) == ContractReceiveUpdateTransfer:
+        assert isinstance(state_change, ContractReceiveUpdateTransfer), MYPY_ANNOTATION
         iteration = handle_updated_transfer(
             token_network_state,
             state_change,
@@ -385,6 +326,7 @@ def state_transition(
             block_number,
         )
     elif type(state_change) == ContractReceiveChannelBatchUnlock:
+        assert isinstance(state_change, ContractReceiveChannelBatchUnlock), MYPY_ANNOTATION
         iteration = handle_batch_unlock(
             token_network_state,
             state_change,
@@ -392,31 +334,16 @@ def state_transition(
             block_number,
         )
     elif type(state_change) == ContractReceiveRouteNew:
+        assert isinstance(state_change, ContractReceiveRouteNew), MYPY_ANNOTATION
         iteration = handle_newroute(
             token_network_state,
             state_change,
         )
     elif type(state_change) == ContractReceiveRouteClosed:
+        assert isinstance(state_change, ContractReceiveRouteClosed), MYPY_ANNOTATION
         iteration = handle_closeroute(
             token_network_state,
             state_change,
         )
-    elif type(state_change) == ActionTransferDirect:
-        iteration = handle_action_transfer_direct(
-            payment_network_identifier,
-            token_network_state,
-            state_change,
-            pseudo_random_generator,
-            block_number,
-        )
-    elif type(state_change) == ReceiveTransferDirect:
-        iteration = handle_receive_transfer_direct(
-            token_network_state,
-            state_change,
-            pseudo_random_generator,
-            block_number,
-        )
-    else:
-        raise RuntimeError(state_change)
 
     return iteration

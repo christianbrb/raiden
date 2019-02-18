@@ -2,6 +2,73 @@
 Changelog
 =========
 
+* :feature:`2436` Add an API endpoint to list pending transfers
+* :bug:`3475` Properly check async_result in rest api payments
+* :feature:`3318` allow secret and/or hash with payment request
+* :feature:`3425` Update raiden-contracts package to version 0.9.0
+
+* :release:`0.100.2-rc4 <2019-02-04>`
+* :feature:`3317` Return the secretHash and the Secret as part of payment response
+* :bug:`3380` Connection manager no longer attempts deposit if per partner funds are zero.
+* :bug:`3369` Fix high CPU usage when the raiden node is idle.
+* :feature:`-` Set python 3.7 as a minimum python version requirement to run Raiden.
+
+* :release:`0.100.2-rc3 <2019-01-25>`
+* :feature:`-` Update WebUI to version 0.8.0 https://github.com/raiden-network/webui/releases/tag/v0.8.0
+* :feature:`3236` Add backwards-compatible PFS integration in the routing layer
+* :bug:`3196` Proper fix for the bug that caused not finding locksroot in the DB during unlock
+* :feature:`2988` If estimateGas returns failure don't send a transaction.
+
+* :release:`0.100.2-rc2 <2019-01-11>`
+* :feature:`-` Update WebUI to version 0.7.1 https://github.com/raiden-network/webui/releases/tag/v0.7.1
+* :bug:`3257` Requesting the channel list with a token address and not a partner address via the API should no longer cause a 500 server error.
+
+
+* :release:`0.100.2-rc1 <2019-01-04>`
+* :feature:`3217` If channel is already updated onchain don't call updateNonClosingBalanceProof.
+* :bug:`3216` If coming online after partner closed channel don't try to send updateNonClosingBalanceProof twice and crash Raiden.
+* :bug:`3211` If using parity and getting the already imported error, attempt to handle it and not crash the client.
+* :bug:`3121` If the same payment identifier is reused avoid a specific race condition that can crash Raiden.
+* :bug:`3201` Workaround for gas price strategy crashing Raiden with an Infura ethereum node.
+* :bug:`3190` Prevents removal of initiator task when one of the transfers is expired.
+
+* :release:`0.100.1 <2018-12-21>`
+* :bug:`3171` Do not crash raiden if the Matrix server is offline when joining a discovery room.
+* :bug:`3196` If our partner updates onchain with earlier balance proof find the event in the DB and properly perform the unlock onchain.
+* :bug:`3193` Channel balance shown to the user now takes locked amount into account.
+* :bug:`3183` If as initiator our nodes receives a RefundTransfer then do not delete the payment task at the lock expiration block but wait for a LockExpired message. Solves one hanging transfer case.
+* :bug:`3179` Properly process a SendRefundTransfer event if it's the last one before settlement and not crash the client.
+* :bug:`3175` If Github checking of latest version returns unexpected response do not let Raiden crash.
+* :bug:`3170` If the same refund transfer is received multiple times, the mediator state machine will reject subsequent ones rather than clearing up the mediator task.
+* :bug:`3146` If a refund transfer is received and there are no other routes, keep the payment task so that the channel does not hang when mediator sends a LockExpired.
+
+* :release:`0.19.0 <2018-12-14>`
+* :bug:`3153` If a non-contract address is given for token_address in the channel open REST API call, the client no longer crashes.
+* :bug:`3152` If the onchain unlock has already been mined when we try to send the transaction don't crash Raiden.
+* :feature:`3157` Change REST api version prefix from 1 to v1.
+* :bug:`3135` In development mode if more than 100 * (10^18) tokens are deposited then raiden no longer crashes.
+
+* :release:`0.18.1 <2018-12-07>`
+* :bug:`2779` Fixes a long standing bug that could cause payments to hang indefinitely.
+* :bug:`3103` Fixes a bug in matrix which prevented retries of messages.
+* :bug:`3094` Raiden will now properly return payment failure and no longer hang if a payment times out due to a lock expiration.
+* :bug:`3093` Getting raiden payment history will no longer crash raiden for failed sent payment events.
+
+* :release:`0.18.0 <2018-11-30>`
+* :bug:`3091` Client will no longer accept secret of 0x0 or secrethash keccak(0x0).
+* :bug:`3054` Client will now reject any signatures with ``v`` not in (0, 1, 27, 28)
+* :bug:`3046` Sync with the matrix server using the last known sync token. This solves the issue of missing messages during restart as previously only the last 10 were fetched.
+
+* :release:`0.17.0 <2018-11-16>`
+* :bug:`3035` Registering a token twice should now return a proper error.
+* :bug:`3013` Encode all integers before saving to the sqlite database
+* :bug:`3022` Reject REST API channel opening with an error if there is not enough token balance for the initial deposit.
+* :bug:`2932` Node will no longer crash if it mediated a transfer and the channel cycle for mediation has completed.
+* :bug:`3001` Don't delete payment task when receiving invalid secret request.
+* :bug:`2931` Fixes serialization of state changes for refund transfers, allowing it to be used for unlocks.
+
+* :release:`0.16.0 <2018-11-09>`
+* :bug:`2963` Fixes an overflow issue with the hint of the join network dialog.
 * :bug:`2973` Introduce special handling of infura endpoints so that the old getTransactionCount is used.
 * :feature:`2946` Do not show full block information in the INFO logging message.
 * :bug:`2921` Properly estimate gas cost of transactions so that we have a more reasonable minimal amount of ETH required to run Raiden.
@@ -10,6 +77,7 @@ Changelog
 * :bug:`2934` Don't send unecessary register secret transactions.
 * :bug:`2938` Don't cleanup mediator if the transfer could not be forwarded. Could lead to stuck channels.
 * :bug:`2918` Fixed a synchronization problem, where a node would send invalid balance proofs.
+* :bug:`2923` Fix a race with multiple calls circumventing the gas reserve check.
 
 * :release:`0.15.1 <2018-11-03>`
 * :bug:`2933` Raiden can now recover from crashes/restarts when there are pending onchain transactions.

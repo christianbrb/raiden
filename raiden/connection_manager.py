@@ -3,7 +3,6 @@ from random import shuffle
 import gevent
 import structlog
 from eth_utils import decode_hex
-from gevent.event import AsyncResult
 from gevent.lock import Semaphore
 
 from raiden import waiting
@@ -165,12 +164,6 @@ class ConnectionManager:
                 )
             else:
                 self._open_channels()
-
-    def leave_async(self):
-        """ Async version of `leave()` """
-        leave_result = AsyncResult()
-        gevent.spawn(self.leave).link(leave_result)
-        return leave_result
 
     def leave(self, registry_address):
         """ Leave the token network.
@@ -346,12 +339,16 @@ class ConnectionManager:
             # or it's nonfunded channel), continue to ensure it's funded
             pass
 
+        total_deposit = self._initial_funding_per_partner
+        if total_deposit == 0:
+            return
+
         try:
             self.api.set_total_channel_deposit(
-                self.registry_address,
-                self.token_address,
-                partner,
-                self._initial_funding_per_partner,
+                registry_address=self.registry_address,
+                token_address=self.token_address,
+                partner_address=partner,
+                total_deposit=total_deposit,
             )
         except InvalidDBData:
             raise

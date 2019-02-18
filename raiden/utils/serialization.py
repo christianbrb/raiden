@@ -12,23 +12,23 @@ def identity(val):
 
 
 def map_dict(
-    key_func: typing.Callable,
-    value_func: typing.Callable,
-    dict: typing.Dict,
+        key_func: typing.Callable,
+        value_func: typing.Callable,
+        dict_: typing.Dict,
 ) -> typing.Dict[str, typing.Any]:
     return {
         key_func(k): value_func(v)
-        for k, v in dict.items()
+        for k, v in dict_.items()
     }
 
 
 def map_list(
-    value_func: typing.Callable,
-    list: typing.List,
+        value_func: typing.Callable,
+        list_: typing.List,
 ) -> typing.List[typing.Any]:
     return [
         value_func(v)
-        for v in list
+        for v in list_
     ]
 
 
@@ -49,15 +49,15 @@ def serialize_networkx_graph(graph: networkx.Graph) -> str:
 
 def deserialize_networkx_graph(data: str) -> networkx.Graph:
     raw_data = json.loads(data)
-    data = [
+    canonical_addresses = [
         (to_canonical_address(edge[0]), to_canonical_address(edge[1]))
         for edge in raw_data
     ]
-    return networkx.Graph(data)
+    return networkx.Graph(canonical_addresses)
 
 
 def serialize_participants_tuple(
-    participants: typing.Tuple[typing.Address, typing.Address],
+        participants: typing.Tuple[typing.Address, typing.Address],
 ) -> typing.List[str]:
     return [
         to_checksum_address(participants[0]),
@@ -66,7 +66,7 @@ def serialize_participants_tuple(
 
 
 def deserialize_participants_tuple(
-    data: typing.List[str],
+        data: typing.List[str],
 ) -> typing.Tuple[typing.Address, typing.Address]:
     assert len(data) == 2
     return (

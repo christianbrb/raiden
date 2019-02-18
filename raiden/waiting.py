@@ -107,7 +107,7 @@ def wait_for_payment_balance(
         target_balance: typing.TokenAmount,
         retry_timeout: float,
 ) -> None:
-    """Wait until a given channels balance exceeds the target balance.
+    """Wait until a given channel's balance exceeds the target balance.
 
     Note:
         This does not time out, use gevent.Timeout.
@@ -146,7 +146,7 @@ def wait_for_payment_balance(
 def wait_for_close(
         raiden: RaidenService,
         payment_network_id: typing.PaymentNetworkID,
-        token_address: typing.Address,
+        token_address: typing.TokenAddress,
         channel_ids: typing.List[typing.ChannelID],
         retry_timeout: float,
 ) -> None:
@@ -288,7 +288,7 @@ def wait_for_transfer_success(
         amount: typing.PaymentAmount,
         retry_timeout: float,
 ) -> None:
-    """Wait until a direct transfer with a specific identifier and amount
+    """Wait until a transfer with a specific identifier and amount
     is seen in the WAL.
 
     Note:

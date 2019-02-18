@@ -1,19 +1,37 @@
+from unittest.mock import patch
+
 import gevent
 import pytest
 
 from raiden import waiting
 from raiden.api.python import RaidenAPI
-from raiden.exceptions import AlreadyRegisteredTokenAddress, InsufficientFunds, InvalidAddress
-from raiden.tests.utils.client import burn_all_eth
-from raiden.tests.utils.events import must_have_event
+from raiden.constants import Environment
+from raiden.exceptions import (
+    AlreadyRegisteredTokenAddress,
+    DepositOverLimit,
+    InsufficientFunds,
+    InsufficientGasReserve,
+    InvalidAddress,
+)
+from raiden.messages import RequestMonitoring
+from raiden.tests.utils.client import burn_eth
+from raiden.tests.utils.events import must_have_event, wait_for_state_change
+from raiden.tests.utils.factories import make_address
+from raiden.tests.utils.network import CHAIN
 from raiden.tests.utils.smartcontracts import deploy_contract_web3
 from raiden.tests.utils.transfer import (
     assert_synced_channel_state,
-    direct_transfer,
     get_channelstate,
+    mediated_transfer,
 )
 from raiden.transfer import views
 from raiden.transfer.events import EventPaymentReceivedSuccess, EventPaymentSentSuccess
+from raiden.transfer.state_change import ContractReceiveNewTokenNetwork
+from raiden.utils import create_default_identifier
+from raiden.utils.gas_reserve import (
+    GAS_RESERVE_ESTIMATE_SECURITY_FACTOR,
+    get_required_gas_estimate,
+)
 from raiden_contracts.constants import CONTRACT_HUMAN_STANDARD_TOKEN, ChannelEvent
 
 # Use a large enough settle timeout to have valid transfer messages
@@ -28,8 +46,8 @@ TEST_TOKEN_SWAP_SETTLE_TIMEOUT = (
 @pytest.mark.parametrize('number_of_nodes', [1])
 @pytest.mark.parametrize('channels_per_node', [0])
 @pytest.mark.parametrize('number_of_tokens', [1])
-@pytest.mark.skip('token registration not working in red eyes')
-def test_register_token(raiden_network, token_amount, contract_manager):
+@pytest.mark.parametrize('environment_type', [Environment.DEVELOPMENT])
+def test_register_token(raiden_network, token_amount, contract_manager, retry_timeout):
     app1 = raiden_network[0]
 
     registry_address = app1.raiden.default_registry.address
@@ -50,6 +68,18 @@ def test_register_token(raiden_network, token_amount, contract_manager):
     assert token_address not in api1.get_tokens_list(registry_address)
 
     api1.token_network_register(registry_address, token_address)
+    exception = RuntimeError('Did not see the token registration within 30 seconds')
+    with gevent.Timeout(seconds=30, exception=exception):
+        wait_for_state_change(
+            app1.raiden,
+            ContractReceiveNewTokenNetwork,
+            {
+                'token_network': {
+                    'token_address': token_address,
+                },
+            },
+            retry_timeout,
+        )
     assert token_address in api1.get_tokens_list(registry_address)
 
     # Exception if we try to reregister
@@ -82,9 +112,9 @@ def test_register_token_insufficient_eth(raiden_network, token_amount, contract_
     assert token_address not in api1.get_tokens_list(registry_address)
 
     # app1.raiden loses all its ETH because it has been naughty
-    burn_all_eth(app1.raiden)
+    burn_eth(app1.raiden)
 
-    # At this point we should get the InsufficientFunds exception
+    # At this point we should get an UnrecoverableError due to InsufficientFunds
     with pytest.raises(InsufficientFunds):
         api1.token_network_register(registry_address, token_address)
 
@@ -92,7 +122,7 @@ def test_register_token_insufficient_eth(raiden_network, token_amount, contract_
 @pytest.mark.parametrize('channels_per_node', [0])
 @pytest.mark.parametrize('number_of_nodes', [2])
 @pytest.mark.parametrize('number_of_tokens', [1])
-@pytest.mark.skip('token registration not working in red eyes')
+@pytest.mark.parametrize('environment_type', [Environment.DEVELOPMENT])
 def test_token_registered_race(raiden_chain, token_amount, retry_timeout, contract_manager):
     """If a token is registered it must appear on the token list.
 
@@ -129,8 +159,18 @@ def test_token_registered_race(raiden_chain, token_amount, retry_timeout, contra
     assert token_address not in api1.get_tokens_list(registry_address)
 
     api0.token_network_register(registry_address, token_address)
-
-    gevent.sleep(1)
+    exception = RuntimeError('Did not see the token registration within 30 seconds')
+    with gevent.Timeout(seconds=30, exception=exception):
+        wait_for_state_change(
+            app0.raiden,
+            ContractReceiveNewTokenNetwork,
+            {
+                'token_network': {
+                    'token_address': token_address,
+                },
+            },
+            retry_timeout,
+        )
 
     assert token_address in api0.get_tokens_list(registry_address)
     assert token_address not in api1.get_tokens_list(registry_address)
@@ -256,11 +296,11 @@ def test_api_channel_events(raiden_chain, token_addresses):
     )
 
     amount = 30
-    direct_transfer(
-        app0,
-        app1,
-        token_network_identifier,
-        amount,
+    mediated_transfer(
+        initiator_app=app0,
+        target_app=app1,
+        token_network_identifier=token_network_identifier,
+        amount=amount,
         identifier=1,
     )
 
@@ -296,4 +336,185 @@ def test_insufficient_funds(raiden_network, token_addresses, deposit):
         deposit + 1,
         target=app1.raiden.address,
     )
-    assert not result
+    assert not result.payment_done.get()
+
+
+@pytest.mark.parametrize('number_of_nodes', [3])
+@pytest.mark.parametrize('channels_per_node', [0])
+def test_funds_check_for_openchannel(raiden_network, token_addresses):
+    """Reproduces issue 2923 -- two open channel racing through the gas reserve"""
+    app0, app1, app2 = raiden_network
+    token_address = token_addresses[0]
+
+    gas = get_required_gas_estimate(raiden=app0.raiden, channels_to_open=1)
+    gas = round(gas * GAS_RESERVE_ESTIMATE_SECURITY_FACTOR)
+    api0 = RaidenAPI(app0.raiden)
+    burn_eth(
+        raiden_service=app0.raiden,
+        amount_to_leave=gas,
+    )
+
+    partners = [app1.raiden.address, app2.raiden.address]
+
+    greenlets = [
+        gevent.spawn(
+            api0.channel_open,
+            app0.raiden.default_registry.address,
+            token_address,
+            partner,
+        )
+        for partner in partners
+    ]
+
+    # Opening two channels needs to fail, because the gas reserve is not big enough
+    # This didn't fail prior to #2977, which serializes calls to channel open,
+    # so that the gas reserve checks cannot pass in parallel
+    with pytest.raises(InsufficientGasReserve):
+        gevent.joinall(greenlets, raise_error=True)
+
+
+@pytest.mark.parametrize('number_of_nodes', [2])
+@pytest.mark.parametrize('channels_per_node', [1])
+@pytest.mark.parametrize('reveal_timeout', [8])
+@pytest.mark.parametrize('settle_timeout', [30])
+def test_payment_timing_out_if_partner_does_not_respond(
+        raiden_network,
+        token_addresses,
+        reveal_timeout,
+        skip_if_not_matrix,
+        retry_timeout,
+):
+    """ Test to make sure that when our target does not respond payment times out
+
+    If the target does not respond and the lock times out then the payment will
+    timeout. Note that at the moment we don't retry other routes even if they
+    exist when the lock expires for this transfer.
+
+    Issue: https://github.com/raiden-network/raiden/issues/3094"""
+    app0, app1 = raiden_network
+    token_address = token_addresses[0]
+
+    def fake_receive(room, event):
+        return True
+
+    with patch.object(app1.raiden.transport, '_handle_message', side_effect=fake_receive):
+        greenlet = gevent.spawn(
+            RaidenAPI(app0.raiden).transfer,
+            app0.raiden.default_registry.address,
+            token_address,
+            1,
+            target=app1.raiden.address,
+        )
+        waiting.wait_for_block(
+            app0.raiden,
+            app1.raiden.get_block_number() + 2 * reveal_timeout + 1,
+            retry_timeout,
+        )
+        greenlet.join(timeout=5)
+        assert not greenlet.value
+
+
+@pytest.mark.parametrize('privatekey_seed', ['test_set_deposit_limit_crash:{}'])
+@pytest.mark.parametrize('number_of_nodes', [1])
+@pytest.mark.parametrize('channels_per_node', [0])
+@pytest.mark.parametrize('number_of_tokens', [1])
+@pytest.mark.parametrize('token_amount', [90000000000000000000000])
+@pytest.mark.parametrize('environment_type', [Environment.DEVELOPMENT])
+def test_set_deposit_limit_crash(raiden_network, token_amount, contract_manager, retry_timeout):
+    """The development contracts as of 10/12/2018 were crashing if more than an amount was given
+    Regression test for https://github.com/raiden-network/raiden/issues/3135
+    """
+    app1 = raiden_network[0]
+
+    registry_address = app1.raiden.default_registry.address
+
+    token_address = deploy_contract_web3(
+        contract_name=CONTRACT_HUMAN_STANDARD_TOKEN,
+        deploy_client=app1.raiden.chain.client,
+        contract_manager=contract_manager,
+        constructor_arguments=(
+            token_amount,
+            2,
+            'raiden',
+            'Rd',
+        ),
+    )
+
+    api1 = RaidenAPI(app1.raiden)
+    assert token_address not in api1.get_tokens_list(registry_address)
+
+    api1.token_network_register(registry_address, token_address)
+    exception = RuntimeError('Did not see the token registration within 30 seconds')
+    with gevent.Timeout(seconds=30, exception=exception):
+        wait_for_state_change(
+            app1.raiden,
+            ContractReceiveNewTokenNetwork,
+            {
+                'token_network': {
+                    'token_address': token_address,
+                },
+            },
+            retry_timeout,
+        )
+    assert token_address in api1.get_tokens_list(registry_address)
+
+    partner_address = make_address()
+    api1.channel_open(
+        registry_address=app1.raiden.default_registry.address,
+        token_address=token_address,
+        partner_address=partner_address,
+    )
+    with pytest.raises(DepositOverLimit):
+        api1.set_total_channel_deposit(
+            registry_address=app1.raiden.default_registry.address,
+            token_address=token_address,
+            partner_address=partner_address,
+            total_deposit=10000000000000000000000,
+        )
+
+
+@pytest.mark.parametrize('deposit', [10])
+@pytest.mark.parametrize('channels_per_node', [CHAIN])
+@pytest.mark.parametrize('number_of_nodes', [2])
+def test_create_monitoring_request(
+        raiden_network,
+        number_of_nodes,
+        deposit,
+        token_addresses,
+        network_wait,
+        chain_id,
+):
+    app0, app1 = raiden_network
+    token_address = token_addresses[0]
+    chain_state = views.state_from_app(app0)
+    payment_network_id = app0.raiden.default_registry.address
+    token_network_identifier = views.get_token_network_identifier_by_token_address(
+        chain_state=chain_state,
+        payment_network_id=payment_network_id,
+        token_address=token_address,
+    )
+
+    payment_identifier = create_default_identifier()
+    mediated_transfer(
+        initiator_app=app1,
+        target_app=app0,
+        token_network_identifier=token_network_identifier,
+        amount=1,
+        identifier=payment_identifier,
+    )
+    chain_state = views.state_from_raiden(app0.raiden)
+    channel_state = views.get_channelstate_by_token_network_and_partner(
+        chain_state,
+        token_network_identifier,
+        app1.raiden.address,
+    )
+    balance_proof = channel_state.partner_state.balance_proof
+    api = RaidenAPI(app0.raiden)
+    request = api.create_monitoring_request(
+        balance_proof=balance_proof,
+        reward_amount=1,
+    )
+    assert request
+    as_dict = request.to_dict()
+    from_dict = RequestMonitoring.from_dict(as_dict)
+    assert from_dict.to_dict() == as_dict

@@ -2,6 +2,7 @@ import socket
 
 import cachetools
 import gevent
+import gevent.pool
 import structlog
 from eth_utils import encode_hex, is_binary_address
 from gevent.event import AsyncResult, Event
@@ -160,7 +161,7 @@ class UDPTransport(Runnable):
     def __init__(self, address, discovery, udpsocket, throttle_policy, config):
         super().__init__()
         # these values are initialized by the start method
-        self.queueids_to_queues = dict()
+        self.queueids_to_queues: typing.Dict = dict()
         self.raiden: RaidenService
         self.message_handler: MessageHandler
 
@@ -194,29 +195,39 @@ class UDPTransport(Runnable):
         self.get_host_port = cache_wrapper(discovery.get)
 
         self.throttle_policy = throttle_policy
-        self.server = DatagramServer(udpsocket, handle=self.receive)
+        pool = gevent.pool.Pool()
+        self.server = DatagramServer(
+            udpsocket,
+            handle=self.receive,
+            spawn=pool,
+        )
 
     def start(
             self,
-            raiden: RaidenService,
+            raiden_service: RaidenService,
             message_handler: MessageHandler,
+            prev_auth_data: str,
     ):
         if not self.event_stop.ready():
             raise RuntimeError('UDPTransport started while running')
 
         self.event_stop.clear()
-        self.raiden = raiden
+        self.raiden = raiden_service
         self.log = log.bind(node=pex(self.raiden.address))
         self.log_healthcheck = log_healthcheck.bind(node=pex(self.raiden.address))
         self.message_handler = message_handler
 
-        # server.stop() clears the handle. Since this may be a restart the
-        # handle must always be set
+        # server.stop() clears the handle and the pool. Since this may be a
+        # restart the handle must always be set
         self.server.set_handle(self.receive)
+        pool = gevent.pool.Pool()
+        self.server.set_spawn(pool)
 
         self.server.start()
         self.log.debug('UDP started')
         super().start()
+
+        log.debug('UDP transport started')
 
     def _run(self):
         """ Runnable main method, perform wait on long-running subtasks """
@@ -261,7 +272,7 @@ class UDPTransport(Runnable):
         for async_result in self.messageids_to_asyncresults.values():
             async_result.set(False)
 
-        self.log.debug('UDP stopped')
+        log.debug('UDP stopped', node=pex(self.raiden.address))
         del self.log_healthcheck
         del self.log
 
@@ -274,7 +285,7 @@ class UDPTransport(Runnable):
 
         return self.addresses_events[recipient]
 
-    def whitelist(self, address: typing.Address):
+    def whitelist(self, address: typing.Address):  # pylint: disable=no-self-use
         """Whitelist peer address to receive communications from
 
         This may be called before transport is started, to ensure events generated during
@@ -387,7 +398,7 @@ class UDPTransport(Runnable):
     def send_async(
             self,
             queue_identifier: QueueIdentifier,
-            message: 'Message',
+            message: Message,
     ):
         """ Send a new ordered message to recipient.
 
@@ -424,6 +435,14 @@ class UDPTransport(Runnable):
                 queue_size=len(queue),
                 message=message,
             )
+
+    def send_global(
+            self,
+            room: str,
+            message: Message,
+    ) -> None:
+        """ This method exists only for interface compatibility with MatrixTransport """
+        self.log.warning('UDP is unable to send global messages. Ignoring')
 
     def maybe_send(self, recipient: typing.Address, message: Message):
         """ Send message to recipient if the transport is running. """
@@ -463,7 +482,7 @@ class UDPTransport(Runnable):
         """ Send message to recipient if the transport is running. """
 
         # Don't sleep if timeout is zero, otherwise a context-switch is done
-        # and the message is delayed, increasing it's latency
+        # and the message is delayed, increasing its latency
         sleep_timeout = self.throttle_policy.consume(1)
         if sleep_timeout:
             gevent.sleep(sleep_timeout)

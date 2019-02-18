@@ -6,6 +6,8 @@ help:
 	@echo "clean-pyc - remove Python file artifacts"
 	@echo "clean-test - remove test and coverage artifacts"
 	@echo "lint - check style with flake8"
+	@echo "mypy - check types with mypy (coverage in progress)"
+	@echo "isort - use isort to fix import order"
 	@echo "test - run tests quickly with the default Python"
 	@echo "test-all - run tests on every Python version with tox"
 	@echo "coverage - check code coverage quickly with the default Python"
@@ -37,11 +39,32 @@ clean-test:
 	rm -f .coverage
 	rm -fr htmlcov/
 
+ISORT_PARAMS = --ignore-whitespace --settings-path ./ --recursive raiden/ -sg */node_modules/*
+
 lint:
 	flake8 raiden/ tools/
-	isort --ignore-whitespace --settings-path ./ --check-only --recursive --diff raiden/ -sg */node_modules/*
+	isort $(ISORT_PARAMS) --diff --check-only
 	pylint --rcfile .pylint.rc raiden/
 	python setup.py check --restructuredtext --strict
+
+mypy:
+	# We are starting small with a few files and directories here,
+	# but mypy should run on the whole codebase soon.
+	mypy raiden/transfer raiden/api raiden/messages.py raiden/blockchain \
+	raiden/encoding raiden/storage raiden/network \
+	--ignore-missing-imports | grep error > mypy-out.txt || true
+	# Expecting status code 1 from `grep`, which indicates no match.
+	# Again, we are starting small, detecting only errors related to
+	# 'BlockNumber', 'Address', 'ChannelID' etc, but all mypy errors should be
+	# detected soon.
+	grep BlockNumber mypy-out.txt; [ $$? -eq 1 ]
+	grep Address mypy-out.txt; [ $$? -eq 1 ]
+	grep ChannelID mypy-out.txt; [ $$? -eq 1 ]
+	grep BalanceProof mypy-out.txt; [ $$? -eq 1 ]
+	grep SendSecret mypy-out.txt; [ $$? -eq 1 ]
+
+isort:
+	isort $(ISORT_PARAMS)
 
 test:
 	python setup.py test
@@ -61,7 +84,13 @@ docs:
 	$(MAKE) -C docs clean
 	$(MAKE) -C docs html
 
-ARCHIVE_TAG?=master
+
+ARCHIVE_TAG_ARG=
+ifdef ARCHIVE_TAG
+ARCHIVE_TAG_ARG=--build-arg ARCHIVE_TAG=$(ARCHIVE_TAG)
+else
+ARCHIVE_TAG_ARG=--build-arg ARCHIVE_TAG=v$(shell python setup.py --version)
+endif
 
 GITHUB_ACCESS_TOKEN_ARG=
 ifdef GITHUB_ACCESS_TOKEN
@@ -70,16 +99,14 @@ endif
 
 
 bundle-docker:
-	# Hide command echo to prevent leaking GITHUB_ACCESS_TOKEN in Travis logs
-	@docker build -t pyinstallerbuilder --build-arg GETH_URL_LINUX=$(GETH_URL_LINUX) --build-arg SOLC_URL_LINUX=$(SOLC_URL_LINUX) --build-arg ARCHIVE_TAG=$(ARCHIVE_TAG) $(GITHUB_ACCESS_TOKEN_ARG) -f docker/build.Dockerfile .
+	@docker build -t pyinstallerbuilder --build-arg GETH_URL_LINUX=$(GETH_URL_LINUX) --build-arg SOLC_URL_LINUX=$(SOLC_URL_LINUX) $(ARCHIVE_TAG_ARG) $(GITHUB_ACCESS_TOKEN_ARG) -f docker/build.Dockerfile .
 	-(docker rm builder)
 	docker create --name builder pyinstallerbuilder
-	mkdir -p build/archive
-	docker cp builder:/raiden/raiden-$(ARCHIVE_TAG)-linux.tar.gz build/archive/raiden-$(ARCHIVE_TAG)-linux.tar.gz
+	mkdir -p dist/archive
+	docker cp builder:/raiden/raiden-$(ARCHIVE_TAG)-linux.tar.gz dist/archive/raiden-$(ARCHIVE_TAG)-linux.tar.gz
 	docker rm builder
 
 bundle:
-	python setup.py compile_webui
 	pyinstaller --noconfirm --clean raiden.spec
 
 release: clean

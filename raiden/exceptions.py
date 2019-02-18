@@ -22,6 +22,11 @@ class HashLengthNot32(RaidenError):
     pass
 
 
+class UnknownEventType(RaidenError):
+    """Raised if decoding of an event failed."""
+    pass
+
+
 # Exceptions raised due to user interaction (the user may be another software)
 
 class ChannelNotFound(RaidenError):
@@ -70,6 +75,11 @@ class InvalidAddress(RaidenError):
     pass
 
 
+class InvalidSecretOrSecretHash(RaidenError):
+    """ Raised when the user provided value is not a valid secret. """
+    pass
+
+
 class InvalidAmount(RaidenError):
     """ Raised when the user provided value is not a positive integer and
     cannot be used to define a transfer value.
@@ -80,6 +90,11 @@ class InvalidAmount(RaidenError):
 class InvalidSettleTimeout(RaidenError):
     """ Raised when the user provided timeout value is less than the minimum
     settle timeout"""
+    pass
+
+
+class InvalidSignature(RaidenError):
+    """Raised on invalid signature recover/verify"""
     pass
 
 

@@ -3,11 +3,12 @@ import random
 import string
 
 from raiden.constants import UINT64_MAX, UINT256_MAX
-from raiden.messages import DirectTransfer, Lock, LockedTransfer, RefundTransfer
+from raiden.messages import Lock, LockedTransfer, RefundTransfer
 from raiden.tests.utils.factories import UNIT_CHAIN_ID, UNIT_CHANNEL_ID, make_privkey_address
 from raiden.tests.utils.tests import fixture_all_combinations
-from raiden.transfer.state import EMPTY_MERKLE_ROOT
+from raiden.transfer.state import EMPTY_MERKLE_ROOT, balanceproof_from_envelope
 from raiden.utils import sha3
+from raiden.utils.signer import Signer
 
 PRIVKEY, ADDRESS = make_privkey_address()
 INVALID_ADDRESSES = [
@@ -34,13 +35,6 @@ SECRETHASHES_FOR_MERKLETREE = [
 
 # zero is used to indicate novalue in solidity, that is why it's an invalid
 # nonce value
-DIRECT_TRANSFER_INVALID_VALUES = list(fixture_all_combinations({
-    'nonce': [-1, 0, UINT64_MAX + 1],
-    'payment_identifier': [-1, UINT64_MAX + 1],
-    'token': INVALID_ADDRESSES,
-    'recipient': INVALID_ADDRESSES,
-    'transferred_amount': [-1, UINT256_MAX + 1],
-}))
 
 REFUND_TRANSFER_INVALID_VALUES = list(fixture_all_combinations({
     'nonce': [-1, 0, UINT64_MAX + 1],
@@ -168,32 +162,41 @@ def make_mediated_transfer(
     )
 
 
-def make_direct_transfer(
+def make_balance_proof(
+        signer: Signer = None,
         message_identifier=None,
         payment_identifier=0,
         nonce=1,
-        registry_address=ADDRESS,
+        token_network_addresss=ADDRESS,
         token=ADDRESS,
         channel_identifier=UNIT_CHANNEL_ID,
         transferred_amount=0,
-        locked_amount=0,
-        recipient=ADDRESS,
+        locked_amount=None,
+        amount=1,
+        expiration=1,
         locksroot=EMPTY_MERKLE_ROOT,
+        recipient=ADDRESS,
+        target=ADDRESS,
+        initiator=ADDRESS,
+        fee=0,
 ):
-
-    if message_identifier is None:
-        message_identifier = random.randint(0, UINT64_MAX)
-
-    return DirectTransfer(
-        chain_id=UNIT_CHAIN_ID,
+    mediated_transfer = make_mediated_transfer(
         message_identifier=message_identifier,
         payment_identifier=payment_identifier,
         nonce=nonce,
-        token_network_address=registry_address,
+        token_network_addresss=token_network_addresss,
         token=token,
         channel_identifier=channel_identifier,
         transferred_amount=transferred_amount,
         locked_amount=locked_amount,
-        recipient=recipient,
+        amount=amount,
+        expiration=expiration,
         locksroot=locksroot,
+        recipient=recipient,
+        target=target,
+        initiator=initiator,
+        fee=fee,
     )
+    mediated_transfer.sign(signer)
+    balance_proof = balanceproof_from_envelope(mediated_transfer)
+    return balance_proof

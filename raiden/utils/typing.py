@@ -1,5 +1,9 @@
 from typing import *  # NOQA pylint:disable=wildcard-import,unused-wildcard-import
-from typing import Dict, List, NewType, Optional, Tuple, Union
+from typing import Dict, List, NewType, Optional, Tuple, TypeVar, Union
+
+MYPY_ANNOTATION = (
+    'This assert is used to tell mypy what is the type of the variable'
+)
 
 T_ABI = dict
 ABI = NewType('ABI', T_ABI)
@@ -10,6 +14,7 @@ Address = NewType('Address', T_Address)
 T_AddressHex = str
 AddressHex = NewType('AddressHex', T_AddressHex)
 
+# An absolute number of blocks
 T_BlockExpiration = int
 BlockExpiration = NewType('BlockExpiration', T_BlockExpiration)
 
@@ -31,6 +36,7 @@ BlockHash = NewType('BlockHash', T_BlockHash)
 T_BlockNumber = int
 BlockNumber = NewType('BlockNumber', T_BlockNumber)
 
+# A relative number of blocks
 T_BlockTimeout = int
 BlockTimeout = NewType('BlockTimeout', T_BlockTimeout)
 
@@ -49,11 +55,13 @@ Locksroot = NewType('Locksroot', T_Locksroot)
 T_LockHash = bytes
 LockHash = NewType('LockHash', T_LockHash)
 
-T_MerkleTreeLeaves = List['HashTimeLockState']
+T_MerkleTreeLeaves = List[Union['HashTimeLockState', 'UnlockPartialProofState']]
 MerkleTreeLeaves = NewType('MerkleTreeLeaves', T_MerkleTreeLeaves)
 
-T_MessageID = Union[int, Tuple[str, int, bytes]]
+T_MessageID = int
 MessageID = NewType('MessageID', T_MessageID)
+
+UDPMessageID = Tuple[str, int, Address]
 
 T_Nonce = int
 Nonce = NewType('Nonce', T_Nonce)
@@ -67,6 +75,7 @@ NetworkTimeout = NewType('NetworkTimeout', T_NetworkTimeout)
 T_PaymentID = int
 PaymentID = NewType('PaymentID', T_PaymentID)
 
+# PaymentAmount is for amounts of tokens paid end-to-end
 T_PaymentAmount = int
 PaymentAmount = NewType('PaymentAmount', T_PaymentAmount)
 
@@ -86,7 +95,7 @@ T_TargetAddress = bytes
 TargetAddress = NewType('TargetAddress', T_TargetAddress)
 
 T_TokenAddress = bytes
-TokenAddress = NewType('TokenAddres', T_TokenAddress)
+TokenAddress = NewType('TokenAddress', T_TokenAddress)
 
 T_TokenNetworkAddress = bytes
 TokenNetworkAddress = NewType('TokenNetworkAddress', T_TokenNetworkAddress)
@@ -112,6 +121,17 @@ SecretRegistryAddress = NewType('SecretRegistryAddress', T_SecretRegistryAddress
 T_Signature = bytes
 Signature = NewType('Signature', T_Signature)
 
+T_SignedBlindedBalanceProof = TypeVar(
+    'T_SignedBlindedBalanceProof',
+    bound='raiden.messages.SignedBlindedBalanceProof',
+)
+
+T_RequestMonitoring = TypeVar(
+    'T_RequestMonitoring',
+    bound='raiden.messages.RequestMonitoring',
+)
+
+
 T_TransactionHash = bytes
 TransactionHash = NewType('TransactionHash', T_TransactionHash)
 
@@ -121,3 +141,7 @@ SuccessOrError = Tuple[bool, Optional[str]]
 BlockSpecification = Union[str, T_BlockNumber]
 
 ChannelMap = Dict[ChannelID, 'NettingChannelState']
+
+InitiatorTransfersMap = Dict[SecretHash, 'InitiatorTransferState']
+
+NodeNetworkStateMap = Dict[Address, str]

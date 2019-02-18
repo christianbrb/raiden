@@ -1,4 +1,5 @@
 import re
+from json.decoder import JSONDecodeError
 
 import click
 import gevent
@@ -9,17 +10,46 @@ from gevent.event import AsyncResult
 from pkg_resources import parse_version
 from web3 import Web3
 
+from raiden.constants import (
+    CHECK_GAS_RESERVE_INTERVAL,
+    CHECK_NETWORK_ID_INTERVAL,
+    CHECK_VERSION_INTERVAL,
+    LATEST,
+    RELEASE_PAGE,
+    SECURITY_EXPRESSION,
+)
+from raiden.exceptions import EthNodeCommunicationError
 from raiden.utils import gas_reserve, pex
 from raiden.utils.runnable import Runnable
 
-CHECK_VERSION_INTERVAL = 3 * 60 * 60
-CHECK_GAS_RESERVE_INTERVAL = 60 * 60
-LATEST = 'https://api.github.com/repos/raiden-network/raiden/releases/latest'
-RELEASE_PAGE = 'https://github.com/raiden-network/raiden/releases'
-SECURITY_EXPRESSION = r'\[CRITICAL UPDATE.*?\]'
-
 REMOVE_CALLBACK = object()
 log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+def _do_check_version(current_version: str):
+    content = requests.get(LATEST).json()
+    if 'tag_name' not in content:
+        # probably API rate limit exceeded
+        click.secho(
+            'Error while contacting github for latest version. API rate limit exceeded?',
+            fg='red',
+        )
+        return False
+    # getting the latest release version
+    latest_release = parse_version(content['tag_name'])
+    security_message = re.search(SECURITY_EXPRESSION, content['body'])
+    if security_message:
+        click.secho(security_message.group(0), fg='red')
+        # comparing it to the user's application
+    if current_version < latest_release:
+        msg = "You're running version {}. The latest version is {}".format(
+            current_version,
+            latest_release,
+        )
+        click.secho(msg, fg='red')
+        click.secho("It's time to update! Releases: {}".format(RELEASE_PAGE), fg='red')
+        return False
+    return True
 
 
 def check_version(current_version: str):
@@ -27,20 +57,7 @@ def check_version(current_version: str):
     app_version = parse_version(current_version)
     while True:
         try:
-            content = requests.get(LATEST).json()
-            # getting the latest release version
-            latest_release = parse_version(content['tag_name'])
-            security_message = re.search(SECURITY_EXPRESSION, content['body'])
-            if security_message:
-                click.secho(security_message.group(0), fg='red')
-            # comparing it to the user's application
-            if app_version < latest_release:
-                msg = "You're running version {}. The latest version is {}".format(
-                    app_version,
-                    latest_release,
-                )
-                click.secho(msg, fg='red')
-                click.secho("It's time to update! Releases: {}".format(RELEASE_PAGE), fg='red')
+            _do_check_version(app_version)
         except requests.exceptions.HTTPError as herr:
             click.secho('Error while checking for version', fg='red')
             print(herr)
@@ -57,7 +74,7 @@ def check_gas_reserve(raiden):
     while True:
         has_enough_balance, estimated_required_balance = gas_reserve.has_enough_gas_reserve(
             raiden,
-            channels_to_open=0,
+            channels_to_open=1,
         )
         estimated_required_balance_eth = Web3.fromWei(estimated_required_balance, 'ether')
 
@@ -77,6 +94,20 @@ def check_gas_reserve(raiden):
         gevent.sleep(CHECK_GAS_RESERVE_INTERVAL)
 
 
+def check_network_id(network_id, web3: Web3):
+    """ Check periodically if the underlying ethereum client's network id has changed"""
+    while True:
+        current_id = int(web3.version.network)
+        if network_id != current_id:
+            raise RuntimeError(
+                f'Raiden was running on network with id {network_id} and it detected '
+                f'that the underlying ethereum client network id changed to {current_id}.'
+                f' Changing the underlying blockchain while the Raiden node is running '
+                f'is not supported.',
+            )
+        gevent.sleep(CHECK_NETWORK_ID_INTERVAL)
+
+
 class AlarmTask(Runnable):
     """ Task to notify when a block is mined. """
 
@@ -87,7 +118,6 @@ class AlarmTask(Runnable):
         self.chain = chain
         self.chain_id = None
         self.known_block_number = None
-        self._stop_event = AsyncResult()
 
         # TODO: Start with a larger sleep_time and decrease it as the
         # probability of a new block increases.
@@ -95,6 +125,7 @@ class AlarmTask(Runnable):
 
     def start(self):
         log.debug('Alarm task started', node=pex(self.chain.node_address))
+        self._stop_event = AsyncResult()
         super().start()
 
     def _run(self):  # pylint: disable=method-hidden
@@ -130,24 +161,18 @@ class AlarmTask(Runnable):
         assert self.chain_id, 'chain_id not set'
         assert self.known_block_number is not None, 'known_block_number not set'
 
-        chain_id = self.chain_id
-
         sleep_time = self.sleep_time
         while self._stop_event.wait(sleep_time) is not True:
-            latest_block = self.chain.get_block(block_identifier='latest')
-            self._maybe_run_callbacks(latest_block)
+            try:
+                latest_block = self.chain.get_block(block_identifier='latest')
+            except JSONDecodeError as e:
+                raise EthNodeCommunicationError(str(e))
 
-            if chain_id != self.chain.network_id:
-                raise RuntimeError(
-                    'Changing the underlying blockchain while the Raiden node is running '
-                    'is not supported.',
-                )
+            self._maybe_run_callbacks(latest_block)
 
     def first_run(self, known_block_number):
         """ Blocking call to update the local state, if necessary. """
         assert self.callbacks, 'callbacks not set'
-
-        chain_id = self.chain.network_id
         latest_block = self.chain.get_block(block_identifier='latest')
 
         log.debug(
@@ -159,7 +184,7 @@ class AlarmTask(Runnable):
         )
 
         self.known_block_number = known_block_number
-        self.chain_id = chain_id
+        self.chain_id = self.chain.network_id
         self._maybe_run_callbacks(latest_block)
 
     def _maybe_run_callbacks(self, latest_block):
@@ -212,4 +237,7 @@ class AlarmTask(Runnable):
     def stop(self):
         self._stop_event.set(True)
         log.debug('Alarm task stopped', node=pex(self.chain.node_address))
-        return self.join()
+        result = self.join()
+        # Callbacks should be cleaned after join
+        self.callbacks = []
+        return result

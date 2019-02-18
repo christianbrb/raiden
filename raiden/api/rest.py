@@ -2,19 +2,20 @@ import errno
 import json
 import logging
 import socket
-import sys
 from http import HTTPStatus
 from typing import Dict
 
 import gevent
+import gevent.pool
 import structlog
-from eth_utils import encode_hex, to_checksum_address
+from eth_utils import encode_hex, to_checksum_address, to_hex
 from flask import Flask, make_response, request, send_from_directory, url_for
 from flask.json import jsonify
 from flask_cors import CORS
 from flask_restful import Api, abort
 from gevent.pywsgi import WSGIServer
 from hexbytes import HexBytes
+from raiden_webui import RAIDEN_WEBUI_PATH
 from webargs.flaskparser import parser
 from werkzeug.exceptions import NotFound
 
@@ -42,6 +43,9 @@ from raiden.api.v1.resources import (
     ConnectionsResource,
     PartnersResourceByTokenAddress,
     PaymentResource,
+    PendingTransfersResource,
+    PendingTransfersResourceByTokenAddress,
+    PendingTransfersResourceByTokenAndPartnerAddress,
     RaidenInternalEventsResource,
     RegisterTokenResource,
     TokensResource,
@@ -62,6 +66,7 @@ from raiden.exceptions import (
     InvalidAmount,
     InvalidBlockNumberInput,
     InvalidNumberInput,
+    InvalidSecretOrSecretHash,
     InvalidSettleTimeout,
     PaymentConflict,
     SamePeerAddress,
@@ -78,7 +83,6 @@ from raiden.transfer.events import (
 from raiden.transfer.state import CHANNEL_STATE_CLOSED, CHANNEL_STATE_OPENED, NettingChannelState
 from raiden.utils import (
     create_default_identifier,
-    is_frozen,
     optional_address_to_string,
     pex,
     split_endpoint,
@@ -97,6 +101,7 @@ ERROR_STATUS_CODES = [
     HTTPStatus.NOT_IMPLEMENTED,
     HTTPStatus.INTERNAL_SERVER_ERROR,
 ]
+
 
 URLS_V1 = [
     (
@@ -149,6 +154,21 @@ URLS_V1 = [
         '/tokens/<hexaddress:token_address>',
         RegisterTokenResource,
     ),
+    (
+        '/pending_transfers',
+        PendingTransfersResource,
+        'pending_transfers_resource',
+    ),
+    (
+        '/pending_transfers/<hexaddress:token_address>',
+        PendingTransfersResourceByTokenAddress,
+        'pending_transfers_resource_by_token',
+    ),
+    (
+        '/pending_transfers/<hexaddress:token_address>/<hexaddress:partner_address>',
+        PendingTransfersResourceByTokenAndPartnerAddress,
+        'pending_transfers_resource_by_token_and_partner',
+    ),
 
     (
         '/_debug/blockchain_events/network',
@@ -184,6 +204,7 @@ def api_response(result, status_code=HTTPStatus.OK):
     else:
         data = json.dumps(result)
 
+    log.debug('Request successful', response=result, status_code=status_code)
     response = make_response((
         data,
         status_code,
@@ -194,6 +215,7 @@ def api_response(result, status_code=HTTPStatus.OK):
 
 def api_error(errors, status_code):
     assert status_code in ERROR_STATUS_CODES, 'Programming error, unexpected error status code'
+    log.error('Error processing request', errors=errors, status_code=status_code)
     response = make_response((
         json.dumps(dict(errors=errors)),
         status_code,
@@ -311,21 +333,28 @@ class APIServer(Runnable):
         rest_api = RestAPI(raiden_api)
 
         # create the server and link the api-endpoints with flask / flask-restful middleware
-        api_server = APIServer(rest_api)
+        api_server = APIServer(rest_api, {'host: '127.0.0.1', 'port': 5001})
 
         # run the server greenlet
-        api_server.start('127.0.0.1', 5001)
+        api_server.start()
     """
 
     _api_prefix = '/api/1'
-    kwargs = {'host': '127.0.0.1', 'port': 5001}
 
-    def __init__(self, rest_api, cors_domain_list=None, web_ui=False, eth_rpc_endpoint=None):
+    def __init__(
+            self,
+            rest_api,
+            config,
+            cors_domain_list=None,
+            web_ui=False,
+            eth_rpc_endpoint=None,
+    ):
         super().__init__()
         if rest_api.version != 1:
             raise ValueError(
                 'Invalid api version: {}'.format(rest_api.version),
             )
+        self._api_prefix = f'/api/v{rest_api.version}'
 
         flask_app = Flask(__name__)
         if cors_domain_list:
@@ -352,6 +381,7 @@ class APIServer(Runnable):
             URLS_V1,
         )
 
+        self.config = config
         self.rest_api = rest_api
         self.flask_app = flask_app
         self.blueprint = blueprint
@@ -360,10 +390,7 @@ class APIServer(Runnable):
         self.wsgiserver = None
         self.flask_app.register_blueprint(self.blueprint)
 
-        self.flask_app.config['WEBUI_PATH'] = '../ui/web/dist/'
-        if is_frozen():
-            # Inside frozen pyinstaller image
-            self.flask_app.config['WEBUI_PATH'] = '{}/raiden/ui/web/dist/'.format(sys.prefix)
+        self.flask_app.config['WEBUI_PATH'] = RAIDEN_WEBUI_PATH
 
         self.flask_app.register_error_handler(HTTPStatus.NOT_FOUND, endpoint_not_found)
         self.flask_app.register_error_handler(Exception, self.unhandled_exception)
@@ -432,26 +459,36 @@ class APIServer(Runnable):
 
     def _run(self):
         try:
-            self.wsgiserver.serve_forever()
+            # stop may have been executed before _run was scheduled, in this
+            # case wsgiserver will be None
+            if self.wsgiserver is not None:
+                self.wsgiserver.serve_forever()
         except gevent.GreenletExit:  # pylint: disable=try-except-raise
             raise
         except Exception:
             self.stop()  # ensure cleanup and wait on subtasks
             raise
 
-    def serve_forever(self, host='127.0.0.1', port=5001):
-        self.start(host, port)
-        return self.get()  # block here
+    def start(self):
+        log.debug(
+            'Starting rest api',
+            host=self.config['host'],
+            port=self.config['port'],
+        )
 
-    def start(self, host='127.0.0.1', port=5001):
         # WSGI expects an stdlib logger. With structlog there's conflict of
         # method names. Rest unhandled exception will be re-raised here:
         wsgi_log = logging.getLogger(__name__ + '.pywsgi')
+
+        # server.stop() clears the handle and the pool, this is okay since a
+        # new WSGIServer is created on each start
+        pool = gevent.pool.Pool()
         wsgiserver = WSGIServer(
-            (host, port),
+            (self.config['host'], self.config['port']),
             self.flask_app,
             log=wsgi_log,
             error_log=wsgi_log,
+            spawn=pool,
         )
 
         try:
@@ -468,6 +505,12 @@ class APIServer(Runnable):
         super().start()
 
     def stop(self):
+        log.debug(
+            'Stopping rest api',
+            host=self.config['host'],
+            port=self.config['port'],
+        )
+
         if self.wsgiserver is not None:
             self.wsgiserver.stop()
             self.wsgiserver = None
@@ -561,6 +604,26 @@ class RestAPI:
             token_address=to_checksum_address(token_address),
             settle_timeout=settle_timeout,
         )
+        try:
+            token = self.raiden_api.raiden.chain.token(token_address)
+        except AddressWithoutCode as e:
+            return api_error(
+                errors=str(e),
+                status_code=HTTPStatus.CONFLICT,
+            )
+        balance = token.balance_of(self.raiden_api.raiden.address)
+
+        if total_deposit is not None and total_deposit > balance:
+            error_msg = 'Not enough balance to deposit. {} Available={} Needed={}'.format(
+                pex(token_address),
+                balance,
+                total_deposit,
+            )
+            return api_error(
+                errors=error_msg,
+                status_code=HTTPStatus.PAYMENT_REQUIRED,
+            )
+
         try:
             self.raiden_api.channel_open(
                 registry_address,
@@ -964,6 +1027,8 @@ class RestAPI:
             target_address: typing.Address,
             amount: typing.TokenAmount,
             identifier: typing.PaymentID,
+            secret: typing.Secret,
+            secret_hash: typing.SecretHash,
     ):
         log.debug(
             'Initiating payment',
@@ -973,20 +1038,30 @@ class RestAPI:
             target_address=to_checksum_address(target_address),
             amount=amount,
             payment_identifier=identifier,
+            secret=secret,
+            secret_hash=secret_hash,
         )
 
         if identifier is None:
             identifier = create_default_identifier()
 
         try:
-            transfer_result = self.raiden_api.transfer(
+            payment_status = self.raiden_api.transfer(
                 registry_address=registry_address,
                 token_address=token_address,
                 target=target_address,
                 amount=amount,
                 identifier=identifier,
+                secret=secret,
+                secret_hash=secret_hash,
             )
-        except (InvalidAmount, InvalidAddress, PaymentConflict, UnknownTokenAddress) as e:
+        except (
+                InvalidAmount,
+                InvalidAddress,
+                InvalidSecretOrSecretHash,
+                PaymentConflict,
+                UnknownTokenAddress,
+        ) as e:
             return api_error(
                 errors=str(e),
                 status_code=HTTPStatus.CONFLICT,
@@ -997,7 +1072,7 @@ class RestAPI:
                 status_code=HTTPStatus.PAYMENT_REQUIRED,
             )
 
-        if transfer_result is False:
+        if payment_status.payment_done.get() is False:
             return api_error(
                 errors="Payment couldn't be completed "
                 "(insufficient funds, no route to target or target offline).",
@@ -1011,6 +1086,8 @@ class RestAPI:
             'target_address': target_address,
             'amount': amount,
             'identifier': identifier,
+            'secret': to_hex(payment_status.secret),
+            'secret_hash': to_hex(payment_status.secret_hash),
         }
         result = self.payment_schema.dump(payment)
         return api_response(result=result.data)
@@ -1174,3 +1251,12 @@ class RestAPI:
                 status_code=HTTPStatus.BAD_REQUEST,
             )
         return result
+
+    def get_pending_transfers(self, token_address=None, partner_address=None):
+        try:
+            return api_response(self.raiden_api.get_pending_transfers(
+                token_address=token_address,
+                partner_address=partner_address,
+            ))
+        except (ChannelNotFound, UnknownTokenAddress) as e:
+            return api_error(errors=str(e), status_code=HTTPStatus.NOT_FOUND)

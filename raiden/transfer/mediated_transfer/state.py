@@ -1,4 +1,6 @@
 # pylint: disable=too-few-public-methods,too-many-arguments,too-many-instance-attributes
+from typing import TYPE_CHECKING
+
 from eth_utils import encode_hex, to_canonical_address, to_checksum_address
 
 from raiden.transfer.architecture import State
@@ -10,7 +12,32 @@ from raiden.transfer.state import (
     RouteState,
     balanceproof_from_envelope,
 )
-from raiden.utils import pex, serialization, sha3, typing
+from raiden.utils import pex, serialization, sha3
+from raiden.utils.serialization import map_dict
+from raiden.utils.typing import (
+    Address,
+    Any,
+    ChannelID,
+    Dict,
+    InitiatorAddress,
+    InitiatorTransfersMap,
+    List,
+    MessageID,
+    Optional,
+    PaymentID,
+    PaymentNetworkID,
+    Secret,
+    SecretHash,
+    T_Address,
+    TargetAddress,
+    TokenAddress,
+    TokenAmount,
+    TokenNetworkID,
+)
+
+# Upgrade pyflakes to 2.0.0 and remove the 'if' and '# noqa'.
+if TYPE_CHECKING:
+    from raiden.transfer.mediated_transfer.events import SendSecretReveal  # noqa: F401
 
 
 def lockedtransfersigned_from_message(message):
@@ -43,40 +70,47 @@ class InitiatorPaymentState(State):
     different secrethash.
     """
     __slots__ = (
-        'initiator',
         'cancelled_channels',
+        'initiator_transfers',
     )
 
-    def __init__(self, initiator: 'InitiatorTransferState'):
-        # TODO: Allow multiple concurrent transfers and unlock refunds (issue #1091).
-        self.initiator = initiator
+    def __init__(self, initiator_transfers: InitiatorTransfersMap):
+        self.initiator_transfers = initiator_transfers
         self.cancelled_channels = list()
 
     def __repr__(self):
-        return '<InitiatorPaymentState initiator:{}>'.format(
-            self.initiator,
+        return '<InitiatorPaymentState transfers:{}>'.format(
+            self.initiator_transfers,
         )
 
     def __eq__(self, other):
         return (
             isinstance(other, InitiatorPaymentState) and
-            self.initiator == other.initiator and
+            self.initiator_transfers == other.initiator_transfers and
             self.cancelled_channels == other.cancelled_channels
         )
 
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_dict(self) -> typing.Dict[str, typing.Any]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            'initiator': self.initiator,
+            'initiator_transfers': map_dict(
+                serialization.serialize_bytes,
+                serialization.identity,
+                self.initiator_transfers,
+            ),
             'cancelled_channels': self.cancelled_channels,
         }
 
     @classmethod
-    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'InitiatorPaymentState':
+    def from_dict(cls, data: Dict[str, Any]) -> 'InitiatorPaymentState':
         restored = cls(
-            initiator=data['initiator'],
+            initiator_transfers=map_dict(
+                serialization.deserialize_bytes,
+                serialization.identity,
+                data['initiator_transfers'],
+            ),
         )
         restored.cancelled_channels = data['cancelled_channels']
 
@@ -91,14 +125,22 @@ class InitiatorTransferState(State):
         'channel_identifier',
         'transfer',
         'revealsecret',
+        'received_secret_request',
+        'transfer_state',
+    )
+
+    valid_transfer_states = (
+        'transfer_pending',
+        'transfer_cancelled',
     )
 
     def __init__(
             self,
             transfer_description: 'TransferDescriptionWithSecretState',
-            channel_identifier: typing.ChannelID,
+            channel_identifier: ChannelID,
             transfer: 'LockedTransferUnsignedState',
-            revealsecret: typing.Optional['SendSecretReveal'],
+            revealsecret: Optional['SendSecretReveal'],
+            received_secret_request: bool = False,
     ):
 
         if not isinstance(transfer_description, TransferDescriptionWithSecretState):
@@ -114,11 +156,14 @@ class InitiatorTransferState(State):
         self.channel_identifier = channel_identifier
         self.transfer = transfer
         self.revealsecret = revealsecret
+        self.received_secret_request = received_secret_request
+        self.transfer_state = 'transfer_pending'
 
     def __repr__(self):
-        return '<InitiatorTransferState transfer:{} channel:{}>'.format(
+        return '<InitiatorTransferState transfer:{} channel:{} state:{}>'.format(
             self.transfer,
             self.channel_identifier,
+            self.transfer_state,
         )
 
     def __eq__(self, other):
@@ -127,30 +172,36 @@ class InitiatorTransferState(State):
             self.transfer_description == other.transfer_description and
             self.channel_identifier == other.channel_identifier and
             self.transfer == other.transfer and
-            self.revealsecret == other.revealsecret
+            self.revealsecret == other.revealsecret and
+            self.received_secret_request == other.received_secret_request and
+            self.transfer_state == other.transfer_state
         )
 
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_dict(self) -> typing.Dict[str, typing.Any]:
+    def to_dict(self) -> Dict[str, Any]:
         result = {
             'transfer_description': self.transfer_description,
-            'channel_identifier': self.channel_identifier,
+            'channel_identifier': str(self.channel_identifier),
             'transfer': self.transfer,
             'revealsecret': self.revealsecret,
+            'received_secret_request': self.received_secret_request,
+            'transfer_state': self.transfer_state,
         }
 
         return result
 
     @classmethod
-    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'InitiatorTransferState':
+    def from_dict(cls, data: Dict[str, Any]) -> 'InitiatorTransferState':
         restored = cls(
             transfer_description=data['transfer_description'],
-            channel_identifier=data['channel_identifier'],
+            channel_identifier=ChannelID(int(data['channel_identifier'])),
             transfer=data['transfer'],
             revealsecret=data['revealsecret'],
+            received_secret_request=data['received_secret_request'],
         )
+        restored.transfer_state = data['transfer_state']
 
         return restored
 
@@ -177,7 +228,7 @@ class WaitingTransferState(State):
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_dict(self) -> typing.Dict[str, typing.Any]:
+    def to_dict(self) -> Dict[str, Any]:
         result = {
             'state': self.state,
             'transfer': self.transfer,
@@ -186,7 +237,7 @@ class WaitingTransferState(State):
         return result
 
     @classmethod
-    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'WaitingTransferState':
+    def from_dict(cls, data: Dict[str, Any]) -> 'WaitingTransferState':
         restored = cls(
             transfer=data['transfer'],
             state=data['state'],
@@ -208,13 +259,19 @@ class MediatorTransferState(State):
         'secret',
         'transfers_pair',
         'waiting_transfer',
+        'routes',
     )
 
-    def __init__(self, secrethash: typing.SecretHash):
+    def __init__(
+            self,
+            secrethash: SecretHash,
+            routes: List[RouteState],
+    ):
         self.secrethash = secrethash
-        self.secret: typing.Secret = None
-        self.transfers_pair: typing.List[MediationPairState] = list()
+        self.secret: Secret = None
+        self.transfers_pair: List[MediationPairState] = list()
         self.waiting_transfer: WaitingTransferState = None
+        self.routes = routes
 
     def __repr__(self):
         return '<MediatorTransferState secrethash:{} qtd_transfers:{}>'.format(
@@ -228,17 +285,19 @@ class MediatorTransferState(State):
             self.secrethash == other.secrethash and
             self.secret == other.secret and
             self.transfers_pair == other.transfers_pair and
-            self.waiting_transfer == other.waiting_transfer
+            self.waiting_transfer == other.waiting_transfer and
+            self.routes == other.routes
         )
 
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_dict(self) -> typing.Dict[str, typing.Any]:
+    def to_dict(self) -> Dict[str, Any]:
         result = {
             'secrethash': serialization.serialize_bytes(self.secrethash),
             'transfers_pair': self.transfers_pair,
             'waiting_transfer': self.waiting_transfer,
+            'routes': self.routes,
         }
 
         if self.secret is not None:
@@ -247,9 +306,10 @@ class MediatorTransferState(State):
         return result
 
     @classmethod
-    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'MediatorTransferState':
+    def from_dict(cls, data: Dict[str, Any]) -> 'MediatorTransferState':
         restored = cls(
             secrethash=serialization.deserialize_bytes(data['secrethash']),
+            routes=data['routes'],
         )
         restored.transfers_pair = data['transfers_pair']
         restored.waiting_transfer = data['waiting_transfer']
@@ -271,17 +331,25 @@ class TargetTransferState(State):
         'state',
     )
 
+    EXPIRED = 'expired'
+    OFFCHAIN_SECRET_REVEAL = 'reveal_secret'
+    ONCHAIN_SECRET_REVEAL = 'onchain_secret_reveal'
+    ONCHAIN_UNLOCK = 'onchain_unlock'
+    SECRET_REQUEST = 'secret_request'
+
     valid_states = (
-        'secret_request',
-        'reveal_secret',
-        'expired',
+        EXPIRED,
+        OFFCHAIN_SECRET_REVEAL,
+        ONCHAIN_SECRET_REVEAL,
+        ONCHAIN_UNLOCK,
+        SECRET_REQUEST,
     )
 
     def __init__(
             self,
             route: RouteState,
             transfer: 'LockedTransferSignedState',
-            secret: typing.Secret = None,
+            secret: Secret = None,
     ):
         self.route = route
         self.transfer = transfer
@@ -307,7 +375,7 @@ class TargetTransferState(State):
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_dict(self) -> typing.Dict[str, typing.Any]:
+    def to_dict(self) -> Dict[str, Any]:
         result = {
             'route': self.route,
             'transfer': self.transfer,
@@ -320,7 +388,7 @@ class TargetTransferState(State):
         return result
 
     @classmethod
-    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'TargetTransferState':
+    def from_dict(cls, data: Dict[str, Any]) -> 'TargetTransferState':
         restored = cls(
             route=data['route'],
             transfer=data['transfer'],
@@ -334,7 +402,11 @@ class TargetTransferState(State):
         return restored
 
 
-class LockedTransferUnsignedState(State):
+class LockedTransferState(State):
+    pass
+
+
+class LockedTransferUnsignedState(LockedTransferState):
     """ State for a transfer created by the local node which contains a hash
     time lock and may be sent.
     """
@@ -350,12 +422,12 @@ class LockedTransferUnsignedState(State):
 
     def __init__(
             self,
-            payment_identifier: typing.PaymentID,
-            token: typing.Address,
+            payment_identifier: PaymentID,
+            token: TokenAddress,
             balance_proof: BalanceProofUnsignedState,
             lock: HashTimeLockState,
-            initiator: typing.Address,
-            target: typing.Address,
+            initiator: Address,
+            target: Address,
     ):
         if not isinstance(lock, HashTimeLockState):
             raise ValueError('lock must be a HashTimeLockState instance')
@@ -403,9 +475,9 @@ class LockedTransferUnsignedState(State):
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_dict(self) -> typing.Dict[str, typing.Any]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            'payment_identifier': self.payment_identifier,
+            'payment_identifier': str(self.payment_identifier),
             'token': to_checksum_address(self.token),
             'balance_proof': self.balance_proof,
             'lock': self.lock,
@@ -414,9 +486,9 @@ class LockedTransferUnsignedState(State):
         }
 
     @classmethod
-    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'LockedTransferUnsignedState':
+    def from_dict(cls, data: Dict[str, Any]) -> 'LockedTransferUnsignedState':
         restored = cls(
-            payment_identifier=data['payment_identifier'],
+            payment_identifier=int(data['payment_identifier']),
             token=to_canonical_address(data['token']),
             balance_proof=data['balance_proof'],
             lock=data['lock'],
@@ -427,7 +499,7 @@ class LockedTransferUnsignedState(State):
         return restored
 
 
-class LockedTransferSignedState(State):
+class LockedTransferSignedState(LockedTransferState):
     """ State for a received transfer which contains a hash time lock and a
     signed balance proof.
     """
@@ -444,13 +516,13 @@ class LockedTransferSignedState(State):
 
     def __init__(
             self,
-            message_identifier: typing.MessageID,
-            payment_identifier: typing.PaymentID,
-            token: typing.Address,
+            message_identifier: MessageID,
+            payment_identifier: PaymentID,
+            token: Address,
             balance_proof: BalanceProofSignedState,
             lock: HashTimeLockState,
-            initiator: typing.InitiatorAddress,
-            target: typing.TargetAddress,
+            initiator: InitiatorAddress,
+            target: TargetAddress,
     ):
         if not isinstance(lock, HashTimeLockState):
             raise ValueError('lock must be a HashTimeLockState instance')
@@ -504,10 +576,10 @@ class LockedTransferSignedState(State):
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_dict(self) -> typing.Dict[str, typing.Any]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            'message_identifier': self.message_identifier,
-            'payment_identifier': self.payment_identifier,
+            'message_identifier': str(self.message_identifier),
+            'payment_identifier': str(self.payment_identifier),
             'token': to_checksum_address(self.token),
             'balance_proof': self.balance_proof,
             'lock': self.lock,
@@ -516,10 +588,10 @@ class LockedTransferSignedState(State):
         }
 
     @classmethod
-    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'LockedTransferSignedState':
+    def from_dict(cls, data: Dict[str, Any]) -> 'LockedTransferSignedState':
         restored = cls(
-            message_identifier=data['message_identifier'],
-            payment_identifier=data['payment_identifier'],
+            message_identifier=int(data['message_identifier']),
+            payment_identifier=int(data['payment_identifier']),
             token=to_canonical_address(data['token']),
             balance_proof=data['balance_proof'],
             lock=data['lock'],
@@ -548,13 +620,13 @@ class TransferDescriptionWithSecretState(State):
 
     def __init__(
             self,
-            payment_network_identifier: typing.PaymentNetworkID,
-            payment_identifier: typing.PaymentID,
-            amount: typing.TokenAmount,
-            token_network_identifier: typing.TokenNetworkID,
-            initiator: typing.Address,
-            target: typing.Address,
-            secret: typing.Secret,
+            payment_network_identifier: PaymentNetworkID,
+            payment_identifier: PaymentID,
+            amount: TokenAmount,
+            token_network_identifier: TokenNetworkID,
+            initiator: InitiatorAddress,
+            target: TargetAddress,
+            secret: Secret,
     ):
         secrethash = sha3(secret)
 
@@ -595,11 +667,11 @@ class TransferDescriptionWithSecretState(State):
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_dict(self) -> typing.Dict[str, typing.Any]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             'payment_network_identifier': to_checksum_address(self.payment_network_identifier),
-            'payment_identifier': self.payment_identifier,
-            'amount': self.amount,
+            'payment_identifier': str(self.payment_identifier),
+            'amount': str(self.amount),
             'token_network_identifier': to_checksum_address(self.token_network_identifier),
             'initiator': to_checksum_address(self.initiator),
             'target': to_checksum_address(self.target),
@@ -607,11 +679,11 @@ class TransferDescriptionWithSecretState(State):
         }
 
     @classmethod
-    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'TransferDescriptionWithSecretState':
+    def from_dict(cls, data: Dict[str, Any]) -> 'TransferDescriptionWithSecretState':
         restored = cls(
             payment_network_identifier=to_canonical_address(data['payment_network_identifier']),
-            payment_identifier=data['payment_identifier'],
-            amount=data['amount'],
+            payment_identifier=int(data['payment_identifier']),
+            amount=int(data['amount']),
             token_network_identifier=to_canonical_address(data['token_network_identifier']),
             initiator=to_canonical_address(data['initiator']),
             target=to_canonical_address(data['target']),
@@ -672,13 +744,13 @@ class MediationPairState(State):
     def __init__(
             self,
             payer_transfer: LockedTransferSignedState,
-            payee_address: typing.Address,
+            payee_address: Address,
             payee_transfer: LockedTransferUnsignedState,
     ):
         if not isinstance(payer_transfer, LockedTransferSignedState):
             raise ValueError('payer_transfer must be a LockedTransferSignedState instance')
 
-        if not isinstance(payee_address, typing.T_Address):
+        if not isinstance(payee_address, T_Address):
             raise ValueError('payee_address must be an address')
 
         if not isinstance(payee_transfer, LockedTransferUnsignedState):
@@ -694,9 +766,9 @@ class MediationPairState(State):
         self.payee_state = 'payee_pending'
 
     def __repr__(self):
-        return '<MediationPairState payee:{} {} payer:{}>'.format(
-            self.payer_transfer,
+        return '<MediationPairState payee_address:{} payee_transfer:{} payer_transfer{}>'.format(
             pex(self.payee_address),
+            self.payer_transfer,
             self.payee_transfer,
         )
 
@@ -717,7 +789,7 @@ class MediationPairState(State):
     def __ne__(self, other):
         return not self.__eq__(other)
 
-    def to_dict(self) -> typing.Dict[str, typing.Any]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             'payee_address': to_checksum_address(self.payee_address),
             'payee_transfer': self.payee_transfer,
@@ -727,7 +799,7 @@ class MediationPairState(State):
         }
 
     @classmethod
-    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'MediationPairState':
+    def from_dict(cls, data: Dict[str, Any]) -> 'MediationPairState':
         restored = cls(
             payer_transfer=data['payer_transfer'],
             payee_address=to_canonical_address(data['payee_address']),

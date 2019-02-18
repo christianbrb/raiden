@@ -1,10 +1,5 @@
 #!/usr/bin/env python
-import distutils.log
-import os
-import subprocess
-from distutils.spawn import find_executable
-
-from setuptools import Command, find_packages, setup
+from setuptools import find_packages, setup
 from setuptools.command.test import test as TestCommand
 
 
@@ -20,74 +15,6 @@ class PyTest(TestCommand):
         import pytest
         errno = pytest.main(self.test_args)
         raise SystemExit(errno)
-
-
-class CompileWebUI(Command):
-    description = 'use npm to compile webui code to raiden/ui/web/dist'
-    user_options = [
-        ('dev', 'D', 'use development preset, instead of production (default)'),
-    ]
-
-    def initialize_options(self):
-        self.dev = None
-
-    def finalize_options(self):
-        pass
-
-    def run(self):
-        npm = find_executable('npm')
-        if not npm:
-            if os.environ.get('RAIDEN_NPM_MISSING_FATAL') is not None:
-                # Used in the automatic deployment scripts to prevent builds with missing web-ui
-                raise RuntimeError('NPM not found. Aborting')
-            self.announce(
-                'NPM not found. Skipping webUI compilation',
-                level=distutils.log.WARN,  # pylint: disable=no-member
-            )
-            return
-        npm_run = 'build:prod'
-        if self.dev is not None:
-            npm_run = 'build:dev'
-
-        cwd = os.path.abspath(
-            os.path.join(
-                os.path.dirname(__file__),
-                'raiden',
-                'ui',
-                'web',
-            ),
-        )
-
-        npm_version = subprocess.check_output([npm, '--version'])
-        # require npm 4.x.x or later
-        if not int(npm_version.split(b'.')[0]) >= 4:
-            if os.environ.get('RAIDEN_NPM_MISSING_FATAL') is not None:
-                # Used in the automatic deployment scripts to prevent builds with missing web-ui
-                raise RuntimeError(f'NPM >= 4.0 required. Have {npm_version} from {npm}.')
-            self.announce(
-                'NPM 4.x or later required. Skipping webUI compilation',
-                level=distutils.log.WARN,  # pylint: disable=no-member
-            )
-            return
-
-        command = [npm, 'install']
-        self.announce(
-            'Running %r in %r' % (command, cwd),
-            level=distutils.log.INFO,  # pylint: disable=no-member
-        )
-        subprocess.check_call(command, cwd=cwd)
-
-        command = [npm, 'run', npm_run]
-        self.announce(
-            'Running %r in %r' % (command, cwd),
-            level=distutils.log.INFO,  # pylint: disable=no-member
-        )
-        subprocess.check_call(command, cwd=cwd)
-
-        self.announce(
-            'WebUI compiled with success!',
-            level=distutils.log.INFO,  # pylint: disable=no-member
-        )
 
 
 with open('README.rst') as readme_file:
@@ -106,7 +33,8 @@ with open('constraints.txt') as req_file:
 
 test_requirements = []
 
-version = '0.15.1'  # Do not edit: this is maintained by bumpversion (see .bumpversion_client.cfg)
+# Do not edit: this is maintained by bumpversion (see .bumpversion_client.cfg)
+version = '0.100.2-rc4'
 
 setup(
     name='raiden',
@@ -126,17 +54,16 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Natural Language :: English',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
     ],
     cmdclass={
         'test': PyTest,
-        'compile_webui': CompileWebUI,
     },
     use_scm_version=True,
     setup_requires=['setuptools_scm'],
     install_requires=install_requires,
     tests_require=test_requirements,
-    python_requires='>=3.6',
+    python_requires='>=3.7',
     entry_points={
         'console_scripts': [
             'raiden = raiden.__main__:main',

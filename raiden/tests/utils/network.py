@@ -2,7 +2,6 @@
 from collections import namedtuple
 
 import gevent
-from eth_utils import encode_hex
 from gevent import server
 
 from raiden import waiting
@@ -15,7 +14,7 @@ from raiden.network.transport import MatrixTransport, UDPTransport
 from raiden.raiden_event_handler import RaidenEventHandler
 from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS, DEFAULT_RETRY_TIMEOUT
 from raiden.tests.utils.factories import UNIT_CHAIN_ID
-from raiden.utils import merge_dict, privatekey_to_address
+from raiden.utils import merge_dict
 from raiden.waiting import wait_for_payment_network
 
 CHAIN = object()  # Flag used by create a network does make a loop with the channels
@@ -53,11 +52,11 @@ def check_channel(
     assert settle_timeout == netcontract2.settle_timeout()
 
     if deposit_amount > 0:
-        assert netcontract1.can_transfer()
-        assert netcontract2.can_transfer()
+        assert netcontract1.can_transfer('latest')
+        assert netcontract2.can_transfer('latest')
 
-    app1_details = netcontract1.detail()
-    app2_details = netcontract2.detail()
+    app1_details = netcontract1.detail('latest')
+    app2_details = netcontract2.detail('latest')
 
     assert (
         app1_details.participants_data.our_details.address ==
@@ -93,8 +92,9 @@ def payment_channel_open_and_deposit(app0, app1, token_address, deposit, settle_
     token_network_proxy = app0.raiden.chain.token_network(token_network_address)
 
     channel_identifier = token_network_proxy.new_netting_channel(
-        app1.raiden.address,
-        settle_timeout,
+        partner=app1.raiden.address,
+        settle_timeout=settle_timeout,
+        given_block_identifier='latest',
     )
     assert channel_identifier
 
@@ -112,8 +112,8 @@ def payment_channel_open_and_deposit(app0, app1, token_address, deposit, settle_
         assert previous_balance >= deposit
 
         # the payment channel proxy will call approve
-        # token.approve(token_network_proxy.address, deposit)
-        payment_channel_proxy.set_total_deposit(deposit)
+        # token.approve(token_network_proxy.address, deposit, 'latest')
+        payment_channel_proxy.set_total_deposit(total_deposit=deposit, block_identifier='latest')
 
         # Balance must decrease by at least but not exactly `deposit` amount,
         # because channels can be openned in parallel
@@ -290,13 +290,11 @@ def create_apps(
 ):
     """ Create the apps."""
     # pylint: disable=too-many-locals
-    services = zip(blockchain_services, endpoint_discovery_services)
+    services = zip(blockchain_services, endpoint_discovery_services, raiden_udp_ports)
 
     apps = []
-    for idx, (blockchain, discovery) in enumerate(services):
-        port = raiden_udp_ports[idx]
-        private_key = blockchain.private_key
-        address = privatekey_to_address(private_key)
+    for idx, (blockchain, discovery, port) in enumerate(services):
+        address = blockchain.client.address
 
         host = '127.0.0.1'
 
@@ -304,7 +302,6 @@ def create_apps(
             'chain_id': chain_id,
             'environment_type': environment_type,
             'unrecoverable_error_should_crash': unrecoverable_error_should_crash,
-            'privatekey_hex': encode_hex(private_key),
             'reveal_timeout': reveal_timeout,
             'settle_timeout': settle_timeout,
             'database_path': database_paths[idx],
@@ -338,11 +335,11 @@ def create_apps(
                     'transport_type': 'matrix',
                     'transport': {
                         'matrix': {
-                            'discovery_room': 'discovery',
+                            'global_rooms': ['discovery'],
                             'retries_before_backoff': retries_before_backoff,
                             'retry_interval': retry_interval,
                             'server': local_matrix_url,
-                            'server_name': 'matrix.local.raiden',
+                            'server_name': local_matrix_url.netloc,
                             'available_servers': [],
                             'private_rooms': private_rooms,
                         },
@@ -406,7 +403,6 @@ def jsonrpc_services(
     for privkey in private_keys:
         rpc_client = JSONRPCClient(web3, privkey)
         blockchain = BlockChainService(
-            privatekey_bin=privkey,
             jsonrpc_client=rpc_client,
             contract_manager=contract_manager,
         )

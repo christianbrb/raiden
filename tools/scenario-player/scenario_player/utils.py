@@ -68,6 +68,11 @@ class LogBuffer:
         return reversed(list(slice_))
 
 
+class ConcatenableNone:
+    def __radd__(self, other):
+        return other
+
+
 class DummyStream:
     def write(self, content):
         pass
@@ -182,7 +187,7 @@ def wait_for_txs(client_or_web3, txhashes, timeout=360):
         )
 
 
-def get_or_deploy_token(runner: 'ScenarioRunner') -> ContractProxy:
+def get_or_deploy_token(runner) -> ContractProxy:
     """ Deploy or reuse  """
     contract_manager = ContractManager(contracts_precompiled_path())
     token_contract = contract_manager.get_contract(CONTRACT_CUSTOM_TOKEN)
@@ -330,8 +335,8 @@ def reclaim_eth(account: Account, chain_rpc_urls: dict, data_path: str, min_age_
                 client = JSONRPCClient(web3, privkey)
                 txs[chain_name].append(
                     client.send_transaction(
-                        account.address,
-                        drain_amount,
+                        to=account.address,
+                        value=drain_amount,
                         startgas=VALUE_TX_GAS_COST,
                     ),
                 )

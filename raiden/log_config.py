@@ -4,18 +4,18 @@ import logging.config
 import os
 import re
 import sys
-import tempfile
 from functools import wraps
 from traceback import TracebackException
-from typing import Callable, Dict, FrozenSet, List, Pattern, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Pattern, Tuple
 
+import gevent
 import structlog
 
 DEFAULT_LOG_LEVEL = 'INFO'
 MAX_LOG_FILE_SIZE = 20 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 
-_FIRST_PARTY_PACKAGES = frozenset(['raiden'])
+_FIRST_PARTY_PACKAGES = frozenset(['raiden', 'raiden_contracts'])
 
 
 def _chain(first_func, *funcs) -> Callable:
@@ -31,6 +31,25 @@ def _chain(first_func, *funcs) -> Callable:
             result = func(result)
         return result
     return wrapper
+
+
+def _match_list(
+        module_rule: Tuple[List[str], str],
+        logger_name: str,
+) -> Tuple[int, str]:
+    logger_modules_split = logger_name.split('.') if logger_name else []
+
+    modules_split: List[str] = module_rule[0]
+    level: str = module_rule[1]
+
+    if logger_modules_split == modules_split:
+        return sys.maxsize, level
+    else:
+        num_modules = len(modules_split)
+        if logger_modules_split[:num_modules] == modules_split:
+            return num_modules, level
+        else:
+            return 0, None
 
 
 class LogFilter:
@@ -51,30 +70,11 @@ class LogFilter:
             for logger, level in config.items()
         ]
 
-    def _match_list(
-        self,
-        module_rule: Tuple[List[str], str],
-        logger_name: str,
-    ) -> Tuple[int, str]:
-        logger_modules_split = logger_name.split('.') if logger_name else []
-
-        modules_split: List[str] = module_rule[0]
-        level: str = module_rule[1]
-
-        if logger_modules_split == modules_split:
-            return sys.maxsize, level
-        else:
-            num_modules = len(modules_split)
-            if logger_modules_split[:num_modules] == modules_split:
-                return num_modules, level
-            else:
-                return 0, None
-
     def _get_log_level(self, logger_name: str) -> str:
         best_match_length = 0
         best_match_level = self._default_level
         for module in self._log_rules:
-            match_length, level = self._match_list(module, logger_name)
+            match_length, level = _match_list(module, logger_name)
 
             if match_length > best_match_length:
                 best_match_length = match_length
@@ -101,6 +101,17 @@ class RaidenFilter(logging.Filter):
 
     def filter(self, record):
         return self._log_filter.should_log(record.name, record.levelname)
+
+
+def add_greenlet_name(logger: str, method_name: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Add greenlet_name to the event dict for greenlets that have a non-default name.
+    """
+    current_greenlet = gevent.getcurrent()
+    greenlet_name = getattr(current_greenlet, 'name', None)
+    if greenlet_name is not None and not greenlet_name.startswith('Greenlet-'):
+        event_dict['greenlet_name'] = greenlet_name
+    return event_dict
 
 
 def redactor(blacklist: Dict[Pattern, str]) -> Callable[[str], str]:
@@ -136,7 +147,7 @@ def configure_logging(
         log_file: str = None,
         disable_debug_logfile: bool = False,
         debug_log_file_name: str = None,
-        _first_party_packages: FrozenSet[str] =_FIRST_PARTY_PACKAGES,
+        _first_party_packages: FrozenSet[str] = _FIRST_PARTY_PACKAGES,
         cache_logger_on_first_use: bool = True,
 ):
     structlog.reset_defaults()
@@ -148,8 +159,9 @@ def configure_logging(
     processors = [
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
+        add_greenlet_name,
         structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S.%f"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
     ]
@@ -166,21 +178,36 @@ def configure_logging(
     })
     _wrap_tracebackexception_format(redact)
 
-    enabled_log_handlers = []
+    handlers = dict()
     if log_file:
-        enabled_log_handlers.append('file')
+        handlers['file'] = {
+            'class': 'logging.handlers.WatchedFileHandler',
+            'filename': log_file,
+            'level': 'DEBUG',
+            'formatter': formatter,
+            'filters': ['user_filter'],
+        }
     else:
-        # even though the handler is not enabled, it's configured, and the file
-        # must not be None
-        log_file = tempfile.mktemp()
-        enabled_log_handlers.append('default')
+        handlers['default'] = {
+            'class': 'logging.StreamHandler',
+            'level': 'DEBUG',
+            'formatter': formatter,
+            'filters': ['user_filter'],
+        }
 
     if not disable_debug_logfile:
-        enabled_log_handlers.append('debug-info')
-
-    if debug_log_file_name is None:
-        time = datetime.datetime.utcnow().isoformat()
-        debug_log_file_name = f'raiden-debug_{time}.log'
+        if debug_log_file_name is None:
+            time = datetime.datetime.utcnow().isoformat()
+            debug_log_file_name = f'raiden-debug_{time}.log'
+        handlers['debug-info'] = {
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': debug_log_file_name,
+            'level': 'DEBUG',
+            'formatter': 'debug',
+            'maxBytes': MAX_LOG_FILE_SIZE,
+            'backupCount': LOG_BACKUP_COUNT,
+            'filters': ['raiden_debug_file_filter'],
+        }
 
     logging.config.dictConfig(
         {
@@ -221,33 +248,10 @@ def configure_logging(
                     'foreign_pre_chain': processors,
                 },
             },
-            'handlers': {
-                'file': {
-                    'class': 'logging.handlers.WatchedFileHandler',
-                    'filename': log_file,
-                    'level': 'DEBUG',
-                    'formatter': formatter,
-                    'filters': ['user_filter'],
-                },
-                'default': {
-                    'class': 'logging.StreamHandler',
-                    'level': 'DEBUG',
-                    'formatter': formatter,
-                    'filters': ['user_filter'],
-                },
-                'debug-info': {
-                    'class': 'logging.handlers.RotatingFileHandler',
-                    'filename': debug_log_file_name,
-                    'level': 'DEBUG',
-                    'formatter': 'debug',
-                    'maxBytes': MAX_LOG_FILE_SIZE,
-                    'backupCount': LOG_BACKUP_COUNT,
-                    'filters': ['raiden_debug_file_filter'],
-                },
-            },
+            'handlers': handlers,
             'loggers': {
                 '': {
-                    'handlers': enabled_log_handlers,
+                    'handlers': handlers.keys(),
                     'propagate': True,
                 },
             },

@@ -1,5 +1,6 @@
 import pytest
 
+from raiden.settings import RED_EYES_CONTRACT_VERSION
 from raiden.tests.utils.smoketest import setup_testchain_and_raiden
 
 
@@ -12,9 +13,11 @@ def append_arg_if_existing(argname, initial_args, new_args):
 @pytest.fixture(scope='session')
 def blockchain_provider():
     result = setup_testchain_and_raiden(
-        'matrix',
-        'auto',
-        lambda x: None,
+        transport='matrix',
+        matrix_server='auto',
+        print_step=lambda x: None,
+        # cli tests should work with production contracts
+        contracts_version=RED_EYES_CONTRACT_VERSION,
     )
     args = result['args']
     # The setup of the testchain returns a TextIOWrapper but
@@ -44,8 +47,7 @@ def cli_args(blockchain_provider, removed_args, changed_args):
 
     if changed_args is not None:
         for k, v in changed_args.items():
-            if k in initial_args:
-                initial_args[k] = v
+            initial_args[k] = v
 
     args = [
         '--no-sync-check',
@@ -62,5 +64,6 @@ def cli_args(blockchain_provider, removed_args, changed_args):
     append_arg_if_existing('datadir', initial_args, args)
     append_arg_if_existing('network_id', initial_args, args)
     append_arg_if_existing('eth_rpc_endpoint', initial_args, args)
+    append_arg_if_existing('environment_type', initial_args, args)
 
     return args

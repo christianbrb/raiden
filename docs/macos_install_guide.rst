@@ -34,9 +34,9 @@ checkout of raiden.
 
     $ sudo pip install virtualenv
 
-#. Create a virtualenv for raiden::
+#. Create a virtualenv for raiden (requires python3.7)::
 
-    $ virtualenv venv-raiden
+    $ virtualenv --python=python3.7 venv-raiden
 
 #. "Activate" the virtualenv::
 
@@ -62,14 +62,6 @@ Both can be installed as follows::
 
     $ brew tap ethereum/ethereum
     $ brew install solidity ethereum
-
-If you want to use the Web-UI you additionally need node.js::
-
-    $ brew install node
-
-Afterwards you can compile the Web-UI::
-
-    $ python setup.py compile_webui
 
 The installation should now be complete. To ensure your setup is working correctly you can use the
 :code:`smoketest` command::

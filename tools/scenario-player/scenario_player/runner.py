@@ -32,8 +32,8 @@ OWN_ACCOUNT_BALANCE_MIN = 5 * 10 ** 17    # := 0.5 Eth
 NODE_ACCOUNT_BALANCE_MIN = 15 * 10 ** 16   # := 0.15 Eth
 NODE_ACCOUNT_BALANCE_FUND = 3 * 10 ** 17  # := 0.3 Eth
 TIMEOUT = 200
-API_URL_ADDRESS = "{protocol}://{target_host}/api/1/address"
-API_URL_TOKENS = "{protocol}://{target_host}/api/1/tokens"
+API_URL_ADDRESS = "{protocol}://{target_host}/api/v1/address"
+API_URL_TOKENS = "{protocol}://{target_host}/api/v1/tokens"
 SUPPORTED_SCENARIO_VERSIONS = {1, 2}
 
 
@@ -194,7 +194,11 @@ class ScenarioRunner(object):
             if low_balances:
                 log.info('Funding nodes', nodes=low_balances.keys())
                 fund_tx = [
-                    self.client.send_transaction(address, NODE_ACCOUNT_BALANCE_FUND - balance)
+                    self.client.send_transaction(
+                        to=address,
+                        startgas=21000,
+                        value=NODE_ACCOUNT_BALANCE_FUND - balance,
+                    )
                     for address, balance in low_balances.items()
                 ]
             node_starter = self.node_controller.start(wait=False)

@@ -1,8 +1,7 @@
 import random
 
-from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS
 from raiden.transfer import channel, secret_registry
-from raiden.transfer.architecture import TransitionResult
+from raiden.transfer.architecture import Event, StateChange, TransitionResult
 from raiden.transfer.events import EventPaymentReceivedSuccess, SendProcessed
 from raiden.transfer.mediated_transfer.events import (
     CHANNEL_IDENTIFIER_GLOBAL_QUEUE,
@@ -20,14 +19,39 @@ from raiden.transfer.mediated_transfer.state_change import (
 )
 from raiden.transfer.state import NettingChannelState, message_identifier_from_prng
 from raiden.transfer.state_change import Block, ContractReceiveSecretReveal, ReceiveUnlock
-from raiden.utils import typing
+from raiden.transfer.utils import is_valid_secret_reveal
+from raiden.utils.typing import MYPY_ANNOTATION, Address, BlockNumber, List, Optional
+
+
+def sanity_check(
+        old_state: Optional[TargetTransferState],
+        new_state: Optional[TargetTransferState],
+        channel_state: NettingChannelState,
+) -> None:
+    was_running = old_state is not None
+    is_running = new_state is not None
+    is_cleared = was_running and not is_running
+
+    if is_cleared:
+        lock = channel.get_lock(
+            end_state=channel_state.partner_state,
+            secrethash=old_state.transfer.lock.secrethash,
+        )
+        assert lock is None, 'The lock must be cleared once the task exists'
+    elif is_running:
+        # old_state can be None if the task is starting
+        lock = channel.get_lock(
+            end_state=channel_state.partner_state,
+            secrethash=new_state.transfer.lock.secrethash,
+        )
+        assert lock is not None, 'The lock must not be cleared while the task is running'
 
 
 def events_for_onchain_secretreveal(
         target_state: TargetTransferState,
         channel_state: NettingChannelState,
-        block_number: typing.BlockNumber,
-):
+        block_number: BlockNumber,
+) -> List[Event]:
     """ Emits the event for revealing the secret on-chain if the transfer
     can not be settled off-chain.
     """
@@ -43,8 +67,12 @@ def events_for_onchain_secretreveal(
         channel_state.partner_state,
         transfer.lock.secrethash,
     )
+    has_onchain_reveal_started = (
+        target_state.state == TargetTransferState.ONCHAIN_SECRET_REVEAL
+    )
 
-    if not safe_to_wait and secret_known_offchain:
+    if not safe_to_wait and secret_known_offchain and not has_onchain_reveal_started:
+        target_state.state = TargetTransferState.ONCHAIN_SECRET_REVEAL
         secret = channel.get_secret(
             channel_state.partner_state,
             transfer.lock.secrethash,
@@ -62,8 +90,8 @@ def handle_inittarget(
         state_change: ActionInitTarget,
         channel_state: NettingChannelState,
         pseudo_random_generator: random.Random,
-        block_number: typing.BlockNumber,
-):
+        block_number: BlockNumber,
+) -> TransitionResult[Optional[TargetTransferState]]:
     """ Handles an ActionInitTarget state change. """
     transfer = state_change.transfer
     route = state_change.route
@@ -98,7 +126,7 @@ def handle_inittarget(
             message_identifier = message_identifier_from_prng(pseudo_random_generator)
             recipient = transfer.initiator
             secret_request = SendSecretRequest(
-                recipient=recipient,
+                recipient=Address(recipient),
                 channel_identifier=CHANNEL_IDENTIFIER_GLOBAL_QUEUE,
                 message_identifier=message_identifier,
                 payment_identifier=transfer.payment_identifier,
@@ -129,11 +157,21 @@ def handle_offchain_secretreveal(
         state_change: ReceiveSecretReveal,
         channel_state: NettingChannelState,
         pseudo_random_generator: random.Random,
-):
+        block_number: BlockNumber,
+) -> TransitionResult[TargetTransferState]:
     """ Validates and handles a ReceiveSecretReveal state change. """
-    valid_secret = state_change.secrethash == target_state.transfer.lock.secrethash
+    valid_secret = is_valid_secret_reveal(
+        state_change=state_change,
+        transfer_secrethash=target_state.transfer.lock.secrethash,
+        secret=state_change.secret,
+    )
+    has_transfer_expired = channel.transfer_expired(
+        transfer=target_state.transfer,
+        affected_channel=channel_state,
+        block_number=block_number,
+    )
 
-    if valid_secret:
+    if valid_secret and not has_transfer_expired:
         channel.register_offchain_secret(
             channel_state=channel_state,
             secret=state_change.secret,
@@ -142,7 +180,7 @@ def handle_offchain_secretreveal(
 
         route = target_state.route
         message_identifier = message_identifier_from_prng(pseudo_random_generator)
-        target_state.state = 'reveal_secret'
+        target_state.state = TargetTransferState.OFFCHAIN_SECRET_REVEAL
         target_state.secret = state_change.secret
         recipient = route.node_address
 
@@ -166,9 +204,13 @@ def handle_onchain_secretreveal(
         target_state: TargetTransferState,
         state_change: ContractReceiveSecretReveal,
         channel_state: NettingChannelState,
-):
+) -> TransitionResult[TargetTransferState]:
     """ Validates and handles a ContractReceiveSecretReveal state change. """
-    valid_secret = state_change.secrethash == target_state.transfer.lock.secrethash
+    valid_secret = is_valid_secret_reveal(
+        state_change=state_change,
+        transfer_secrethash=target_state.transfer.lock.secrethash,
+        secret=state_change.secret,
+    )
 
     if valid_secret:
         channel.register_onchain_secret(
@@ -178,7 +220,7 @@ def handle_onchain_secretreveal(
             secret_reveal_block_number=state_change.block_number,
         )
 
-        target_state.state = 'reveal_secret'
+        target_state.state = TargetTransferState.ONCHAIN_UNLOCK
         target_state.secret = state_change.secret
 
     return TransitionResult(target_state, list())
@@ -188,7 +230,7 @@ def handle_unlock(
         target_state: TargetTransferState,
         state_change: ReceiveUnlock,
         channel_state: NettingChannelState,
-):
+) -> TransitionResult[Optional[TargetTransferState]]:
     """ Handles a ReceiveUnlock state change. """
     balance_proof_sender = state_change.balance_proof.sender
 
@@ -227,8 +269,8 @@ def handle_unlock(
 def handle_block(
         target_state: TargetTransferState,
         channel_state: NettingChannelState,
-        block_number: typing.BlockNumber,
-):
+        block_number: BlockNumber,
+) -> TransitionResult[TargetTransferState]:
     """ After Raiden learns about a new block this function must be called to
     handle expiration of the hash time lock.
     """
@@ -244,7 +286,7 @@ def handle_block(
         end_state=channel_state.our_state,
         lock=lock,
         block_number=block_number,
-        lock_expiration_threshold=lock.expiration + DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
+        lock_expiration_threshold=channel.get_receiver_expiration_threshold(lock),
     )
 
     if lock_has_expired and target_state.state != 'expired':
@@ -253,7 +295,7 @@ def handle_block(
             secrethash=transfer.lock.secrethash,
             reason=f'lock expired',
         )
-        target_state.state = 'expired'
+        target_state.state = TargetTransferState.EXPIRED
         events = [failed]
     elif secret_known:
         events = events_for_onchain_secretreveal(
@@ -269,8 +311,8 @@ def handle_lock_expired(
         target_state: TargetTransferState,
         state_change: ReceiveLockExpired,
         channel_state: NettingChannelState,
-        block_number: typing.BlockNumber,
-):
+        block_number: BlockNumber,
+) -> TransitionResult[Optional[TargetTransferState]]:
     """Remove expired locks from channel states."""
     result = channel.handle_receive_lock_expired(
         channel_state=channel_state,
@@ -292,17 +334,18 @@ def handle_lock_expired(
 
 
 def state_transition(
-        target_state,
-        state_change,
-        channel_state,
-        pseudo_random_generator,
-        block_number,
-):
+        target_state: TargetTransferState,
+        state_change: StateChange,
+        channel_state: NettingChannelState,
+        pseudo_random_generator: random.Random,
+        block_number: BlockNumber,
+) -> TransitionResult[Optional[TargetTransferState]]:
     """ State machine for the target node of a mediated transfer. """
     # pylint: disable=too-many-branches,unidiomatic-typecheck
 
     iteration = TransitionResult(target_state, list())
     if type(state_change) == ActionInitTarget:
+        assert isinstance(state_change, ActionInitTarget), MYPY_ANNOTATION
         if target_state is None:
             iteration = handle_inittarget(
                 state_change,
@@ -311,6 +354,7 @@ def state_transition(
                 block_number,
             )
     elif type(state_change) == Block:
+        assert isinstance(state_change, Block), MYPY_ANNOTATION
         assert state_change.block_number == block_number
 
         iteration = handle_block(
@@ -319,30 +363,41 @@ def state_transition(
             state_change.block_number,
         )
     elif type(state_change) == ReceiveSecretReveal:
+        assert isinstance(state_change, ReceiveSecretReveal), MYPY_ANNOTATION
         iteration = handle_offchain_secretreveal(
-            target_state,
-            state_change,
-            channel_state,
-            pseudo_random_generator,
+            target_state=target_state,
+            state_change=state_change,
+            channel_state=channel_state,
+            pseudo_random_generator=pseudo_random_generator,
+            block_number=block_number,
         )
     elif type(state_change) == ContractReceiveSecretReveal:
+        assert isinstance(state_change, ContractReceiveSecretReveal), MYPY_ANNOTATION
         iteration = handle_onchain_secretreveal(
             target_state,
             state_change,
             channel_state,
         )
     elif type(state_change) == ReceiveUnlock:
+        assert isinstance(state_change, ReceiveUnlock), MYPY_ANNOTATION
         iteration = handle_unlock(
             target_state,
             state_change,
             channel_state,
         )
     elif type(state_change) == ReceiveLockExpired:
+        assert isinstance(state_change, ReceiveLockExpired), MYPY_ANNOTATION
         iteration = handle_lock_expired(
             target_state,
             state_change,
             channel_state,
             block_number,
         )
+
+    sanity_check(
+        old_state=target_state,
+        new_state=iteration.new_state,
+        channel_state=channel_state,
+    )
 
     return iteration

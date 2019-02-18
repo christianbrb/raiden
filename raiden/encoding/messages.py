@@ -13,13 +13,13 @@ PROCESSED = 0
 PING = 1
 PONG = 2
 SECRETREQUEST = 3
-SECRET = 4
-DIRECTTRANSFER = 5
+UNLOCK = 4
 LOCKEDTRANSFER = 7
 REFUNDTRANSFER = 8
 REVEALSECRET = 11
 DELIVERED = 12
 LOCKEXPIRED = 13
+REQUESTMONITORING = 20
 
 
 # pylint: disable=invalid-name
@@ -48,13 +48,18 @@ channel_identifier = make_field('channel_identifier', 32, '32s', integer(0, UINT
 
 locksroot = make_field('locksroot', 32, '32s')
 secrethash = make_field('secrethash', 32, '32s')
+balance_hash = make_field('balance_hash', 32, '32s')
+additional_hash = make_field('additional_hash', 32, '32s')
 secret = make_field('secret', 32, '32s')
 transferred_amount = make_field('transferred_amount', 32, '32s', integer(0, UINT256_MAX))
 locked_amount = make_field('locked_amount', 32, '32s', integer(0, UINT256_MAX))
 amount = make_field('amount', 32, '32s', integer(0, UINT256_MAX))
+reward_amount = make_field('reward_amount', 32, '32s', integer(0, UINT256_MAX))
 fee = make_field('fee', 32, '32s', integer(0, UINT256_MAX))
 
 signature = make_field('signature', 65, '65s')
+non_closing_signature = make_field('non_closing_signature', 65, '65s')
+reward_proof_signature = make_field('reward_proof_signature', 65, '65s')
 
 Processed = namedbuffer(
     'processed',
@@ -111,10 +116,10 @@ SecretRequest = namedbuffer(
     ],
 )
 
-Secret = namedbuffer(
-    'secret',
+Unlock = namedbuffer(
+    'unlock',
     [
-        cmdid(SECRET),
+        cmdid(UNLOCK),
         pad(3),
         chain_id,
         message_identifier,
@@ -137,26 +142,6 @@ RevealSecret = namedbuffer(
         pad(3),
         message_identifier,
         secret,
-        signature,
-    ],
-)
-
-DirectTransfer = namedbuffer(
-    'direct_transfer',
-    [
-        cmdid(DIRECTTRANSFER),
-        pad(3),
-        nonce,
-        chain_id,
-        message_identifier,
-        payment_identifier,
-        token_network_address,
-        token,
-        channel_identifier,
-        recipient,
-        transferred_amount,
-        locked_amount,
-        locksroot,
         signature,
     ],
 )
@@ -243,18 +228,36 @@ Lock = namedbuffer(
 )
 
 
+RequestMonitoring = namedbuffer(
+    'request_monitoring',
+    [
+        cmdid(REQUESTMONITORING),
+        pad(3),
+        nonce,
+        chain_id,
+        token_network_address,
+        channel_identifier,
+        balance_hash,
+        additional_hash,
+        signature,
+        non_closing_signature,
+        reward_amount,
+        reward_proof_signature,
+    ],
+)
+
 CMDID_MESSAGE = {
     PROCESSED: Processed,
     PING: Ping,
     PONG: Pong,
     SECRETREQUEST: SecretRequest,
-    SECRET: Secret,
+    UNLOCK: Unlock,
     REVEALSECRET: RevealSecret,
-    DIRECTTRANSFER: DirectTransfer,
     LOCKEDTRANSFER: LockedTransfer,
     REFUNDTRANSFER: RefundTransfer,
     DELIVERED: Delivered,
     LOCKEXPIRED: LockExpired,
+    REQUESTMONITORING: RequestMonitoring,
 }
 
 

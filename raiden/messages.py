@@ -12,10 +12,14 @@ from eth_utils import (
 from raiden.constants import UINT64_MAX, UINT256_MAX
 from raiden.encoding import messages
 from raiden.encoding.format import buffer_for
-from raiden.exceptions import InvalidProtocolMessage
+from raiden.exceptions import InvalidProtocolMessage, InvalidSignature
 from raiden.transfer.architecture import SendMessageEvent
-from raiden.transfer.balance_proof import pack_balance_proof
-from raiden.transfer.events import SendDirectTransfer, SendProcessed
+from raiden.transfer.balance_proof import (
+    pack_balance_proof,
+    pack_balance_proof_update,
+    pack_reward_proof,
+)
+from raiden.transfer.events import SendProcessed
 from raiden.transfer.mediated_transfer.events import (
     SendBalanceProof,
     SendLockedTransfer,
@@ -24,9 +28,10 @@ from raiden.transfer.mediated_transfer.events import (
     SendSecretRequest,
     SendSecretReveal,
 )
-from raiden.transfer.state import HashTimeLockState
+from raiden.transfer.state import BalanceProofSignedState, HashTimeLockState
 from raiden.transfer.utils import hash_balance_data
 from raiden.utils import ishash, pex, sha3, typing
+from raiden.utils.signer import Signer, recover
 from raiden.utils.typing import (
     Address,
     BlockExpiration,
@@ -38,24 +43,29 @@ from raiden.utils.typing import (
     PaymentID,
     Secret,
     SecretHash,
+    TokenAddress,
     TokenAmount,
     TokenNetworkAddress,
 )
-from raiden_libs.exceptions import InvalidSignature
-from raiden_libs.utils.signing import eth_recover, eth_sign
 
 __all__ = (
     'Delivered',
-    'DirectTransfer',
+    'EnvelopeMessage',
     'Lock',
     'LockedTransfer',
     'LockedTransferBase',
+    'LockExpired',
+    'Message',
     'Ping',
+    'Pong',
     'Processed',
     'RefundTransfer',
-    'Secret',
+    'RequestMonitoring',
+    'RevealSecret',
     'SecretRequest',
+    'SignedBlindedBalanceProof',
     'SignedMessage',
+    'Unlock',
     'decode',
     'from_dict',
 )
@@ -140,12 +150,10 @@ def from_dict(data: dict) -> 'Message':
 def message_from_sendevent(send_event: SendMessageEvent, our_address: Address) -> 'Message':
     if type(send_event) == SendLockedTransfer:
         message = LockedTransfer.from_event(send_event)
-    elif type(send_event) == SendDirectTransfer:
-        message = DirectTransfer.from_event(send_event)
     elif type(send_event) == SendSecretReveal:
         message = RevealSecret.from_event(send_event)
     elif type(send_event) == SendBalanceProof:
-        message = Secret.from_event(send_event)
+        message = Unlock.from_event(send_event)
     elif type(send_event) == SendSecretRequest:
         message = SecretRequest.from_event(send_event)
     elif type(send_event) == SendRefundTransfer:
@@ -235,10 +243,10 @@ class SignedMessage(Message):
         # this slice must be from the end of the buffer
         return packed.data[:-field.size_bytes]
 
-    def sign(self, private_key):
-        """ Sign message using `private_key`. """
+    def sign(self, signer: Signer):
+        """ Sign message using signer. """
         message_data = self._data_to_sign()
-        self.signature = eth_sign(privkey=private_key, data=message_data)
+        self.signature = signer.sign(data=message_data)
 
     @property
     @cached(_senders_cache, key=attrgetter('signature'))
@@ -249,10 +257,10 @@ class SignedMessage(Message):
         message_signature = self.signature
 
         try:
-            address = to_canonical_address(eth_recover(
+            address: Optional[Address] = recover(
                 data=data_that_was_signed,
                 signature=message_signature,
-            ))
+            )
         except InvalidSignature:
             address = None
         return address
@@ -319,7 +327,7 @@ class EnvelopeMessage(SignedMessage):
             balance_hash=balance_hash,
             additional_hash=self.message_hash,
             channel_identifier=self.channel_identifier,
-            token_network_identifier=self.token_network_address,
+            token_network_identifier=typing.TokenNetworkID(self.token_network_address),
             chain_id=self.chain_id,
         )
         return balance_proof_packed
@@ -554,14 +562,14 @@ class SecretRequest(SignedMessage):
         return secret_request
 
 
-class Secret(EnvelopeMessage):
+class Unlock(EnvelopeMessage):
     """ Message used to do state changes on a partner Raiden Channel.
 
     Locksroot changes need to be synchronized among both participants, the
-    protocol is for only the side unlocking to send the Secret message allowing
+    protocol is for only the side unlocking to send the Unlock message allowing
     the other party to claim the unlocked lock.
     """
-    cmdid = messages.SECRET
+    cmdid = messages.UNLOCK
 
     def __init__(
             self,
@@ -569,7 +577,7 @@ class Secret(EnvelopeMessage):
             message_identifier: MessageID,
             payment_identifier: PaymentID,
             nonce: int,
-            token_network_address: Address,
+            token_network_address: TokenNetworkAddress,
             channel_identifier: ChannelID,
             transferred_amount: TokenAmount,
             locked_amount: TokenAmount,
@@ -674,7 +682,7 @@ class Secret(EnvelopeMessage):
 
     def to_dict(self):
         return {
-            'type': self.__class__.__name__,
+            'type': 'Secret',
             'chain_id': self.chain_id,
             'message_identifier': self.message_identifier,
             'payment_identifier': self.payment_identifier,
@@ -690,7 +698,7 @@ class Secret(EnvelopeMessage):
 
     @classmethod
     def from_dict(cls, data):
-        assert data['type'] == cls.__name__
+        assert data['type'] == 'Secret'
         message = cls(
             chain_id=data['chain_id'],
             message_identifier=data['message_identifier'],
@@ -773,173 +781,6 @@ class RevealSecret(SignedMessage):
         )
         reveal_secret.signature = decode_hex(data['signature'])
         return reveal_secret
-
-
-class DirectTransfer(EnvelopeMessage):
-    """ A direct token exchange, used when both participants have a previously
-    opened channel.
-
-    Signs the unidirectional settled `balance` of `token` to `recipient` plus
-    locked transfers.
-
-    Settled refers to the inclusion of formerly locked amounts.
-    Locked amounts are not included in the balance yet, but represented
-    by the `locksroot`.
-
-    Args:
-        nonce: A sequential nonce, used to protected against replay attacks and
-            to give a total order for the messages. This nonce is per
-            participant, not shared.
-        token: The address of the token being exchanged in the channel.
-        transferred_amount: The total amount of token that was transferred to
-            the channel partner. This value is monotonically increasing and can
-            be larger than a channels deposit, since the channels are
-            bidirecional.
-        recipient: The address of the raiden node participating in the channel.
-        locksroot: The root of a merkle tree which records the current
-            outstanding locks.
-    """
-
-    cmdid = messages.DIRECTTRANSFER
-
-    def __init__(
-            self,
-            chain_id: ChainID,
-            message_identifier: MessageID,
-            payment_identifier: PaymentID,
-            nonce: int,
-            token_network_address: Address,
-            token: Address,
-            channel_identifier: ChannelID,
-            transferred_amount: TokenAmount,
-            locked_amount: TokenAmount,
-            recipient: Address,
-            locksroot: Locksroot,
-    ):
-
-        super().__init__(
-            chain_id=chain_id,
-            nonce=nonce,
-            transferred_amount=transferred_amount,
-            locked_amount=locked_amount,
-            locksroot=locksroot,
-            channel_identifier=channel_identifier,
-            token_network_address=token_network_address,
-        )
-        assert_transfer_values(payment_identifier, token, recipient)
-        self.message_identifier = message_identifier
-        self.payment_identifier = payment_identifier
-        self.token = token
-        self.recipient = recipient  #: partner's address
-
-    @classmethod
-    def unpack(cls, packed):
-        transfer = cls(
-            chain_id=packed.chain_id,
-            message_identifier=packed.message_identifier,
-            payment_identifier=packed.payment_identifier,
-            nonce=packed.nonce,
-            token_network_address=packed.token_network_address,
-            token=packed.token,
-            channel_identifier=packed.channel_identifier,
-            transferred_amount=packed.transferred_amount,
-            recipient=packed.recipient,
-            locked_amount=packed.locked_amount,
-            locksroot=packed.locksroot,
-        )
-        transfer.signature = packed.signature
-
-        return transfer
-
-    def pack(self, packed):
-        packed.chain_id = self.chain_id
-        packed.message_identifier = self.message_identifier
-        packed.payment_identifier = self.payment_identifier
-        packed.nonce = self.nonce
-        packed.token = self.token
-        packed.token_network_address = self.token_network_address
-        packed.channel_identifier = self.channel_identifier
-        packed.transferred_amount = self.transferred_amount
-        packed.locked_amount = self.locked_amount
-        packed.recipient = self.recipient
-        packed.locksroot = self.locksroot
-        packed.signature = self.signature
-
-    @classmethod
-    def from_event(cls, event):
-        balance_proof = event.balance_proof
-
-        return cls(
-            chain_id=balance_proof.chain_id,
-            message_identifier=event.message_identifier,
-            payment_identifier=event.payment_identifier,
-            nonce=balance_proof.nonce,
-            token_network_address=balance_proof.token_network_identifier,
-            token=event.token,
-            channel_identifier=balance_proof.channel_identifier,
-            transferred_amount=balance_proof.transferred_amount,
-            locked_amount=balance_proof.locked_amount,
-            recipient=event.recipient,
-            locksroot=balance_proof.locksroot,
-        )
-
-    def __repr__(self):
-        representation = (
-            '<{} ['
-            'chainid:{} msgid:{} paymentid:{} token_network:{} channel_identifier:{} nonce:{} '
-            'transferred_amount:{} locked_amount:{} locksroot:{} hash:{}'
-            ']>'
-        ).format(
-            self.__class__.__name__,
-            self.chain_id,
-            self.message_identifier,
-            self.payment_identifier,
-            pex(self.token_network_address),
-            self.channel_identifier,
-            self.nonce,
-            self.transferred_amount,
-            self.locked_amount,
-            pex(self.locksroot),
-            pex(self.hash),
-        )
-
-        return representation
-
-    def to_dict(self):
-        return {
-            'type': self.__class__.__name__,
-            'chain_id': self.chain_id,
-            'message_identifier': self.message_identifier,
-            'payment_identifier': self.payment_identifier,
-            'nonce': self.nonce,
-            'token_network_address': to_normalized_address(self.token_network_address),
-            'token': to_normalized_address(self.token),
-            'channel_identifier': self.channel_identifier,
-            'transferred_amount': self.transferred_amount,
-            'locked_amount': self.locked_amount,
-            'recipient': to_normalized_address(self.recipient),
-            'locksroot': encode_hex(self.locksroot),
-            'signature': encode_hex(self.signature),
-        }
-
-    @classmethod
-    def from_dict(cls, data):
-        assert data['type'] == cls.__name__
-        direct_transfer = cls(
-            chain_id=data['chain_id'],
-            message_identifier=data['message_identifier'],
-            payment_identifier=data['payment_identifier'],
-            nonce=data['nonce'],
-            token_network_address=to_canonical_address(data['token_network_address']),
-            token=to_canonical_address(data['token']),
-            channel_identifier=data['channel_identifier'],
-            transferred_amount=data['transferred_amount'],
-            recipient=to_canonical_address(data['recipient']),
-            locked_amount=data['locked_amount'],
-            locksroot=decode_hex(data['locksroot']),
-        )
-        direct_transfer.signature = decode_hex(data['signature'])
-        return direct_transfer
 
 
 class Lock:
@@ -1049,8 +890,8 @@ class LockedTransferBase(EnvelopeMessage):
             message_identifier: MessageID,
             payment_identifier: PaymentID,
             nonce: int,
-            token_network_address: Address,
-            token: Address,
+            token_network_address: TokenNetworkAddress,
+            token: TokenAddress,
             channel_identifier: ChannelID,
             transferred_amount: TokenAmount,
             locked_amount: TokenAmount,
@@ -1149,8 +990,8 @@ class LockedTransfer(LockedTransferBase):
             message_identifier: MessageID,
             payment_identifier: PaymentID,
             nonce: int,
-            token_network_address: Address,
-            token: Address,
+            token_network_address: TokenNetworkAddress,
+            token: TokenAddress,
             channel_identifier: ChannelID,
             transferred_amount: TokenAmount,
             locked_amount: TokenAmount,
@@ -1284,7 +1125,7 @@ class LockedTransfer(LockedTransferBase):
             message_identifier=event.message_identifier,
             payment_identifier=transfer.payment_identifier,
             nonce=balance_proof.nonce,
-            token_network_address=balance_proof.token_network_identifier,
+            token_network_address=TokenNetworkAddress(balance_proof.token_network_identifier),
             token=transfer.token,
             channel_identifier=balance_proof.channel_identifier,
             transferred_amount=balance_proof.transferred_amount,
@@ -1586,18 +1427,292 @@ class LockExpired(EnvelopeMessage):
         return expired_lock
 
 
+class SignedBlindedBalanceProof:
+    """Message sub-field `onchain_balance_proof` for `RequestMonitoring`.
+    """
+
+    def __init__(
+            self,
+            channel_identifier: typing.ChannelID,
+            token_network_address: typing.TokenNetworkID,
+            nonce: typing.Nonce,
+            additional_hash: typing.AdditionalHash,
+            chain_id: typing.ChainID,
+            signature: typing.Signature,
+            balance_hash: typing.BalanceHash,
+    ) -> None:
+
+        super().__init__()
+        self.channel_identifier = channel_identifier
+        self.token_network_address = token_network_address
+        self.nonce = nonce
+        self.additional_hash = additional_hash
+        self.chain_id = chain_id
+        self.balance_hash = balance_hash
+        self.signature = signature
+        if not signature:
+            raise ValueError('balance proof is not signed')
+        self.non_closing_signature = None
+
+    @classmethod
+    def from_balance_proof_signed_state(
+            cls: typing.Type[typing.T_SignedBlindedBalanceProof],
+            balance_proof: BalanceProofSignedState,
+    ) -> typing.T_SignedBlindedBalanceProof:
+        assert isinstance(balance_proof, BalanceProofSignedState)
+        return cls(
+            channel_identifier=balance_proof.channel_identifier,
+            token_network_address=balance_proof.token_network_identifier,
+            nonce=balance_proof.nonce,
+            additional_hash=balance_proof.message_hash,
+            chain_id=balance_proof.chain_id,
+            signature=balance_proof.signature,
+            balance_hash=hash_balance_data(
+                balance_proof.transferred_amount,
+                balance_proof.locked_amount,
+                balance_proof.locksroot,
+            ),
+        )
+
+    def _data_to_sign(self) -> bytes:
+        packed = pack_balance_proof_update(
+            nonce=self.nonce,
+            balance_hash=self.balance_hash,
+            additional_hash=self.additional_hash,
+            channel_identifier=self.channel_identifier,
+            token_network_identifier=self.token_network_address,
+            chain_id=self.chain_id,
+            partner_signature=self.signature,
+        )
+        return packed
+
+    def _sign(self, signer: Signer) -> typing.Signature:
+        """Internal function for the overall `sign` function of `RequestMonitoring`.
+        """
+        # Important: we don't write the signature to `.signature`
+        data = self._data_to_sign()
+        return signer.sign(data)
+
+    def to_dict(self) -> typing.Dict[str, typing.Any]:
+        """Message format according to monitoring service spec"""
+        return {
+            'type': self.__class__.__name__,
+            'channel_identifier': self.channel_identifier,
+            'token_network_address': to_normalized_address(self.token_network_address),
+            'balance_hash': encode_hex(self.balance_hash),
+            'nonce': self.nonce,
+            'additional_hash': encode_hex(self.additional_hash),
+            'signature': encode_hex(self.signature),
+            'chain_id': self.chain_id,
+        }
+
+    @classmethod
+    def from_dict(
+            cls: typing.Type[typing.T_SignedBlindedBalanceProof],
+            data: typing.Dict,
+    ) -> typing.T_SignedBlindedBalanceProof:
+        assert data['type'] == cls.__name__
+        return cls(
+            channel_identifier=data['channel_identifier'],
+            token_network_address=decode_hex(data['token_network_address']),
+            balance_hash=decode_hex(data['balance_hash']),
+            nonce=typing.Nonce(int(data['nonce'])),
+            additional_hash=decode_hex(data['additional_hash']),
+            signature=decode_hex(data['signature']),
+            chain_id=typing.ChainID(int(data['chain_id'])),
+        )
+
+
+class RequestMonitoring(SignedMessage):
+    cmdid = messages.REQUESTMONITORING
+    """Message to request channel watching from a monitoring service.
+    Spec:
+        https://raiden-network-specification.readthedocs.io/en/latest/monitoring_service.html\
+#monitor-request
+    """
+
+    def __init__(
+            self,
+            onchain_balance_proof: SignedBlindedBalanceProof,
+            reward_amount: typing.TokenAmount,
+            non_closing_signature: typing.Signature = b'',
+            reward_proof_signature: typing.Signature = b'',
+    ) -> None:
+        super().__init__()
+        if onchain_balance_proof is None:
+            raise ValueError('no balance proof given')
+        self.balance_proof = onchain_balance_proof
+        self.reward_amount = reward_amount
+        if non_closing_signature:
+            self.non_closing_signature = non_closing_signature
+        else:
+            self.non_closing_signature = None
+        if reward_proof_signature:
+            self.signature = reward_proof_signature
+        else:
+            self.signature = None
+
+    @classmethod
+    def from_balance_proof_signed_state(
+            cls: typing.Type[typing.T_SignedBlindedBalanceProof],
+            balance_proof: BalanceProofSignedState,
+            reward_amount: typing.TokenAmount,
+    ) -> typing.T_RequestMonitoring:
+        assert isinstance(balance_proof, BalanceProofSignedState)
+        onchain_balance_proof = SignedBlindedBalanceProof.from_balance_proof_signed_state(
+            balance_proof=balance_proof,
+        )
+        return cls(
+            onchain_balance_proof=onchain_balance_proof,
+            reward_amount=reward_amount,
+        )
+
+    @property
+    def reward_proof_signature(self) -> typing.Signature:
+        return self.signature
+
+    @classmethod
+    def from_dict(
+            cls: typing.Type[typing.T_RequestMonitoring],
+            data: typing.Dict,
+    ) -> typing.T_RequestMonitoring:
+        assert data['type'] == cls.__name__
+        onchain_balance_proof = SignedBlindedBalanceProof.from_dict(
+            data['onchain_balance_proof'],
+        )
+        assert isinstance(onchain_balance_proof, SignedBlindedBalanceProof)
+        return cls(
+            onchain_balance_proof=onchain_balance_proof,
+            reward_amount=int(data['reward_amount']),
+            non_closing_signature=decode_hex(data['non_closing_signature']),
+            reward_proof_signature=decode_hex(data['reward_proof_signature']),
+        )
+
+    def to_dict(self) -> typing.Dict:
+        """Message format according to monitoring service spec"""
+        if not self.non_closing_signature:
+            raise ValueError('onchain_balance_proof needs to be signed')
+        if not self.reward_proof_signature:
+            raise ValueError('monitoring request needs to be signed')
+        return {
+            'type': self.__class__.__name__,
+            'onchain_balance_proof': self.balance_proof.to_dict(),
+            'reward_amount': self.reward_amount,
+            'non_closing_signature': encode_hex(self.non_closing_signature),
+            'reward_proof_signature': encode_hex(self.reward_proof_signature),
+        }
+
+    def _data_to_sign(self) -> bytes:
+        """ Return the binary data to be/which was signed """
+        packed = pack_reward_proof(
+            channel_identifier=self.balance_proof.channel_identifier,
+            reward_amount=self.reward_amount,
+            token_network_address=self.balance_proof.token_network_address,
+            chain_id=self.balance_proof.chain_id,
+            nonce=self.balance_proof.nonce,
+        )
+        return packed
+
+    def sign(self, signer: Signer):
+        """This method signs twice:
+            - the `non_closing_signature` for the balance proof update
+            - the `reward_proof_signature` for the monitoring request
+        """
+        self.non_closing_signature = self.balance_proof._sign(signer)
+        message_data = self._data_to_sign()
+        self.signature = signer.sign(data=message_data)
+
+    def pack(self, packed: bytes) -> bytes:
+        if self.non_closing_signature is None:
+            raise ValueError('non_closing_signature missing, did you forget to sign()?')
+        if self.reward_proof_signature is None:
+            raise ValueError('reward_proof_signature missing, did you forget to sign()?')
+        packed.nonce = self.balance_proof.nonce
+        packed.chain_id = self.balance_proof.chain_id
+        packed.token_network_address = self.balance_proof.token_network_address
+        packed.channel_identifier = self.balance_proof.channel_identifier
+        packed.balance_hash = self.balance_proof.balance_hash
+        packed.additional_hash = self.balance_proof.additional_hash
+        packed.signature = self.balance_proof.signature
+        packed.non_closing_signature = self.non_closing_signature
+        packed.reward_amount = self.reward_amount
+        packed.reward_proof_signature = self.reward_proof_signature
+        return packed
+
+    @classmethod
+    def unpack(
+            cls: typing.Type[typing.T_RequestMonitoring],
+            packed: bytes,
+    ) -> typing.T_RequestMonitoring:
+        assert packed.balance_hash
+        onchain_balance_proof = SignedBlindedBalanceProof(
+            nonce=packed.nonce,
+            chain_id=packed.chain_id,
+            token_network_address=packed.token_network_address,
+            channel_identifier=packed.channel_identifier,
+            balance_hash=packed.balance_hash,
+            additional_hash=packed.additional_hash,
+            signature=packed.signature,
+        )
+        monitoring_request = cls(
+            onchain_balance_proof=onchain_balance_proof,
+            non_closing_signature=packed.non_closing_signature,
+            reward_amount=packed.reward_amount,
+            reward_proof_signature=packed.reward_proof_signature,
+        )
+        return monitoring_request
+
+    def verify_request_monitoring(
+            self,
+            partner_address: typing.Address,
+            requesting_address: typing.Address,
+    ) -> bool:
+        """ One should only use this method to verify integrity and signatures of a
+        RequestMonitoring message. """
+        balance_proof_data = pack_balance_proof(
+            nonce=self.balance_proof.nonce,
+            balance_hash=self.balance_proof.balance_hash,
+            additional_hash=self.balance_proof.additional_hash,
+            channel_identifier=self.balance_proof.channel_identifier,
+            token_network_identifier=self.balance_proof.token_network_address,
+            chain_id=self.balance_proof.chain_id,
+        )
+        blinded_data = pack_balance_proof_update(
+            nonce=self.balance_proof.nonce,
+            balance_hash=self.balance_proof.balance_hash,
+            additional_hash=self.balance_proof.additional_hash,
+            channel_identifier=self.balance_proof.channel_identifier,
+            token_network_identifier=self.balance_proof.token_network_address,
+            chain_id=self.balance_proof.chain_id,
+            partner_signature=self.balance_proof.signature,
+        )
+        reward_proof_data = pack_reward_proof(
+            channel_identifier=self.balance_proof.channel_identifier,
+            reward_amount=self.reward_amount,
+            token_network_address=self.balance_proof.token_network_address,
+            chain_id=self.balance_proof.chain_id,
+            nonce=self.balance_proof.nonce,
+        )
+        return (
+            recover(balance_proof_data, self.balance_proof.signature) == partner_address and
+            recover(blinded_data, self.non_closing_signature) == requesting_address and
+            recover(reward_proof_data, self.reward_proof_signature) == requesting_address
+        )
+
+
 CMDID_TO_CLASS = {
     messages.DELIVERED: Delivered,
-    messages.DIRECTTRANSFER: DirectTransfer,
     messages.LOCKEDTRANSFER: LockedTransfer,
     messages.PING: Ping,
     messages.PONG: Pong,
     messages.PROCESSED: Processed,
     messages.REFUNDTRANSFER: RefundTransfer,
     messages.REVEALSECRET: RevealSecret,
-    messages.SECRET: Secret,
+    messages.UNLOCK: Unlock,
     messages.SECRETREQUEST: SecretRequest,
     messages.LOCKEXPIRED: LockExpired,
+    messages.REQUESTMONITORING: RequestMonitoring,
 }
 
 CLASSNAME_TO_CLASS = {klass.__name__: klass for klass in CMDID_TO_CLASS.values()}
+CLASSNAME_TO_CLASS['Secret'] = Unlock

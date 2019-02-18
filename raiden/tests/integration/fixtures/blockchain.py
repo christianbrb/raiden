@@ -1,20 +1,22 @@
+import os
+
 import pytest
 from web3 import HTTPProvider, Web3
 
+from raiden.constants import Environment
 from raiden.network.blockchain_service import BlockChainService
 from raiden.network.discovery import ContractDiscovery
 from raiden.network.rpc.client import JSONRPCClient
+from raiden.settings import DEVELOPMENT_CONTRACT_VERSION, RED_EYES_CONTRACT_VERSION
 from raiden.tests.utils.geth import GethNodeDescription, geth_run_private_blockchain
 from raiden.tests.utils.network import jsonrpc_services
 from raiden.tests.utils.tests import cleanup_tasks
 from raiden.utils import privatekey_to_address
-from raiden_contracts.contract_manager import (
-    ContractManager,
-    contracts_deployed_path,
-    contracts_precompiled_path,
-)
+from raiden_contracts.contract_manager import ContractManager, contracts_precompiled_path
 
 # pylint: disable=redefined-outer-name,too-many-arguments,unused-argument,too-many-locals
+
+_GETH_DATADIR = os.environ.get('RAIDEN_TESTS_GETH_DATADIR', False)
 
 
 @pytest.fixture
@@ -72,14 +74,20 @@ def web3(
             for key in keys_to_fund
         ]
 
+        if _GETH_DATADIR:
+            base_datadir = _GETH_DATADIR
+            os.makedirs(base_datadir, exist_ok=True)
+        else:
+            base_datadir = str(tmpdir)
+
         geth_processes = geth_run_private_blockchain(
-            web3,
-            accounts_to_fund,
-            geth_nodes,
-            str(tmpdir),
-            chain_id,
-            request.config.option.verbose,
-            random_marker,
+            web3=web3,
+            accounts_to_fund=accounts_to_fund,
+            geth_nodes=geth_nodes,
+            base_datadir=base_datadir,
+            chain_id=chain_id,
+            verbosity=request.config.option.verbose,
+            random_marker=random_marker,
         )
 
         yield web3
@@ -99,30 +107,17 @@ def deploy_client(blockchain_rpc_ports, deploy_key, web3):
 
 
 @pytest.fixture
-def testing_network_id():
-    return 1
+def contract_manager(environment_type):
+    version = RED_EYES_CONTRACT_VERSION
+    if environment_type == Environment.DEVELOPMENT:
+        version = DEVELOPMENT_CONTRACT_VERSION
 
-
-@pytest.fixture
-def testing_contracts_version():
-    return None
-
-
-@pytest.fixture
-def contract_manager(testing_network_id, testing_contracts_version):
-    # Keeping this only for documentation purposes if we want to test specific
-    # contract versions apart from the last one
-    if False:
-        contracts_path = contracts_deployed_path(testing_network_id, testing_contracts_version)
-    else:
-        contracts_path = contracts_precompiled_path()
-    return ContractManager(contracts_path)
+    return ContractManager(contracts_precompiled_path(version))
 
 
 @pytest.fixture
 def deploy_service(deploy_key, deploy_client, contract_manager):
     return BlockChainService(
-        privatekey_bin=deploy_key,
         jsonrpc_client=deploy_client,
         contract_manager=contract_manager,
     )
