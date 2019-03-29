@@ -19,11 +19,11 @@ from raiden.transfer.state import (
     TokenNetworkState,
     TransferTask,
 )
+from raiden.utils import CanonicalIdentifier
 from raiden.utils.typing import (
     Address,
     BlockNumber,
     Callable,
-    ChannelID,
     Dict,
     Iterator,
     List,
@@ -168,7 +168,7 @@ def get_token_network_identifier_by_token_address(
         chain_state: ChainState,
         payment_network_id: PaymentNetworkID,
         token_address: TokenAddress,
-) -> TokenNetworkID:
+) -> Optional[TokenNetworkID]:
     token_network = get_token_network_by_token_address(
         chain_state,
         payment_network_id,
@@ -207,22 +207,6 @@ def get_token_identifiers(
         return [
             token_address
             for token_address in payment_network.tokenaddresses_to_tokenidentifiers.keys()
-        ]
-
-    return list()
-
-
-def get_token_network_addresses_for(
-        chain_state: ChainState,
-        payment_network_id: PaymentNetworkID,
-) -> List[Address]:
-    """ Return the list of tokens registered with the given payment network. """
-    payment_network = chain_state.identifiers_to_paymentnetworks.get(payment_network_id)
-
-    if payment_network is not None:
-        return [
-            token_network.token_address
-            for token_network in payment_network.tokenidentifiers_to_tokennetworks.values()
         ]
 
     return list()
@@ -338,39 +322,21 @@ def get_channelstate_by_token_network_and_partner(
     return channel_state
 
 
-def get_channelstate_by_token_network_identifier(
+def get_channelstate_by_canonical_identifier(
         chain_state: ChainState,
-        token_network_id: TokenNetworkID,
-        channel_id: ChannelID,
+        canonical_identifier: CanonicalIdentifier,
 ) -> Optional[NettingChannelState]:
     """ Return the NettingChannelState if it exists, None otherwise. """
     token_network = get_token_network_by_identifier(
         chain_state,
-        token_network_id,
+        TokenNetworkID(canonical_identifier.token_network_address),
     )
 
     channel_state = None
     if token_network:
-        channel_state = token_network.channelidentifiers_to_channels.get(channel_id)
-
-    return channel_state
-
-
-def get_channelstate_by_id(
-        chain_state: ChainState,
-        payment_network_id: PaymentNetworkID,
-        token_address: TokenAddress,
-        channel_id: ChannelID,
-) -> Optional[NettingChannelState]:
-    token_network = get_token_network_by_token_address(
-        chain_state=chain_state,
-        payment_network_id=payment_network_id,
-        token_address=token_address,
-    )
-
-    channel_state = None
-    if token_network:
-        channel_state = token_network.channelidentifiers_to_channels.get(channel_id)
+        channel_state = token_network.channelidentifiers_to_channels.get(
+            canonical_identifier.channel_identifier,
+        )
 
     return channel_state
 
@@ -465,13 +431,16 @@ def get_channelstate_settled(
     )
 
 
-def role_from_transfer_task(transfer_task: TransferTask) -> str:
+def role_from_transfer_task(transfer_task: TransferTask) -> Optional[str]:
+    """Return the role fo the transfer, None on error."""
     if isinstance(transfer_task, InitiatorTask):
         return 'initiator'
-    elif isinstance(transfer_task, MediatorTask):
+    if isinstance(transfer_task, MediatorTask):
         return 'mediator'
-    elif isinstance(transfer_task, TargetTask):
+    if isinstance(transfer_task, TargetTask):
         return 'target'
+
+    return None
 
 
 def get_transfer_role(chain_state: ChainState, secrethash: SecretHash) -> str:
@@ -550,7 +519,7 @@ def filter_channels_by_partneraddress(
 
 def filter_channels_by_status(
         channel_states: List[NettingChannelState],
-        exclude_states=None,
+        exclude_states: Optional[List[str]] = None,
 ) -> List[NettingChannelState]:
     """ Filter the list of channels by excluding ones
     for which the state exists in `exclude_states`. """

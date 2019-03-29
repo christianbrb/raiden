@@ -1,27 +1,34 @@
 import random
+from random import Random
+from typing import TYPE_CHECKING
 
 from eth_utils import to_checksum_address
 from web3 import Web3
 
 from raiden.constants import EMPTY_HASH
 from raiden.storage import sqlite
+from raiden.utils import CanonicalIdentifier
 from raiden.utils.serialization import serialize_bytes
 from raiden.utils.typing import (
     Address,
+    Any,
     BalanceHash,
-    ChainID,
-    ChannelID,
     Locksroot,
+    Secret,
+    SecretHash,
     TokenAmount,
-    TokenNetworkID,
+    Union,
 )
+
+if TYPE_CHECKING:
+    # pylint: disable=unused-import
+    from raiden.transfer.mediated_transfer.state_change import ReceiveSecretReveal  # noqa: F401
+    from raiden.transfer.state_change import ContractReceiveSecretReveal  # noqa: F401
 
 
 def get_state_change_with_balance_proof_by_balance_hash(
         storage: sqlite.SQLiteStorage,
-        chain_id: ChainID,
-        token_network_identifier: TokenNetworkID,
-        channel_identifier: ChannelID,
+        canonical_identifier: CanonicalIdentifier,
         balance_hash: BalanceHash,
         sender: Address,
 ) -> sqlite.StateChangeRecord:
@@ -32,9 +39,11 @@ def get_state_change_with_balance_proof_by_balance_hash(
     has the blinded balance proof data.
     """
     return storage.get_latest_state_change_by_data_field({
-        'balance_proof.chain_id': chain_id,
-        'balance_proof.token_network_identifier': to_checksum_address(token_network_identifier),
-        'balance_proof.channel_identifier': str(channel_identifier),
+        'balance_proof.chain_id': canonical_identifier.chain_identifier,
+        'balance_proof.token_network_identifier': to_checksum_address(
+            canonical_identifier.token_network_address,
+        ),
+        'balance_proof.channel_identifier': str(canonical_identifier.channel_identifier),
         'balance_proof.balance_hash': serialize_bytes(balance_hash),
         'balance_proof.sender': to_checksum_address(sender),
     })
@@ -42,9 +51,7 @@ def get_state_change_with_balance_proof_by_balance_hash(
 
 def get_state_change_with_balance_proof_by_locksroot(
         storage: sqlite.SQLiteStorage,
-        chain_id: ChainID,
-        token_network_identifier: TokenNetworkID,
-        channel_identifier: ChannelID,
+        canonical_identifier: CanonicalIdentifier,
         locksroot: Locksroot,
         sender: Address,
 ) -> sqlite.StateChangeRecord:
@@ -56,9 +63,11 @@ def get_state_change_with_balance_proof_by_locksroot(
     balance proof.
     """
     return storage.get_latest_state_change_by_data_field({
-        'balance_proof.chain_id': chain_id,
-        'balance_proof.token_network_identifier': to_checksum_address(token_network_identifier),
-        'balance_proof.channel_identifier': str(channel_identifier),
+        'balance_proof.chain_id': canonical_identifier.chain_identifier,
+        'balance_proof.token_network_identifier': to_checksum_address(
+            canonical_identifier.token_network_address,
+        ),
+        'balance_proof.channel_identifier': str(canonical_identifier.channel_identifier),
         'balance_proof.locksroot': serialize_bytes(locksroot),
         'balance_proof.sender': to_checksum_address(sender),
     })
@@ -66,9 +75,7 @@ def get_state_change_with_balance_proof_by_locksroot(
 
 def get_event_with_balance_proof_by_balance_hash(
         storage: sqlite.SQLiteStorage,
-        chain_id: ChainID,
-        token_network_identifier: TokenNetworkID,
-        channel_identifier: ChannelID,
+        canonical_identifier: CanonicalIdentifier,
         balance_hash: BalanceHash,
 ) -> sqlite.EventRecord:
     """ Returns the event which contains the corresponding balance
@@ -78,19 +85,20 @@ def get_event_with_balance_proof_by_balance_hash(
     has the blinded balance proof data.
     """
     return storage.get_latest_event_by_data_field({
-        'balance_proof.chain_id': chain_id,
-        'balance_proof.token_network_identifier': to_checksum_address(token_network_identifier),
-        'balance_proof.channel_identifier': str(channel_identifier),
+        'balance_proof.chain_id': canonical_identifier.chain_identifier,
+        'balance_proof.token_network_identifier': to_checksum_address(
+            canonical_identifier.token_network_address,
+        ),
+        'balance_proof.channel_identifier': str(canonical_identifier.channel_identifier),
         'balance_proof.balance_hash': serialize_bytes(balance_hash),
     })
 
 
 def get_event_with_balance_proof_by_locksroot(
         storage: sqlite.SQLiteStorage,
-        chain_id: ChainID,
-        token_network_identifier: TokenNetworkID,
-        channel_identifier: ChannelID,
+        canonical_identifier: CanonicalIdentifier,
         locksroot: Locksroot,
+        recipient: Address,
 ) -> sqlite.EventRecord:
     """ Returns the event which contains the corresponding balance proof.
 
@@ -99,10 +107,13 @@ def get_event_with_balance_proof_by_locksroot(
     balance proof.
     """
     return storage.get_latest_event_by_data_field({
-        'balance_proof.chain_id': chain_id,
-        'balance_proof.token_network_identifier': to_checksum_address(token_network_identifier),
-        'balance_proof.channel_identifier': str(channel_identifier),
+        'balance_proof.chain_id': canonical_identifier.chain_identifier,
+        'balance_proof.token_network_identifier': to_checksum_address(
+            canonical_identifier.token_network_address,
+        ),
+        'balance_proof.channel_identifier': str(canonical_identifier.channel_identifier),
         'balance_proof.locksroot': serialize_bytes(locksroot),
+        'recipient': to_checksum_address(recipient),
     })
 
 
@@ -110,7 +121,7 @@ def hash_balance_data(
         transferred_amount: TokenAmount,
         locked_amount: TokenAmount,
         locksroot: Locksroot,
-) -> bytes:
+) -> BalanceHash:
     assert locksroot != b''
     assert len(locksroot) == 32
     if transferred_amount == 0 and locked_amount == 0 and locksroot == EMPTY_HASH:
@@ -122,7 +133,7 @@ def hash_balance_data(
     )
 
 
-def pseudo_random_generator_from_json(data):
+def pseudo_random_generator_from_json(data: Any) -> Random:
     # JSON serializes a tuple as a list
     pseudo_random_generator = random.Random()
     state = list(data['pseudo_random_generator'])  # copy
@@ -132,5 +143,9 @@ def pseudo_random_generator_from_json(data):
     return pseudo_random_generator
 
 
-def is_valid_secret_reveal(state_change, transfer_secrethash, secret):
+def is_valid_secret_reveal(
+        state_change: Union['ContractReceiveSecretReveal', 'ReceiveSecretReveal'],
+        transfer_secrethash: SecretHash,
+        secret: Secret,
+) -> bool:
     return secret != EMPTY_HASH and state_change.secrethash == transfer_secrethash

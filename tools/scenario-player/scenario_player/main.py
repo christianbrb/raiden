@@ -62,14 +62,14 @@ TRANSACTION_DEFAULTS['gas'] = lambda web3, tx: web3.eth.estimateGas(tx) * 2
 @click.argument('scenario-file', type=click.File(), required=False)
 @click.pass_context
 def main(
-    ctx,
-    scenario_file,
-    keystore_file,
-    password,
-    chains,
-    data_path,
-    auth,
-    mailgun_api_key,
+        ctx,
+        scenario_file,
+        keystore_file,
+        password,
+        chains,
+        data_path,
+        auth,
+        mailgun_api_key,
 ):
     gevent.get_hub().exception_stream = DummyStream()
 
@@ -91,6 +91,7 @@ def main(
         {'': 'INFO', 'raiden': 'DEBUG', 'scenario_player': 'DEBUG'},
         debug_log_file_name=log_file_name,
         _first_party_packages=_FIRST_PARTY_PACKAGES | frozenset(['scenario_player']),
+        _debug_log_file_additional_level_filters={'scenario_player': 'DEBUG'},
     )
 
     log_buffer = None
@@ -192,4 +193,4 @@ def reclaim_eth(obj, min_age):
 
 
 if __name__ == "__main__":
-    main()
+    main()  # pylint: disable=no-value-for-parameter

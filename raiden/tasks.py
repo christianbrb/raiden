@@ -13,20 +13,24 @@ from web3 import Web3
 from raiden.constants import (
     CHECK_GAS_RESERVE_INTERVAL,
     CHECK_NETWORK_ID_INTERVAL,
+    CHECK_RDN_MIN_DEPOSIT_INTERVAL,
     CHECK_VERSION_INTERVAL,
     LATEST,
     RELEASE_PAGE,
     SECURITY_EXPRESSION,
 )
 from raiden.exceptions import EthNodeCommunicationError
-from raiden.utils import gas_reserve, pex
+from raiden.network.proxies import UserDeposit
+from raiden.settings import MIN_REI_THRESHOLD
+from raiden.utils import gas_reserve, pex, to_rdn
 from raiden.utils.runnable import Runnable
+from raiden.utils.typing import Tuple
 
 REMOVE_CALLBACK = object()
 log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-def _do_check_version(current_version: str):
+def _do_check_version(current_version: Tuple[str, ...]):
     content = requests.get(LATEST).json()
     if 'tag_name' not in content:
         # probably API rate limit exceeded
@@ -94,6 +98,27 @@ def check_gas_reserve(raiden):
         gevent.sleep(CHECK_GAS_RESERVE_INTERVAL)
 
 
+def check_rdn_deposits(raiden, user_deposit_proxy: UserDeposit):
+    """ Check periodically for RDN deposits in the user-deposits contract """
+    while True:
+        rei_balance = user_deposit_proxy.effective_balance(raiden.address, "latest")
+        rdn_balance = to_rdn(rei_balance)
+        if rei_balance < MIN_REI_THRESHOLD:
+            click.secho(
+                (
+                    f'WARNING\n'
+                    f'Your account\'s RDN balance of {rdn_balance} is below the '
+                    f'minimum threshold. Provided that you have either a monitoring '
+                    f'service or a path finding service activated, your node is not going'
+                    f'to be able to pay those services which may lead to denial of service or '
+                    f'loss of funds.'
+                ),
+                fg='red',
+            )
+
+        gevent.sleep(CHECK_RDN_MIN_DEPOSIT_INTERVAL)
+
+
 def check_network_id(network_id, web3: Web3):
     """ Check periodically if the underlying ethereum client's network id has changed"""
     while True:
@@ -123,16 +148,24 @@ class AlarmTask(Runnable):
         # probability of a new block increases.
         self.sleep_time = 0.5
 
+    def __repr__(self):
+        return f'<{self.__class__.__name__} node:{pex(self.chain.client.address)}>'
+
     def start(self):
         log.debug('Alarm task started', node=pex(self.chain.node_address))
         self._stop_event = AsyncResult()
         super().start()
 
     def _run(self):  # pylint: disable=method-hidden
+        self.greenlet.name = f'AlarmTask._run node:{pex(self.chain.client.address)}'
         try:
             self.loop_until_stop()
         finally:
             self.callbacks = list()
+
+    def is_primed(self):
+        """True if the first_run has been called."""
+        return bool(self.chain_id and self.known_block_number is not None)
 
     def register_callback(self, callback):
         """ Register a new callback.
@@ -158,8 +191,8 @@ class AlarmTask(Runnable):
         #
         # This is required because the first run will synchronize the node with
         # the blockchain since the last run.
-        assert self.chain_id, 'chain_id not set'
-        assert self.known_block_number is not None, 'known_block_number not set'
+        msg = 'Only start the AlarmTask after it has been primed with the first_run'
+        assert self.is_primed(), msg
 
         sleep_time = self.sleep_time
         while self._stop_event.wait(sleep_time) is not True:

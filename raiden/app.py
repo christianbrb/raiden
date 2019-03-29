@@ -4,13 +4,22 @@ from eth_utils import to_checksum_address
 from raiden.constants import DISCOVERY_DEFAULT_ROOM
 from raiden.exceptions import InvalidSettleTimeout
 from raiden.network.blockchain_service import BlockChainService
-from raiden.network.proxies import Discovery, SecretRegistry, TokenNetworkRegistry
+from raiden.network.proxies import (
+    Discovery,
+    SecretRegistry,
+    ServiceRegistry,
+    TokenNetworkRegistry,
+    UserDeposit,
+)
 from raiden.raiden_service import RaidenService
 from raiden.settings import (
     DEFAULT_NAT_INVITATION_TIMEOUT,
     DEFAULT_NAT_KEEPALIVE_RETRIES,
     DEFAULT_NAT_KEEPALIVE_TIMEOUT,
     DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
+    DEFAULT_PATHFINDING_IOU_TIMEOUT,
+    DEFAULT_PATHFINDING_MAX_FEE,
+    DEFAULT_PATHFINDING_MAX_PATHS,
     DEFAULT_REVEAL_TIMEOUT,
     DEFAULT_SETTLE_TIMEOUT,
     DEFAULT_SHUTDOWN_TIMEOUT,
@@ -65,8 +74,11 @@ class App:  # pylint: disable=too-few-public-methods
         'console': False,
         'shutdown_timeout': DEFAULT_SHUTDOWN_TIMEOUT,
         'services': {
+            'pathfinding_url': None,
             'pathfinding_service_address': None,
-            'pathfinding_max_paths': 3,
+            'pathfinding_max_paths': DEFAULT_PATHFINDING_MAX_PATHS,
+            'pathfinding_max_fee': DEFAULT_PATHFINDING_MAX_FEE,
+            'pathfinding_iou_timeout': DEFAULT_PATHFINDING_IOU_TIMEOUT,
             'monitoring_enabled': False,
         },
     }
@@ -78,21 +90,25 @@ class App:  # pylint: disable=too-few-public-methods
             query_start_block: typing.BlockNumber,
             default_registry: TokenNetworkRegistry,
             default_secret_registry: SecretRegistry,
+            default_service_registry: typing.Optional[ServiceRegistry],
             transport,
             raiden_event_handler,
             message_handler,
             discovery: Discovery = None,
+            user_deposit: UserDeposit = None,
     ):
         raiden = RaidenService(
             chain=chain,
             query_start_block=query_start_block,
             default_registry=default_registry,
             default_secret_registry=default_secret_registry,
+            default_service_registry=default_service_registry,
             transport=transport,
             raiden_event_handler=raiden_event_handler,
             message_handler=message_handler,
             config=config,
             discovery=discovery,
+            user_deposit=user_deposit,
         )
 
         # check that the settlement timeout fits the limits of the contract
@@ -116,6 +132,7 @@ class App:  # pylint: disable=too-few-public-methods
 
         self.config = config
         self.discovery = discovery
+        self.user_deposit = user_deposit
         self.raiden = raiden
         self.start_console = self.config['console']
 

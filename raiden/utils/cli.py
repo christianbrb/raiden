@@ -7,16 +7,17 @@ from ipaddress import AddressValueError, IPv4Address
 from itertools import groupby
 from pathlib import Path
 from string import Template
-from typing import Any, Callable, Dict, List, Union
+from typing import Any, Callable, Dict, List, Tuple, Union
 
 import click
 import requests
+from click import BadParameter
 from click._compat import term_len
 from click.formatting import iter_rows, measure_table, wrap_text
 from pytoml import TomlError, load
 from web3.gas_strategies.time_based import fast_gas_price_strategy, medium_gas_price_strategy
 
-from raiden.constants import Environment
+from raiden.constants import Environment, RoutingMode
 from raiden.exceptions import InvalidAddress
 from raiden.utils import address_checksum_and_decode
 from raiden_contracts.constants import NETWORKNAME_TO_ID
@@ -65,7 +66,8 @@ class HelpFormatter(click.HelpFormatter):
                 self.write(next(lines) + '\n')
                 for line in lines:
                     self.write('%*s%s\n' % (
-                        first_col + self.current_indent, '', line))
+                        first_col + self.current_indent, '', line,
+                    ))
             else:
                 self.write('\n')
 
@@ -207,7 +209,7 @@ def option_group(name: str, *options: List[Callable]):
 class AddressType(click.ParamType):
     name = 'address'
 
-    def convert(self, value, param, ctx):
+    def convert(self, value, param, ctx):  # pylint: disable=unused-argument
         try:
             return address_checksum_and_decode(value)
         except InvalidAddress as e:
@@ -225,7 +227,7 @@ class LogLevelConfigType(click.ParamType):
         re.IGNORECASE,
     )
 
-    def convert(self, value, param, ctx):
+    def convert(self, value, param, ctx):  # pylint: disable=unused-argument
         if not self._validate_re.match(value):
             self.fail('Invalid log config format')
         level_config = dict()
@@ -277,6 +279,14 @@ class EnvironmentChoiceType(click.Choice):
             return Environment(value)
         except ValueError:
             self.fail(f"'{value}' is not a valid environment type", param, ctx)
+
+
+class RoutingModeChoiceType(click.Choice):
+    def convert(self, value, param, ctx):
+        try:
+            return RoutingMode(value)
+        except ValueError:
+            self.fail(f"'{value}' is not a valid routing mode type", param, ctx)
 
 
 class GasPriceChoiceType(click.Choice):
@@ -332,7 +342,7 @@ class PathRelativePath(click.Path):
             except KeyError as ex:
                 raise RuntimeError(
                     'Subsitution parameter not found in context. '
-                    'Make sure it\'s defined with `is_eager=True`.'  # noqa: C812
+                    'Make sure it\'s defined with `is_eager=True`.',  # noqa: C812
                 ) from ex
 
         return super().convert(value, param, ctx)
@@ -439,6 +449,40 @@ def get_matrix_servers(url: str) -> List[str]:
             line = 'https://' + line  # default schema
         available_servers.append(line)
     return available_servers
+
+
+def validate_option_dependencies(
+        command_function: Union[click.Command, click.Group],
+        ctx,
+        cli_params: Dict[str, Any],
+        option_dependencies: Dict[str, List[Tuple[str, Any]]],
+):
+    paramname_to_param = {param.name: param for param in command_function.params}
+
+    for depending_option_name, requirements in option_dependencies.items():
+        depending_option_name_int = depending_option_name.replace('-', '_')
+        param = paramname_to_param[depending_option_name_int]
+
+        depending_option_value = cli_params[depending_option_name_int]
+        if depending_option_value is None:
+            continue
+
+        depending_option_value_default = param.get_default(ctx)
+        if depending_option_value == depending_option_value_default:
+            # Ignore dependencies for default values
+            continue
+
+        for depended_option_name, depended_option_required_value in requirements:
+            depended_option_name_int = depended_option_name.replace('-', '_')
+            depended_option_actual_value = cli_params[depended_option_name_int]
+            if depended_option_actual_value != depended_option_required_value:
+                raise BadParameter(
+                    f'This option is only available when option "--{depended_option_name}" '
+                    f'is set to "{depended_option_required_value}". '
+                    f'Current value: "{depended_option_actual_value}"',
+                    ctx,
+                    param,
+                )
 
 
 ADDRESS_TYPE = AddressType()

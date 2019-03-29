@@ -3,18 +3,29 @@ from raiden.transfer.state import (
     NettingChannelState,
     TransactionExecutionStatus,
 )
+from raiden.utils import CanonicalIdentifier
+from raiden.utils.typing import (
+    BlockNumber,
+    BlockTimeout,
+    PaymentNetworkID,
+    TokenAddress,
+    TokenNetworkAddress,
+)
 
 
 def get_channel_state(
-        token_address,
-        payment_network_identifier,
-        token_network_address,
-        reveal_timeout,
+        token_address: TokenAddress,
+        payment_network_identifier: PaymentNetworkID,
+        token_network_address: TokenNetworkAddress,
+        reveal_timeout: BlockTimeout,
         payment_channel_proxy,
-        opened_block_number,
+        opened_block_number: BlockNumber,
 ):
-    # LEFTODO: Supply a proper block id
-    channel_details = payment_channel_proxy.detail('latest')
+    # Here we have to query the latest state because if we query with an older block
+    # state (e.g. opened_block_number) the state may have been pruned which will
+    # lead to an error.
+    latest_block_hash = payment_channel_proxy.client.blockhash_from_blocknumber('latest')
+    channel_details = payment_channel_proxy.detail(latest_block_hash)
 
     our_state = NettingChannelEndState(
         channel_details.participants_data.our_details.address,
@@ -53,11 +64,13 @@ def get_channel_state(
     settle_transaction = None
 
     channel = NettingChannelState(
-        identifier=identifier,
-        chain_id=channel_details.chain_id,
+        canonical_identifier=CanonicalIdentifier(
+            chain_identifier=channel_details.chain_id,
+            token_network_address=token_network_address,
+            channel_identifier=identifier,
+        ),
         token_address=token_address,
         payment_network_identifier=payment_network_identifier,
-        token_network_identifier=token_network_address,
         reveal_timeout=reveal_timeout,
         settle_timeout=settle_timeout,
         our_state=our_state,

@@ -18,20 +18,22 @@ The preferred way to install Raiden is downloading a self contained application 
 Linux
 *****
 
-Download the latest :code:`raiden-<version>-linux.tar.gz`, and extract it::
+Download the latest :code:`raiden-<version>-linux-x86_64.tar.gz`, and extract it::
 
-    tar -xvzf raiden-<version>-linux.tar.gz
+    tar -xvzf raiden-<version>-linux-x86_64.tar.gz
 
 The Raiden binary should work on most 64bit GNU/Linux distributions without any specific system dependencies, other
 than an Ethereum client installed in your system (see below). The Raiden binary takes the same command line
 arguments as the ``raiden`` script.
 
+Raiden is also available as a PyPi package and can be installed with ``pip install raiden``.
+
 macOS
 *****
 
-Download the latest :code:`raiden-<version>-macOS.zip`, and extract it::
+Download the latest :code:`raiden-<version>-macOS-x86_64.zip`, and extract it::
 
-    unzip raiden-<version>-macOS.zip
+    unzip raiden-<version>-macOS-x86_64.zip
 
 The resulting binary will work on any version of macOS from 10.12 onwards without any other
 dependencies.
@@ -43,6 +45,24 @@ Or you can use Homebrew to install the most up to date binary::
 
 An Ethereum client is required in both cases. The Raiden binary takes the same command line
 arguments as the ``raiden`` script.
+
+Raiden is also available as a PyPi package and can be installed with ``pip install raiden``.
+
+Raspberry Pi
+************
+
+Download the latest :code:`raiden-<version>-linux-armv7l.tar.gz` for the Raspberry Pi Model 2B or
+download the latest :code:`raiden-<version>-linux-aarch64.tar.gz` for the Raspberry Pi Model 2B v 1.2 or later,
+and extract it::
+
+    tar -xvzf  raiden-<version>-linux-*.tar.gz
+
+The resulting binary will work on any Raspberry Pi from Model 2B onwards without any other
+dependencies.
+
+An Ethereum client is required in both cases. The Raiden binary takes the same command line
+arguments as the ``raiden`` script.
+
 
 Docker
 ******
@@ -86,7 +106,7 @@ Additional dependencies for development installations
 
 - You need to make sure that your system has ``solc``, the ethereum solidity compiler installed. Refer to `its documentation`_ for the installation steps.
 - You will also need to obtain the `system dependencies for pyethapp <https://github.com/ethereum/pyethapp/#installation-on-ubuntudebian>`_.
-- For running ``raiden smoketest``, you will need to have ``synapse`` installed. Run ``./tools/install_synapse.sh`` (synapse needs ``tk`` as a dependency).
+
 
 .. _its documentation: http://solidity.readthedocs.io/en/latest/installing-solidity.html
 
@@ -200,4 +220,4 @@ In order to use Raiden with an rpc-endpoint provided by an Infura Ethereum node,
 Select the desired Ethereum account when prompted, and type in the account's password.
 
 
-See the :doc:`API walkthrough <api_walkthrough>` for further instructions on how to interact with Raiden.
+Now that Raiden is up and running, head over to the :doc:`API walkthrough <api_walkthrough>` for further instructions on how to interact with Raiden. There's also a :doc:`Web UI tutorial <webui_tutorial>` available for people who prefer a graphical interface.

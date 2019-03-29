@@ -196,6 +196,13 @@ class InvalidBlockNumberInput(RaidenError):
     """Raised when the user provided a block number that is  < 0 or > UINT64_MAX"""
 
 
+class NoStateForBlockIdentifier(RaidenError):
+    """
+    Raised when we attempt to provide a block identifier older
+    than STATE_PRUNING_AFTER_BLOCKS blocks
+    """
+
+
 class InvalidNumberInput(RaidenError):
     """Raised when the user provided an invalid number"""
 
@@ -221,4 +228,9 @@ class ChannelOutdatedError(RaidenError):
 
 class InsufficientGasReserve(RaidenError):
     """ Raised when an action cannot be done because the available balance
-    is not sufficient for the lifecycles of all active channels. """
+    is not sufficient for the lifecycles of all active channels.
+    """
+
+
+class ServiceRequestFailed(RaidenError):
+    """ Raised when a request to one of the raiden services fails. """

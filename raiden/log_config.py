@@ -1,12 +1,13 @@
 import datetime
 import logging
 import logging.config
+import logging.handlers
 import os
 import re
 import sys
 from functools import wraps
 from traceback import TracebackException
-from typing import Any, Callable, Dict, FrozenSet, List, Pattern, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Pattern, Tuple
 
 import gevent
 import structlog
@@ -36,7 +37,7 @@ def _chain(first_func, *funcs) -> Callable:
 def _match_list(
         module_rule: Tuple[List[str], str],
         logger_name: str,
-) -> Tuple[int, str]:
+) -> Tuple[int, Optional[str]]:
     logger_modules_split = logger_name.split('.') if logger_name else []
 
     modules_split: List[str] = module_rule[0]
@@ -55,14 +56,14 @@ def _match_list(
 class LogFilter:
     """ Utility for filtering log records on module level rules """
 
-    def __init__(self, config: Dict[str, int], default_level: str):
+    def __init__(self, config: Dict[str, str], default_level: str):
         """ Initializes a new `LogFilter`
 
         Args:
             config: Dictionary mapping module names to logging level
             default_level: The default logging level
         """
-        self._should_log = {}
+        self._should_log: Dict[Tuple[str, str], bool] = {}
         # the empty module is not matched, so set it here
         self._default_level = config.get('', default_level)
         self._log_rules = [
@@ -76,7 +77,7 @@ class LogFilter:
         for module in self._log_rules:
             match_length, level = _match_list(module, logger_name)
 
-            if match_length > best_match_length:
+            if match_length > best_match_length and level is not None:
                 best_match_length = match_length
                 best_match_level = level
 
@@ -103,10 +104,12 @@ class RaidenFilter(logging.Filter):
         return self._log_filter.should_log(record.name, record.levelname)
 
 
-def add_greenlet_name(logger: str, method_name: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Add greenlet_name to the event dict for greenlets that have a non-default name.
-    """
+def add_greenlet_name(
+        _logger: str,
+        _method_name: str,
+        event_dict: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Add greenlet_name to the event dict for greenlets that have a non-default name."""
     current_greenlet = gevent.getcurrent()
     greenlet_name = getattr(current_greenlet, 'name', None)
     if greenlet_name is not None and not greenlet_name.startswith('Greenlet-'):
@@ -126,18 +129,22 @@ def redactor(blacklist: Dict[Pattern, str]) -> Callable[[str], str]:
 
 
 def _wrap_tracebackexception_format(redact: Callable[[str], str]):
-    """Monkey-patch TracebackException.format to redact printed lines"""
-    if hasattr(TracebackException, '_orig_format'):
-        prev_fmt = TracebackException._orig_format
-    else:
-        prev_fmt = TracebackException._orig_format = TracebackException.format
+    """Monkey-patch TracebackException.format to redact printed lines.
 
-    @wraps(TracebackException._orig_format)
+    Only the last call will be effective. Consecutive calls will overwrite the
+    previous monkey patches.
+    """
+    original_format = getattr(TracebackException, '_original', None)
+    if original_format is None:
+        original_format = TracebackException.format
+        setattr(TracebackException, '_original', original_format)
+
+    @wraps(original_format)
     def tracebackexception_format(self, *, chain=True):
-        for line in prev_fmt(self, chain=chain):
+        for line in original_format(self, chain=chain):
             yield redact(line)
 
-    TracebackException.format = tracebackexception_format
+    setattr(TracebackException, 'format', tracebackexception_format)
 
 
 def configure_logging(
@@ -147,8 +154,9 @@ def configure_logging(
         log_file: str = None,
         disable_debug_logfile: bool = False,
         debug_log_file_name: str = None,
-        _first_party_packages: FrozenSet[str] = _FIRST_PARTY_PACKAGES,
         cache_logger_on_first_use: bool = True,
+        _first_party_packages: FrozenSet[str] = _FIRST_PARTY_PACKAGES,
+        _debug_log_file_additional_level_filters: Dict[str, str] = None,
 ):
     structlog.reset_defaults()
 
@@ -178,7 +186,7 @@ def configure_logging(
     })
     _wrap_tracebackexception_format(redact)
 
-    handlers = dict()
+    handlers: Dict[str, Any] = dict()
     if log_file:
         handlers['file'] = {
             'class': 'logging.handlers.WatchedFileHandler',
@@ -223,6 +231,7 @@ def configure_logging(
                     'log_level_config': {
                         '': DEFAULT_LOG_LEVEL,
                         'raiden': 'DEBUG',
+                        **(_debug_log_file_additional_level_filters or {}),
                     },
                 },
             },

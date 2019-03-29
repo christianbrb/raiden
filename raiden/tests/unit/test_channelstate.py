@@ -6,7 +6,7 @@ from itertools import cycle
 
 import pytest
 
-from raiden.constants import UINT64_MAX
+from raiden.constants import EMPTY_MERKLE_ROOT, UINT64_MAX
 from raiden.messages import Unlock
 from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS
 from raiden.tests.utils import factories
@@ -22,6 +22,7 @@ from raiden.tests.utils.factories import (
     NettingChannelStateProperties,
     TransactionExecutionStatusProperties,
     create,
+    make_canonical_identifier,
     make_secret,
 )
 from raiden.tests.utils.transfer import make_receive_expired_lock, make_receive_transfer_mediated
@@ -40,8 +41,6 @@ from raiden.transfer.merkle_tree import (
 )
 from raiden.transfer.state import (
     CHANNEL_STATE_CLOSING,
-    EMPTY_MERKLE_ROOT,
-    EMPTY_MERKLE_TREE,
     HashTimeLockState,
     MerkleTreeState,
     NettingChannelEndState,
@@ -50,6 +49,7 @@ from raiden.transfer.state import (
     TransactionExecutionStatus,
     UnlockPartialProofState,
     balanceproof_from_envelope,
+    make_empty_merkle_tree,
 )
 from raiden.transfer.state_change import (
     ActionChannelClose,
@@ -183,6 +183,7 @@ def test_channelstate_update_contract_balance():
     """
     deposit_block_number = 10
     block_number = deposit_block_number + DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS + 1
+    block_hash = factories.make_block_hash()
 
     our_model1, _ = create_model(70)
     partner_model1, _ = create_model(100)
@@ -197,19 +198,18 @@ def test_channelstate_update_contract_balance():
         deposit_block_number,
     )
     state_change = ContractReceiveChannelNewBalance(
-        factories.make_transaction_hash(),
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        deposit_transaction,
-        block_number,
+        transaction_hash=factories.make_transaction_hash(),
+        canonical_identifier=channel_state.canonical_identifier,
+        deposit_transaction=deposit_transaction,
+        block_number=block_number,
+        block_hash=block_hash,
     )
 
-    pseudo_random_generator = random.Random()
     iteration = channel.state_transition(
-        deepcopy(channel_state),
-        state_change,
-        pseudo_random_generator,
-        block_number,
+        channel_state=deepcopy(channel_state),
+        state_change=state_change,
+        block_number=block_number,
+        block_hash=block_hash,
     )
     new_state = iteration.new_state
 
@@ -230,6 +230,7 @@ def test_channelstate_decreasing_contract_balance():
     """
     deposit_block_number = 10
     block_number = deposit_block_number + DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS + 1
+    deposit_block_hash = factories.make_block_hash()
 
     our_model1, _ = create_model(70)
     partner_model1, _ = create_model(100)
@@ -244,19 +245,18 @@ def test_channelstate_decreasing_contract_balance():
         deposit_block_number,
     )
     state_change = ContractReceiveChannelNewBalance(
-        factories.make_transaction_hash(),
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        deposit_transaction,
-        deposit_block_number,
+        transaction_hash=factories.make_transaction_hash(),
+        canonical_identifier=channel_state.canonical_identifier,
+        deposit_transaction=deposit_transaction,
+        block_number=deposit_block_number,
+        block_hash=deposit_block_hash,
     )
 
-    pseudo_random_generator = random.Random()
     iteration = channel.state_transition(
-        deepcopy(channel_state),
-        state_change,
-        pseudo_random_generator,
-        block_number,
+        channel_state=deepcopy(channel_state),
+        state_change=state_change,
+        block_number=block_number,
+        block_hash=factories.make_block_hash(),
     )
     new_state = iteration.new_state
 
@@ -270,6 +270,7 @@ def test_channelstate_repeated_contract_balance():
     """
     deposit_block_number = 10
     block_number = deposit_block_number + DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS + 1
+    deposit_block_hash = factories.make_block_hash()
 
     our_model1, _ = create_model(70)
     partner_model1, _ = create_model(100)
@@ -284,11 +285,11 @@ def test_channelstate_repeated_contract_balance():
         deposit_block_number,
     )
     state_change = ContractReceiveChannelNewBalance(
-        factories.make_transaction_hash(),
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        deposit_transaction,
-        deposit_block_number,
+        transaction_hash=factories.make_transaction_hash(),
+        canonical_identifier=channel_state.canonical_identifier,
+        deposit_transaction=deposit_transaction,
+        block_number=deposit_block_number,
+        block_hash=deposit_block_hash,
     )
 
     our_model2 = our_model1._replace(
@@ -297,14 +298,13 @@ def test_channelstate_repeated_contract_balance():
         contract_balance=balance1_new,
     )
     partner_model2 = partner_model1
-    pseudo_random_generator = random.Random()
 
     for _ in range(10):
         iteration = channel.state_transition(
-            deepcopy(channel_state),
-            state_change,
-            pseudo_random_generator,
-            block_number,
+            channel_state=deepcopy(channel_state),
+            state_change=state_change,
+            block_number=block_number,
+            block_hash=factories.make_block_hash(),
         )
         new_state = iteration.new_state
 
@@ -314,6 +314,7 @@ def test_channelstate_repeated_contract_balance():
 
 def test_deposit_must_wait_for_confirmation():
     block_number = 10
+    block_hash = factories.make_block_hash()
     confirmed_deposit_block_number = block_number + DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS + 1
 
     our_model1, _ = create_model(0)
@@ -338,32 +339,32 @@ def test_deposit_must_wait_for_confirmation():
         block_number,
     )
     new_balance = ContractReceiveChannelNewBalance(
-        factories.make_transaction_hash(),
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        deposit_transaction,
-        block_number,
+        transaction_hash=factories.make_transaction_hash(),
+        canonical_identifier=channel_state.canonical_identifier,
+        deposit_transaction=deposit_transaction,
+        block_number=block_number,
+        block_hash=block_hash,
     )
-    pseudo_random_generator = random.Random()
     iteration = channel.state_transition(
-        deepcopy(channel_state),
-        new_balance,
-        pseudo_random_generator,
-        block_number,
+        channel_state=deepcopy(channel_state),
+        state_change=new_balance,
+        block_number=block_number,
+        block_hash=block_hash,
     )
     unconfirmed_state = iteration.new_state
 
     for block_number in range(block_number, confirmed_deposit_block_number):
+        block_hash = factories.make_transaction_hash()
         unconfirmed_block = Block(
             block_number=block_number,
             gas_limit=1,
-            block_hash=factories.make_transaction_hash(),
+            block_hash=block_hash,
         )
         iteration = channel.state_transition(
-            deepcopy(unconfirmed_state),
-            unconfirmed_block,
-            pseudo_random_generator,
-            block_number,
+            channel_state=deepcopy(unconfirmed_state),
+            state_change=unconfirmed_block,
+            block_number=block_number,
+            block_hash=block_hash,
         )
         unconfirmed_state = iteration.new_state
 
@@ -378,16 +379,17 @@ def test_deposit_must_wait_for_confirmation():
             partner_model1,
         )
 
+    confirmed_block_hash = factories.make_transaction_hash()
     confirmed_block = Block(
         block_number=confirmed_deposit_block_number,
         gas_limit=1,
-        block_hash=factories.make_transaction_hash(),
+        block_hash=confirmed_block_hash,
     )
     iteration = channel.state_transition(
-        deepcopy(unconfirmed_state),
-        confirmed_block,
-        pseudo_random_generator,
-        confirmed_deposit_block_number,
+        channel_state=deepcopy(unconfirmed_state),
+        state_change=confirmed_block,
+        block_number=confirmed_deposit_block_number,
+        block_hash=confirmed_block_hash,
     )
     confirmed_state = iteration.new_state
 
@@ -765,11 +767,12 @@ def test_invalid_timeouts():
         small_settle_timeout = 49
 
         NettingChannelState(
-            identifier=identifier,
-            chain_id=UNIT_CHAIN_ID,
+            canonical_identifier=make_canonical_identifier(
+                token_network_address=token_network_identifier,
+                channel_identifier=identifier,
+            ),
             token_address=token_address,
             payment_network_identifier=payment_network_identifier,
-            token_network_identifier=token_network_identifier,
             reveal_timeout=large_reveal_timeout,
             settle_timeout=small_settle_timeout,
             our_state=our_state,
@@ -783,11 +786,12 @@ def test_invalid_timeouts():
     for invalid_value in (-1, 0, 1.1, 1.0):
         with pytest.raises(ValueError):
             NettingChannelState(
-                identifier=identifier,
-                chain_id=UNIT_CHAIN_ID,
+                canonical_identifier=make_canonical_identifier(
+                    token_network_address=token_network_identifier,
+                    channel_identifier=identifier,
+                ),
                 token_address=token_address,
                 payment_network_identifier=payment_network_identifier,
-                token_network_identifier=token_network_identifier,
                 reveal_timeout=invalid_value,
                 settle_timeout=settle_timeout,
                 our_state=our_state,
@@ -799,11 +803,12 @@ def test_invalid_timeouts():
 
         with pytest.raises(ValueError):
             NettingChannelState(
-                identifier=identifier,
-                chain_id=UNIT_CHAIN_ID,
+                canonical_identifier=make_canonical_identifier(
+                    token_network_address=token_network_identifier,
+                    channel_identifier=identifier,
+                ),
                 token_address=token_address,
                 payment_network_identifier=payment_network_identifier,
-                token_network_identifier=token_network_identifier,
                 reveal_timeout=reveal_timeout,
                 settle_timeout=invalid_value,
                 our_state=our_state,
@@ -1073,7 +1078,7 @@ def test_regression_must_update_balanceproof_remove_expired_lock():
     assert lock.secrethash not in new_channel_state.partner_state.secrethashes_to_lockedlocks
     msg = 'the balance proof must be updated'
     assert new_channel_state.partner_state.balance_proof == lock_expired.balance_proof, msg
-    assert new_channel_state.partner_state.merkletree == EMPTY_MERKLE_TREE
+    assert new_channel_state.partner_state.merkletree == make_empty_merkle_tree()
 
 
 def test_channel_must_ignore_remove_expired_locks_if_secret_registered_onchain():
@@ -1319,13 +1324,12 @@ def test_channelstate_unlock_without_locks():
     partner_model1, _ = create_model(100)
     channel_state = create_channel_from_models(our_model1, partner_model1)
 
-    closed_block_number = 77
     state_change = ContractReceiveChannelClosed(
-        factories.make_transaction_hash(),
-        our_model1.participant_address,
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        closed_block_number,
+        transaction_hash=factories.make_transaction_hash(),
+        transaction_from=our_model1.participant_address,
+        canonical_identifier=channel_state.canonical_identifier,
+        block_number=77,
+        block_hash=factories.make_block_hash(),
     )
     iteration = channel.handle_channel_closed(channel_state, state_change)
     assert not iteration.events
@@ -1382,7 +1386,7 @@ def test_channelstate_get_unlock_proof():
     assert merkleroot(end_state.merkletree) == computed_merkleroot
 
 
-def test_channelstate_unlock():
+def test_channelstate_unlock_unlocked_onchain():
     """The node must call unlock after the channel is settled"""
     our_model1, _ = create_model(70)
     partner_model1, privkey2 = create_model(100)
@@ -1414,30 +1418,41 @@ def test_channelstate_unlock():
     )
     assert is_valid, msg
 
-    channel.register_offchain_secret(channel_state, lock_secret, lock_secrethash)
+    channel.register_onchain_secret(
+        channel_state=channel_state,
+        secret=lock_secret,
+        secrethash=lock_secrethash,
+        secret_reveal_block_number=lock_expiration - 1,
+    )
 
     closed_block_number = lock_expiration - channel_state.reveal_timeout - 1
+    closed_block_hash = factories.make_block_hash()
     close_state_change = ContractReceiveChannelClosed(
-        factories.make_transaction_hash(),
-        partner_model1.participant_address,
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        closed_block_number,
+        transaction_hash=factories.make_transaction_hash(),
+        transaction_from=partner_model1.participant_address,
+        canonical_identifier=channel_state.canonical_identifier,
+        block_number=closed_block_number,
+        block_hash=closed_block_hash,
     )
     iteration = channel.handle_channel_closed(channel_state, close_state_change)
     assert search_for_item(iteration.events, ContractSendChannelBatchUnlock, {}) is None
 
     settle_block_number = lock_expiration + channel_state.reveal_timeout + 1
     settle_state_change = ContractReceiveChannelSettled(
-        factories.make_transaction_hash(),
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        settle_block_number,
+        canonical_identifier=make_canonical_identifier(
+            token_network_address=channel_state.token_network_identifier,
+            channel_identifier=channel_state.identifier,
+        ),
+        transaction_hash=factories.make_transaction_hash(),
+        block_number=settle_block_number,
+        block_hash=factories.make_block_hash(),
+        partner_onchain_locksroot=factories.make_32bytes(),  # non empty
+        our_onchain_locksroot=EMPTY_MERKLE_ROOT,
     )
+
     iteration = channel.handle_channel_settled(
         channel_state,
         settle_state_change,
-        settle_block_number,
     )
     assert search_for_item(iteration.events, ContractSendChannelBatchUnlock, {}) is not None
 
@@ -1454,7 +1469,7 @@ def test_refund_transfer_matches_received():
         UNIT_SECRET,
     )
 
-    refund_lower_expiration = factories.make_signed_transfer(
+    refund_lower_expiration = factories.make_signed_transfer_state(
         amount,
         UNIT_TRANSFER_INITIATOR,
         UNIT_TRANSFER_TARGET,
@@ -1464,7 +1479,7 @@ def test_refund_transfer_matches_received():
 
     assert channel.refund_transfer_matches_received(refund_lower_expiration, transfer) is False
 
-    refund_same_expiration = factories.make_signed_transfer(
+    refund_same_expiration = factories.make_signed_transfer_state(
         amount,
         UNIT_TRANSFER_INITIATOR,
         UNIT_TRANSFER_TARGET,
@@ -1486,7 +1501,7 @@ def test_refund_transfer_does_not_match_received():
         UNIT_SECRET,
     )
 
-    refund_from_target = factories.make_signed_transfer(
+    refund_from_target = factories.make_signed_transfer_state(
         amount,
         UNIT_TRANSFER_INITIATOR,
         UNIT_TRANSFER_TARGET,
@@ -1497,72 +1512,6 @@ def test_refund_transfer_does_not_match_received():
     assert not channel.refund_transfer_matches_received(refund_from_target, transfer)
 
 
-def test_settle_transaction_must_be_sent_only_once():
-    our_model1, _ = create_model(70)
-    partner_model1, privkey2 = create_model(100)
-    channel_state = create_channel_from_models(our_model1, partner_model1)
-
-    lock_amount = 30
-    lock_expiration = 10
-    lock_secret = sha3(b'test_settle_transaction_must_be_sent_only_once')
-    lock_secrethash = sha3(lock_secret)
-    lock = HashTimeLockState(
-        lock_amount,
-        lock_expiration,
-        lock_secrethash,
-    )
-
-    nonce = 1
-    transferred_amount = 0
-    receive_lockedtransfer = make_receive_transfer_mediated(
-        channel_state,
-        privkey2,
-        nonce,
-        transferred_amount,
-        lock,
-    )
-
-    is_valid, _, msg = channel.handle_receive_lockedtransfer(
-        channel_state,
-        receive_lockedtransfer,
-    )
-    assert is_valid, msg
-
-    channel.register_offchain_secret(channel_state, lock_secret, lock_secrethash)
-
-    closed_block_number = lock_expiration - channel_state.reveal_timeout - 1
-    close_state_change = ContractReceiveChannelClosed(
-        factories.make_transaction_hash(),
-        partner_model1.participant_address,
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        closed_block_number,
-    )
-    iteration = channel.handle_channel_closed(channel_state, close_state_change)
-
-    settle_block_number = lock_expiration + channel_state.reveal_timeout + 1
-    settle_state_change = ContractReceiveChannelSettled(
-        factories.make_transaction_hash(),
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        settle_block_number,
-    )
-    iteration = channel.handle_channel_settled(
-        channel_state,
-        settle_state_change,
-        settle_block_number,
-    )
-    assert search_for_item(iteration.events, ContractSendChannelBatchUnlock, {}) is not None
-
-    iteration = channel.handle_channel_settled(
-        channel_state,
-        settle_state_change,
-        settle_block_number,
-    )
-    msg = 'BatchUnlock must be sent only once, the second transaction will always fail'
-    assert search_for_item(iteration.events, ContractSendChannelBatchUnlock, {}) is None, msg
-
-
 def test_action_close_must_change_the_channel_state():
     """ A closed channel must not be used for transactions, even if the
     transaction was not confirmed on-chain.
@@ -1571,17 +1520,15 @@ def test_action_close_must_change_the_channel_state():
     partner_model1, _ = create_model(100)
     channel_state = create_channel_from_models(our_model1, partner_model1)
 
-    pseudo_random_generator = random.Random()
     block_number = 10
     state_change = ActionChannelClose(
-        channel_state.token_network_identifier,
-        channel_state.identifier,
+        canonical_identifier=channel_state.canonical_identifier,
     )
     iteration = channel.state_transition(
-        channel_state,
-        state_change,
-        pseudo_random_generator,
-        block_number,
+        channel_state=channel_state,
+        state_change=state_change,
+        block_number=block_number,
+        block_hash=factories.make_block_hash(),
     )
     assert channel.get_status(iteration.new_state) == CHANNEL_STATE_CLOSING
 
@@ -1620,26 +1567,23 @@ def test_update_must_be_called_if_close_lost_race():
     )
     assert is_valid, msg
 
-    pseudo_random_generator = random.Random()
     block_number = 10
     state_change = ActionChannelClose(
-        channel_state.token_network_identifier,
-        channel_state.identifier,
+        canonical_identifier=channel_state.canonical_identifier,
     )
     iteration = channel.state_transition(
-        channel_state,
-        state_change,
-        pseudo_random_generator,
-        block_number,
+        channel_state=channel_state,
+        state_change=state_change,
+        block_number=block_number,
+        block_hash=factories.make_block_hash(),
     )
 
-    closed_block_number = 77
     state_change = ContractReceiveChannelClosed(
-        factories.make_transaction_hash(),
-        partner_model1.participant_address,
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        closed_block_number,
+        transaction_hash=factories.make_transaction_hash(),
+        transaction_from=partner_model1.participant_address,
+        canonical_identifier=channel_state.canonical_identifier,
+        block_number=77,
+        block_hash=factories.make_block_hash(),
     )
     iteration = channel.handle_channel_closed(channel_state, state_change)
     assert search_for_item(iteration.events, ContractSendChannelUpdateTransfer, {}) is not None
@@ -1653,17 +1597,15 @@ def test_update_transfer():
     partner_model1, _ = create_model(100)
     channel_state = create_channel_from_models(our_model1, partner_model1)
 
-    pseudo_random_generator = random.Random()
     block_number = 10
     state_change = ActionChannelClose(
-        channel_state.token_network_identifier,
-        channel_state.identifier,
+        canonical_identifier=channel_state.canonical_identifier,
     )
     iteration = channel.state_transition(
-        channel_state,
-        state_change,
-        pseudo_random_generator,
-        block_number,
+        channel_state=channel_state,
+        state_change=state_change,
+        block_number=block_number,
+        block_hash=factories.make_block_hash(),
     )
 
     # update_transaction in channel state should not be set
@@ -1671,12 +1613,13 @@ def test_update_transfer():
     assert channel_state.update_transaction is None
 
     closed_block_number = 15
+    closed_block_hash = factories.make_block_hash()
     channel_close_state_change = ContractReceiveChannelClosed(
-        factories.make_transaction_hash(),
-        partner_model1.participant_address,
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        closed_block_number,
+        transaction_hash=factories.make_transaction_hash(),
+        transaction_from=partner_model1.participant_address,
+        canonical_identifier=channel_state.canonical_identifier,
+        block_number=closed_block_number,
+        block_hash=closed_block_hash,
     )
     iteration2 = channel.handle_channel_closed(
         channel_state,
@@ -1688,11 +1631,11 @@ def test_update_transfer():
     assert channel_state.update_transaction is None
 
     update_transfer_state_change = ContractReceiveUpdateTransfer(
-        partner_model1.participant_address,
-        channel_state.token_network_identifier,
-        channel_state.identifier,
-        23,
-        closed_block_number + 1,
+        transaction_hash=partner_model1.participant_address,
+        canonical_identifier=channel_state.canonical_identifier,
+        nonce=23,
+        block_number=closed_block_number + 1,
+        block_hash=factories.make_block_hash(),
     )
 
     update_block_number = 20

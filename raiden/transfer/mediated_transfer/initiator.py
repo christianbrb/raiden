@@ -42,6 +42,7 @@ from raiden.utils.typing import (
     Secret,
     SecretHash,
     TokenAmount,
+    TokenNetworkID,
     cast,
 )
 
@@ -69,7 +70,7 @@ def events_for_unlock_lock(
 
     payment_sent_success = EventPaymentSentSuccess(
         payment_network_identifier=channel_state.payment_network_identifier,
-        token_network_identifier=channel_state.token_network_identifier,
+        token_network_identifier=TokenNetworkID(channel_state.token_network_identifier),
         identifier=transfer_description.payment_identifier,
         amount=transfer_description.amount,
         target=transfer_description.target,
@@ -448,7 +449,6 @@ def state_transition(
         state_change: StateChange,
         channel_state: NettingChannelState,
         pseudo_random_generator: random.Random,
-        block_number: BlockNumber,
 ) -> TransitionResult[Optional[InitiatorTransferState]]:
     if type(state_change) == Block:
         assert isinstance(state_change, Block), MYPY_ANNOTATION

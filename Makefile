@@ -39,12 +39,14 @@ clean-test:
 	rm -f .coverage
 	rm -fr htmlcov/
 
-ISORT_PARAMS = --ignore-whitespace --settings-path ./ --recursive raiden/ -sg */node_modules/*
+LINT_PATHS = raiden/ tools/scenario-player/
+ISORT_PARAMS = --ignore-whitespace --settings-path ./ --skip-glob '*/node_modules/*' --recursive $(LINT_PATHS)
 
 lint:
 	flake8 raiden/ tools/
+	autopep8 --diff --exit-code --recursive $(LINT_PATHS)
 	isort $(ISORT_PARAMS) --diff --check-only
-	pylint --rcfile .pylint.rc raiden/
+	pylint --load-plugins=tools.pylint.gevent_checker --rcfile .pylint.rc $(LINT_PATHS)
 	python setup.py check --restructuredtext --strict
 
 mypy:
@@ -92,6 +94,9 @@ else
 ARCHIVE_TAG_ARG=--build-arg ARCHIVE_TAG=v$(shell python setup.py --version)
 endif
 
+# architecture needs to be asked in docker because docker can be run on remote host to create binary for different architectures
+ARCHITECTURE_TAG=$(shell docker run --rm python:3.7 uname -m)
+
 GITHUB_ACCESS_TOKEN_ARG=
 ifdef GITHUB_ACCESS_TOKEN
 GITHUB_ACCESS_TOKEN_ARG=--build-arg GITHUB_ACCESS_TOKEN_FRAGMENT=$(GITHUB_ACCESS_TOKEN)@
@@ -99,11 +104,11 @@ endif
 
 
 bundle-docker:
-	@docker build -t pyinstallerbuilder --build-arg GETH_URL_LINUX=$(GETH_URL_LINUX) --build-arg SOLC_URL_LINUX=$(SOLC_URL_LINUX) $(ARCHIVE_TAG_ARG) $(GITHUB_ACCESS_TOKEN_ARG) -f docker/build.Dockerfile .
+	@docker build -t pyinstallerbuilder --build-arg GETH_URL_LINUX=$(GETH_URL_LINUX) --build-arg SOLC_URL_LINUX=$(SOLC_URL_LINUX) --build-arg ARCHITECTURE_TAG=$(ARCHITECTURE_TAG) $(ARCHIVE_TAG_ARG) $(GITHUB_ACCESS_TOKEN_ARG) -f docker/build.Dockerfile .
 	-(docker rm builder)
 	docker create --name builder pyinstallerbuilder
 	mkdir -p dist/archive
-	docker cp builder:/raiden/raiden-$(ARCHIVE_TAG)-linux.tar.gz dist/archive/raiden-$(ARCHIVE_TAG)-linux.tar.gz
+	docker cp builder:/raiden/raiden-$(ARCHIVE_TAG)-linux-$(ARCHITECTURE_TAG).tar.gz dist/archive/raiden-$(ARCHIVE_TAG)-linux-$(ARCHITECTURE_TAG).tar.gz
 	docker rm builder
 
 bundle:

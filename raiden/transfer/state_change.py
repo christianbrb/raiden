@@ -1,4 +1,6 @@
 # pylint: disable=too-few-public-methods,too-many-arguments,too-many-instance-attributes
+from random import Random
+
 from eth_utils import to_canonical_address, to_checksum_address
 
 from raiden.transfer.architecture import (
@@ -15,7 +17,13 @@ from raiden.transfer.state import (
     TransactionChannelNewBalance,
 )
 from raiden.transfer.utils import pseudo_random_generator_from_json
-from raiden.utils import pex, sha3
+from raiden.utils import (
+    CHAIN_ID_UNSPECIFIED,
+    CHANNEL_ID_UNSPECIFIED,
+    CanonicalIdentifier,
+    pex,
+    sha3,
+)
 from raiden.utils.serialization import deserialize_bytes, serialize_bytes
 from raiden.utils.typing import (
     Address,
@@ -35,6 +43,7 @@ from raiden.utils.typing import (
     SecretHash,
     SecretRegistryAddress,
     T_Address,
+    T_BlockHash,
     T_BlockNumber,
     T_Secret,
     T_SecretHash,
@@ -58,7 +67,7 @@ class Block(StateChange):
             block_number: BlockNumber,
             gas_limit: BlockGasLimit,
             block_hash: BlockHash,
-    ):
+    ) -> None:
         if not isinstance(block_number, T_BlockNumber):
             raise ValueError('block_number must be of type block_number')
 
@@ -74,7 +83,7 @@ class Block(StateChange):
             f'>'
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, Block) and
             self.block_number == other.block_number and
@@ -82,7 +91,7 @@ class Block(StateChange):
             self.block_hash == other.block_hash
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -143,7 +152,7 @@ class ActionCancelPayment(StateChange):
     state of the transfer.
     """
 
-    def __init__(self, payment_identifier: PaymentID):
+    def __init__(self, payment_identifier: PaymentID) -> None:
         self.payment_identifier = payment_identifier
 
     def __repr__(self):
@@ -151,13 +160,13 @@ class ActionCancelPayment(StateChange):
             self.payment_identifier,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ActionCancelPayment) and
             self.payment_identifier == other.payment_identifier
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -177,25 +186,24 @@ class ActionChannelClose(StateChange):
 
     def __init__(
             self,
-            token_network_identifier: TokenNetworkID,
-            channel_identifier: ChannelID,
-    ):
-        self.token_network_identifier = token_network_identifier
-        self.channel_identifier = channel_identifier
+            canonical_identifier: CanonicalIdentifier,
+    ) -> None:
+        self.token_network_identifier = TokenNetworkID(canonical_identifier.token_network_address)
+        self.channel_identifier = canonical_identifier.channel_identifier
 
     def __repr__(self):
         return '<ActionChannelClose channel_identifier:{}>'.format(
             self.channel_identifier,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ActionChannelClose) and
             self.token_network_identifier == other.token_network_identifier and
             self.channel_identifier == other.channel_identifier
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -207,8 +215,11 @@ class ActionChannelClose(StateChange):
     @classmethod
     def from_dict(cls, data):
         return cls(
-            token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            channel_identifier=int(data['channel_identifier']),
+            canonical_identifier=CanonicalIdentifier(
+                chain_identifier=CHAIN_ID_UNSPECIFIED,
+                token_network_address=to_canonical_address(data['token_network_identifier']),
+                channel_identifier=int(data['channel_identifier']),
+            ),
         )
 
 
@@ -227,13 +238,13 @@ class ActionCancelTransfer(StateChange):
             self.transfer_identifier,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ActionCancelTransfer) and
             self.transfer_identifier == other.transfer_identifier
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     @classmethod
@@ -249,24 +260,26 @@ class ContractReceiveChannelNew(ContractReceiveStateChange):
     def __init__(
             self,
             transaction_hash: TransactionHash,
-            token_network_identifier: TokenNetworkID,
             channel_state: NettingChannelState,
             block_number: BlockNumber,
-    ):
-        super().__init__(transaction_hash, block_number)
+            block_hash: BlockHash,
+    ) -> None:
+        super().__init__(transaction_hash, block_number, block_hash)
 
-        self.token_network_identifier = token_network_identifier
+        self.token_network_identifier = channel_state.token_network_identifier
         self.channel_state = channel_state
         self.channel_identifier = channel_state.identifier
 
     def __repr__(self):
-        return '<ContractReceiveChannelNew token_network:{} state:{} block:{}>'.format(
-            pex(self.token_network_identifier),
-            self.channel_state,
-            self.block_number,
+        return (
+            '<ContractReceiveChannelNew token_network:{} state:{} block:{}>'.format(
+                pex(self.token_network_identifier),
+                self.channel_state,
+                self.block_number,
+            )
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveChannelNew) and
             self.token_network_identifier == other.token_network_identifier and
@@ -274,7 +287,7 @@ class ContractReceiveChannelNew(ContractReceiveStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -283,15 +296,16 @@ class ContractReceiveChannelNew(ContractReceiveStateChange):
             'token_network_identifier': to_checksum_address(self.token_network_identifier),
             'channel_state': self.channel_state,
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ContractReceiveChannelNew':
         return cls(
             transaction_hash=deserialize_bytes(data['transaction_hash']),
-            token_network_identifier=to_canonical_address(data['token_network_identifier']),
             channel_state=data['channel_state'],
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -302,15 +316,15 @@ class ContractReceiveChannelClosed(ContractReceiveStateChange):
             self,
             transaction_hash: TransactionHash,
             transaction_from: Address,
-            token_network_identifier: TokenNetworkID,
-            channel_identifier: ChannelID,
+            canonical_identifier: CanonicalIdentifier,
             block_number: BlockNumber,
-    ):
-        super().__init__(transaction_hash, block_number)
+            block_hash: BlockHash,
+    ) -> None:
+        super().__init__(transaction_hash, block_number, block_hash)
 
         self.transaction_from = transaction_from
-        self.token_network_identifier = token_network_identifier
-        self.channel_identifier = channel_identifier
+        self.token_network_identifier = canonical_identifier.token_network_address
+        self.channel_identifier = canonical_identifier.channel_identifier
 
     def __repr__(self):
         return (
@@ -324,7 +338,7 @@ class ContractReceiveChannelClosed(ContractReceiveStateChange):
             self.block_number,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveChannelClosed) and
             self.transaction_from == other.transaction_from and
@@ -333,7 +347,7 @@ class ContractReceiveChannelClosed(ContractReceiveStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -343,6 +357,7 @@ class ContractReceiveChannelClosed(ContractReceiveStateChange):
             'token_network_identifier': to_checksum_address(self.token_network_identifier),
             'channel_identifier': str(self.channel_identifier),
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
@@ -350,52 +365,64 @@ class ContractReceiveChannelClosed(ContractReceiveStateChange):
         return cls(
             transaction_hash=deserialize_bytes(data['transaction_hash']),
             transaction_from=to_canonical_address(data['transaction_from']),
-            token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            channel_identifier=ChannelID(int(data['channel_identifier'])),
+            canonical_identifier=CanonicalIdentifier(
+                chain_identifier=CHAIN_ID_UNSPECIFIED,
+                token_network_address=to_canonical_address(data['token_network_identifier']),
+                channel_identifier=ChannelID(int(data['channel_identifier'])),
+            ),
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
 class ActionInitChain(StateChange):
     def __init__(
             self,
-            pseudo_random_generator,
+            pseudo_random_generator: Random,
             block_number: BlockNumber,
+            block_hash: BlockHash,
             our_address: Address,
             chain_id: ChainID,
-    ):
-        if not isinstance(block_number, int):
-            raise ValueError('block_number must be int')
+    ) -> None:
+        if not isinstance(block_number, T_BlockNumber):
+            raise ValueError('block_number must be of type BlockNumber')
+
+        if not isinstance(block_hash, T_BlockHash):
+            raise ValueError('block_hash must be of type BlockHash')
 
         if not isinstance(chain_id, int):
             raise ValueError('chain_id must be int')
 
         self.block_number = block_number
+        self.block_hash = block_hash
         self.chain_id = chain_id
         self.our_address = our_address
         self.pseudo_random_generator = pseudo_random_generator
 
     def __repr__(self):
-        return '<ActionInitChain block_number:{} chain_id:{}>'.format(
+        return '<ActionInitChain block_number:{} block_hash:{} chain_id:{}>'.format(
             self.block_number,
+            pex(self.block_hash),
             self.chain_id,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ActionInitChain) and
             self.pseudo_random_generator.getstate() == other.pseudo_random_generator.getstate() and
             self.block_number == other.block_number and
+            self.block_hash == other.block_hash and
             self.our_address == other.our_address and
             self.chain_id == other.chain_id
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
             'our_address': to_checksum_address(self.our_address),
             'chain_id': self.chain_id,
             'pseudo_random_generator': self.pseudo_random_generator.getstate(),
@@ -408,6 +435,7 @@ class ActionInitChain(StateChange):
         return cls(
             pseudo_random_generator=pseudo_random_generator,
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=deserialize_bytes(data['block_hash']),
             our_address=to_canonical_address(data['our_address']),
             chain_id=data['chain_id'],
         )
@@ -435,14 +463,14 @@ class ActionNewTokenNetwork(StateChange):
             self.token_network,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ActionNewTokenNetwork) and
             self.payment_network_identifier == other.payment_network_identifier and
             self.token_network == other.token_network
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -465,21 +493,21 @@ class ContractReceiveChannelNewBalance(ContractReceiveStateChange):
     def __init__(
             self,
             transaction_hash: TransactionHash,
-            token_network_identifier: TokenNetworkID,
-            channel_identifier: ChannelID,
+            canonical_identifier: CanonicalIdentifier,
             deposit_transaction: TransactionChannelNewBalance,
             block_number: BlockNumber,
-    ):
-        super().__init__(transaction_hash, block_number)
+            block_hash: BlockHash,
+    ) -> None:
+        super().__init__(transaction_hash, block_number, block_hash)
 
-        self.token_network_identifier = token_network_identifier
-        self.channel_identifier = channel_identifier
+        self.token_network_identifier = canonical_identifier.token_network_address
+        self.channel_identifier = canonical_identifier.channel_identifier
         self.deposit_transaction = deposit_transaction
 
     def __repr__(self):
         return (
             '<ContractReceiveChannelNewBalance'
-            ' token_network:{} channel:{} transaction:{} block:{}'
+            ' token_network:{} channel:{} transaction:{} block_number:{}'
             '>'
         ).format(
             pex(self.token_network_identifier),
@@ -488,7 +516,7 @@ class ContractReceiveChannelNewBalance(ContractReceiveStateChange):
             self.block_number,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveChannelNewBalance) and
             self.token_network_identifier == other.token_network_identifier and
@@ -497,7 +525,7 @@ class ContractReceiveChannelNewBalance(ContractReceiveStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -507,16 +535,21 @@ class ContractReceiveChannelNewBalance(ContractReceiveStateChange):
             'channel_identifier': str(self.channel_identifier),
             'deposit_transaction': self.deposit_transaction,
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ContractReceiveChannelNewBalance':
         return cls(
             transaction_hash=deserialize_bytes(data['transaction_hash']),
-            token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            channel_identifier=ChannelID(int(data['channel_identifier'])),
+            canonical_identifier=CanonicalIdentifier(
+                chain_identifier=CHAIN_ID_UNSPECIFIED,
+                token_network_address=to_canonical_address(data['token_network_identifier']),
+                channel_identifier=ChannelID(int(data['channel_identifier'])),
+            ),
             deposit_transaction=data['deposit_transaction'],
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -526,14 +559,18 @@ class ContractReceiveChannelSettled(ContractReceiveStateChange):
     def __init__(
             self,
             transaction_hash: TransactionHash,
-            token_network_identifier: TokenNetworkID,
-            channel_identifier: ChannelID,
+            canonical_identifier: CanonicalIdentifier,
+            our_onchain_locksroot: Locksroot,
+            partner_onchain_locksroot: Locksroot,
             block_number: BlockNumber,
-    ):
-        super().__init__(transaction_hash, block_number)
+            block_hash: BlockHash,
+    ) -> None:
+        super().__init__(transaction_hash, block_number, block_hash)
 
-        self.token_network_identifier = token_network_identifier
-        self.channel_identifier = channel_identifier
+        self.token_network_identifier = canonical_identifier.token_network_address
+        self.channel_identifier = canonical_identifier.channel_identifier
+        self.our_onchain_locksroot = our_onchain_locksroot
+        self.partner_onchain_locksroot = partner_onchain_locksroot
 
     def __repr__(self):
         return (
@@ -544,15 +581,17 @@ class ContractReceiveChannelSettled(ContractReceiveStateChange):
             self.block_number,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveChannelSettled) and
             self.token_network_identifier == other.token_network_identifier and
             self.channel_identifier == other.channel_identifier and
+            self.our_onchain_locksroot == other.our_onchain_locksroot and
+            self.partner_onchain_locksroot == other.partner_onchain_locksroot and
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -560,16 +599,33 @@ class ContractReceiveChannelSettled(ContractReceiveStateChange):
             'transaction_hash': serialize_bytes(self.transaction_hash),
             'token_network_identifier': to_checksum_address(self.token_network_identifier),
             'channel_identifier': str(self.channel_identifier),
+            'our_onchain_locksroot': serialize_bytes(self.our_onchain_locksroot),
+            'partner_onchain_locksroot': serialize_bytes(self.partner_onchain_locksroot),
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ContractReceiveChannelSettled':
+        our_onchain_locksroot = None
+        partner_onchain_locksroot = None
+        if data['our_onchain_locksroot']:
+            our_onchain_locksroot = deserialize_bytes(data['our_onchain_locksroot'])
+
+        if data['partner_onchain_locksroot']:
+            partner_onchain_locksroot = deserialize_bytes(data['partner_onchain_locksroot'])
+
         return cls(
             transaction_hash=deserialize_bytes(data['transaction_hash']),
-            token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            channel_identifier=ChannelID(int(data['channel_identifier'])),
+            canonical_identifier=CanonicalIdentifier(
+                chain_identifier=CHAIN_ID_UNSPECIFIED,
+                token_network_address=to_canonical_address(data['token_network_identifier']),
+                channel_identifier=ChannelID(int(data['channel_identifier'])),
+            ),
+            our_onchain_locksroot=our_onchain_locksroot,
+            partner_onchain_locksroot=partner_onchain_locksroot,
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -579,10 +635,10 @@ class ActionLeaveAllNetworks(StateChange):
     def __repr__(self):
         return '<ActionLeaveAllNetworks>'
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return isinstance(other, ActionLeaveAllNetworks)
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     @classmethod
@@ -597,7 +653,7 @@ class ActionChangeNodeNetworkState(StateChange):
             self,
             node_address: Address,
             network_state: str,
-    ):
+    ) -> None:
         if not isinstance(node_address, T_Address):
             raise ValueError('node_address must be an address instance')
 
@@ -610,14 +666,14 @@ class ActionChangeNodeNetworkState(StateChange):
             self.network_state,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ActionChangeNodeNetworkState) and
             self.node_address == other.node_address and
             self.network_state == other.network_state
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -644,11 +700,12 @@ class ContractReceiveNewPaymentNetwork(ContractReceiveStateChange):
             transaction_hash: TransactionHash,
             payment_network: PaymentNetworkState,
             block_number: BlockNumber,
+            block_hash: BlockHash,
     ):
         if not isinstance(payment_network, PaymentNetworkState):
             raise ValueError('payment_network must be a PaymentNetworkState instance')
 
-        super().__init__(transaction_hash, block_number)
+        super().__init__(transaction_hash, block_number, block_hash)
 
         self.payment_network = payment_network
 
@@ -658,14 +715,14 @@ class ContractReceiveNewPaymentNetwork(ContractReceiveStateChange):
             self.block_number,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveNewPaymentNetwork) and
             self.payment_network == other.payment_network and
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -673,6 +730,7 @@ class ContractReceiveNewPaymentNetwork(ContractReceiveStateChange):
             'transaction_hash': serialize_bytes(self.transaction_hash),
             'payment_network': self.payment_network,
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
@@ -681,6 +739,7 @@ class ContractReceiveNewPaymentNetwork(ContractReceiveStateChange):
             transaction_hash=deserialize_bytes(data['transaction_hash']),
             payment_network=data['payment_network'],
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -693,23 +752,26 @@ class ContractReceiveNewTokenNetwork(ContractReceiveStateChange):
             payment_network_identifier: PaymentNetworkID,
             token_network: TokenNetworkState,
             block_number: BlockNumber,
+            block_hash: BlockHash,
     ):
         if not isinstance(token_network, TokenNetworkState):
             raise ValueError('token_network must be a TokenNetworkState instance')
 
-        super().__init__(transaction_hash, block_number)
+        super().__init__(transaction_hash, block_number, block_hash)
 
         self.payment_network_identifier = payment_network_identifier
         self.token_network = token_network
 
     def __repr__(self):
-        return '<ContractReceiveNewTokenNetwork payment_network:{} network:{} block:{}>'.format(
-            pex(self.payment_network_identifier),
-            self.token_network,
-            self.block_number,
+        return (
+            '<ContractReceiveNewTokenNetwork payment_network:{} network:{} block:{}>'.format(
+                pex(self.payment_network_identifier),
+                self.token_network,
+                self.block_number,
+            )
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveNewTokenNetwork) and
             self.payment_network_identifier == other.payment_network_identifier and
@@ -717,7 +779,7 @@ class ContractReceiveNewTokenNetwork(ContractReceiveStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -726,6 +788,7 @@ class ContractReceiveNewTokenNetwork(ContractReceiveStateChange):
             'payment_network_identifier': to_checksum_address(self.payment_network_identifier),
             'token_network': self.token_network,
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
@@ -735,6 +798,7 @@ class ContractReceiveNewTokenNetwork(ContractReceiveStateChange):
             payment_network_identifier=to_canonical_address(data['payment_network_identifier']),
             token_network=data['token_network'],
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -748,7 +812,8 @@ class ContractReceiveSecretReveal(ContractReceiveStateChange):
             secrethash: SecretHash,
             secret: Secret,
             block_number: BlockNumber,
-    ):
+            block_hash: BlockHash,
+    ) -> None:
         if not isinstance(secret_registry_address, T_SecretRegistryAddress):
             raise ValueError('secret_registry_address must be of type SecretRegistryAddress')
         if not isinstance(secrethash, T_SecretHash):
@@ -756,7 +821,7 @@ class ContractReceiveSecretReveal(ContractReceiveStateChange):
         if not isinstance(secret, T_Secret):
             raise ValueError('secret must be of type Secret')
 
-        super().__init__(transaction_hash, block_number)
+        super().__init__(transaction_hash, block_number, block_hash)
 
         self.secret_registry_address = secret_registry_address
         self.secrethash = secrethash
@@ -774,7 +839,7 @@ class ContractReceiveSecretReveal(ContractReceiveStateChange):
             self.block_number,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveSecretReveal) and
             self.secret_registry_address == other.secret_registry_address and
@@ -783,7 +848,7 @@ class ContractReceiveSecretReveal(ContractReceiveStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -793,6 +858,7 @@ class ContractReceiveSecretReveal(ContractReceiveStateChange):
             'secrethash': serialize_bytes(self.secrethash),
             'secret': serialize_bytes(self.secret),
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
@@ -803,6 +869,7 @@ class ContractReceiveSecretReveal(ContractReceiveStateChange):
             secrethash=deserialize_bytes(data['secrethash']),
             secret=deserialize_bytes(data['secret']),
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -820,14 +887,16 @@ class ContractReceiveChannelBatchUnlock(ContractReceiveStateChange):
     def __init__(
             self,
             transaction_hash: TransactionHash,
-            token_network_identifier: TokenNetworkID,
+            canonical_identifier: CanonicalIdentifier,
             participant: Address,
             partner: Address,
             locksroot: Locksroot,
             unlocked_amount: TokenAmount,
             returned_tokens: TokenAmount,
             block_number: BlockNumber,
-    ):
+            block_hash: BlockHash,
+    ) -> None:
+        token_network_identifier = canonical_identifier.token_network_address
 
         if not isinstance(token_network_identifier, T_TokenNetworkID):
             raise ValueError('token_network_identifier must be of type TokenNtetworkIdentifier')
@@ -838,7 +907,7 @@ class ContractReceiveChannelBatchUnlock(ContractReceiveStateChange):
         if not isinstance(partner, T_Address):
             raise ValueError('partner must be of type address')
 
-        super().__init__(transaction_hash, block_number)
+        super().__init__(transaction_hash, block_number, block_hash)
 
         self.token_network_identifier = token_network_identifier
         self.participant = participant
@@ -863,7 +932,7 @@ class ContractReceiveChannelBatchUnlock(ContractReceiveStateChange):
             self.block_number,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveChannelBatchUnlock) and
             self.token_network_identifier == other.token_network_identifier and
@@ -875,7 +944,7 @@ class ContractReceiveChannelBatchUnlock(ContractReceiveStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -888,19 +957,25 @@ class ContractReceiveChannelBatchUnlock(ContractReceiveStateChange):
             'unlocked_amount': str(self.unlocked_amount),
             'returned_tokens': str(self.returned_tokens),
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ContractReceiveChannelBatchUnlock':
         return cls(
             transaction_hash=deserialize_bytes(data['transaction_hash']),
-            token_network_identifier=to_canonical_address(data['token_network_identifier']),
+            canonical_identifier=CanonicalIdentifier(
+                chain_identifier=CHAIN_ID_UNSPECIFIED,
+                token_network_address=to_canonical_address(data['token_network_identifier']),
+                channel_identifier=CHANNEL_ID_UNSPECIFIED,
+            ),
             participant=to_canonical_address(data['participant']),
             partner=to_canonical_address(data['partner']),
             locksroot=deserialize_bytes(data['locksroot']),
             unlocked_amount=int(data['unlocked_amount']),
             returned_tokens=int(data['returned_tokens']),
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -910,12 +985,12 @@ class ContractReceiveRouteNew(ContractReceiveStateChange):
     def __init__(
             self,
             transaction_hash: TransactionHash,
-            token_network_identifier: TokenNetworkID,
-            channel_identifier: ChannelID,
+            canonical_identifier: CanonicalIdentifier,
             participant1: Address,
             participant2: Address,
             block_number: BlockNumber,
-    ):
+            block_hash: BlockHash,
+    ) -> None:
 
         if not isinstance(participant1, T_Address):
             raise ValueError('participant1 must be of type address')
@@ -923,10 +998,10 @@ class ContractReceiveRouteNew(ContractReceiveStateChange):
         if not isinstance(participant2, T_Address):
             raise ValueError('participant2 must be of type address')
 
-        super().__init__(transaction_hash, block_number)
+        super().__init__(transaction_hash, block_number, block_hash)
 
-        self.token_network_identifier = token_network_identifier
-        self.channel_identifier = channel_identifier
+        self.token_network_identifier = canonical_identifier.token_network_address
+        self.channel_identifier = canonical_identifier.channel_identifier
         self.participant1 = participant1
         self.participant2 = participant2
 
@@ -943,7 +1018,7 @@ class ContractReceiveRouteNew(ContractReceiveStateChange):
             self.block_number,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveRouteNew) and
             self.token_network_identifier == other.token_network_identifier and
@@ -953,7 +1028,7 @@ class ContractReceiveRouteNew(ContractReceiveStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -964,17 +1039,22 @@ class ContractReceiveRouteNew(ContractReceiveStateChange):
             'participant1': to_checksum_address(self.participant1),
             'participant2': to_checksum_address(self.participant2),
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ContractReceiveRouteNew':
         return cls(
             transaction_hash=deserialize_bytes(data['transaction_hash']),
-            token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            channel_identifier=ChannelID(int(data['channel_identifier'])),
+            canonical_identifier=CanonicalIdentifier(
+                chain_identifier=CHAIN_ID_UNSPECIFIED,
+                token_network_address=to_canonical_address(data['token_network_identifier']),
+                channel_identifier=ChannelID(int(data['channel_identifier'])),
+            ),
             participant1=to_canonical_address(data['participant1']),
             participant2=to_canonical_address(data['participant2']),
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -984,14 +1064,14 @@ class ContractReceiveRouteClosed(ContractReceiveStateChange):
     def __init__(
             self,
             transaction_hash: TransactionHash,
-            token_network_identifier: TokenNetworkID,
-            channel_identifier: ChannelID,
+            canonical_identifier: CanonicalIdentifier,
             block_number: BlockNumber,
-    ):
-        super().__init__(transaction_hash, block_number)
+            block_hash: BlockHash,
+    ) -> None:
+        super().__init__(transaction_hash, block_number, block_hash)
 
-        self.token_network_identifier = token_network_identifier
-        self.channel_identifier = channel_identifier
+        self.token_network_identifier = canonical_identifier.token_network_address
+        self.channel_identifier = canonical_identifier.channel_identifier
 
     def __repr__(self):
         return '<ContractReceiveRouteClosed token_network:{} id:{} block:{}>'.format(
@@ -1000,7 +1080,7 @@ class ContractReceiveRouteClosed(ContractReceiveStateChange):
             self.block_number,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveRouteClosed) and
             self.token_network_identifier == other.token_network_identifier and
@@ -1008,7 +1088,7 @@ class ContractReceiveRouteClosed(ContractReceiveStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1017,15 +1097,20 @@ class ContractReceiveRouteClosed(ContractReceiveStateChange):
             'token_network_identifier': to_checksum_address(self.token_network_identifier),
             'channel_identifier': str(self.channel_identifier),
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ContractReceiveRouteClosed':
         return cls(
             transaction_hash=deserialize_bytes(data['transaction_hash']),
-            token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            channel_identifier=ChannelID(int(data['channel_identifier'])),
+            canonical_identifier=CanonicalIdentifier(
+                chain_identifier=CHAIN_ID_UNSPECIFIED,
+                token_network_address=to_canonical_address(data['token_network_identifier']),
+                channel_identifier=ChannelID(int(data['channel_identifier'])),
+            ),
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -1033,21 +1118,23 @@ class ContractReceiveUpdateTransfer(ContractReceiveStateChange):
     def __init__(
             self,
             transaction_hash: TransactionHash,
-            token_network_identifier: TokenNetworkID,
-            channel_identifier: ChannelID,
+            canonical_identifier: CanonicalIdentifier,
             nonce: Nonce,
             block_number: BlockNumber,
-    ):
-        super().__init__(transaction_hash, block_number)
+            block_hash: BlockHash,
+    ) -> None:
+        super().__init__(transaction_hash, block_number, block_hash)
 
-        self.token_network_identifier = token_network_identifier
-        self.channel_identifier = channel_identifier
+        self.token_network_identifier = canonical_identifier.token_network_address
+        self.channel_identifier = canonical_identifier.channel_identifier
         self.nonce = nonce
 
     def __repr__(self):
-        return f'<ContractReceiveUpdateTransfer nonce:{self.nonce} block:{self.block_number}>'
+        return (
+            f'<ContractReceiveUpdateTransfer nonce:{self.nonce} block:{self.block_number}>'
+        )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ContractReceiveUpdateTransfer) and
             self.token_network_identifier == other.token_network_identifier and
@@ -1056,7 +1143,7 @@ class ContractReceiveUpdateTransfer(ContractReceiveStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1066,16 +1153,21 @@ class ContractReceiveUpdateTransfer(ContractReceiveStateChange):
             'channel_identifier': str(self.channel_identifier),
             'nonce': str(self.nonce),
             'block_number': str(self.block_number),
+            'block_hash': serialize_bytes(self.block_hash),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ContractReceiveUpdateTransfer':
         return cls(
             transaction_hash=deserialize_bytes(data['transaction_hash']),
-            token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            channel_identifier=ChannelID(int(data['channel_identifier'])),
+            canonical_identifier=CanonicalIdentifier(
+                token_network_address=to_canonical_address(data['token_network_identifier']),
+                channel_identifier=ChannelID(int(data['channel_identifier'])),
+                chain_identifier=CHAIN_ID_UNSPECIFIED,
+            ),
             nonce=int(data['nonce']),
             block_number=BlockNumber(int(data['block_number'])),
+            block_hash=BlockHash(deserialize_bytes(data['block_hash'])),
         )
 
 
@@ -1085,7 +1177,7 @@ class ReceiveUnlock(BalanceProofStateChange):
             message_identifier: MessageID,
             secret: Secret,
             balance_proof: BalanceProofSignedState,
-    ):
+    ) -> None:
         if not isinstance(balance_proof, BalanceProofSignedState):
             raise ValueError('balance_proof must be an instance of BalanceProofSignedState')
 
@@ -1104,7 +1196,7 @@ class ReceiveUnlock(BalanceProofStateChange):
             self.balance_proof,
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ReceiveUnlock) and
             self.message_identifier == other.message_identifier and
@@ -1113,7 +1205,7 @@ class ReceiveUnlock(BalanceProofStateChange):
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1133,7 +1225,7 @@ class ReceiveUnlock(BalanceProofStateChange):
 
 
 class ReceiveDelivered(AuthenticatedSenderStateChange):
-    def __init__(self, sender: Address, message_identifier: MessageID):
+    def __init__(self, sender: Address, message_identifier: MessageID) -> None:
         super().__init__(sender)
 
         self.message_identifier = message_identifier
@@ -1144,14 +1236,14 @@ class ReceiveDelivered(AuthenticatedSenderStateChange):
             pex(self.sender),
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ReceiveDelivered) and
             self.message_identifier == other.message_identifier and
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1169,7 +1261,7 @@ class ReceiveDelivered(AuthenticatedSenderStateChange):
 
 
 class ReceiveProcessed(AuthenticatedSenderStateChange):
-    def __init__(self, sender: Address, message_identifier: MessageID):
+    def __init__(self, sender: Address, message_identifier: MessageID) -> None:
         super().__init__(sender)
         self.message_identifier = message_identifier
 
@@ -1179,14 +1271,14 @@ class ReceiveProcessed(AuthenticatedSenderStateChange):
             pex(self.sender),
         )
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, ReceiveProcessed) and
             self.message_identifier == other.message_identifier and
             super().__eq__(other)
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def to_dict(self) -> Dict[str, Any]:

@@ -7,7 +7,6 @@ from urllib.parse import quote
 
 import gevent
 import structlog
-from cachetools.func import ttl_cache
 from gevent.lock import Semaphore
 from matrix_client.api import MatrixHttpApi
 from matrix_client.client import CACHE, MatrixClient
@@ -29,21 +28,21 @@ class Room(MatrixRoom):
         # dict of 'type': 'content' key/value pairs
         self.account_data: Dict[str, Dict[str, Any]] = dict()
 
-    @ttl_cache(ttl=10)
-    def get_joined_members(self) -> List[User]:
+    def get_joined_members(self, force_resync=False) -> List[User]:
         """ Return a list of members of this room. """
-        response = self.client.api.get_room_members(self.room_id)
-        for event in response['chunk']:
-            if event['content']['membership'] == 'join':
-                user_id = event["state_key"]
-                if user_id not in self._members:
-                    self._mkmembers(
-                        User(
-                            self.client.api,
-                            user_id,
-                            event['content'].get('displayname'),
-                        ),
-                    )
+        if force_resync:
+            response = self.client.api.get_room_members(self.room_id)
+            for event in response['chunk']:
+                if event['content']['membership'] == 'join':
+                    user_id = event["state_key"]
+                    if user_id not in self._members:
+                        self._mkmembers(
+                            User(
+                                self.client.api,
+                                user_id,
+                                event['content'].get('displayname'),
+                            ),
+                        )
         return list(self._members.values())
 
     def _mkmembers(self, member):
@@ -262,6 +261,7 @@ class GMatrixClient(MatrixClient):
         assert not self.should_listen and self.sync_thread is None, 'Already running'
         self.should_listen = True
         self.sync_thread = gevent.spawn(self.listen_forever, timeout_ms, exception_handler)
+        self.sync_thread.name = f'GMatrixClient.listen_forever user_id:{self.user_id}'
 
     def stop_listener_thread(self):
         """ Kills sync_thread greenlet before joining it """
@@ -397,7 +397,9 @@ class GMatrixClient(MatrixClient):
 
         is_first_sync = (prev_sync_token is None)
         self._handle_thread = gevent.Greenlet(self._handle_response, response, is_first_sync)
-        self._handle_thread.name = f'sync_handle_response-{prev_sync_token}'
+        self._handle_thread.name = (
+            f'GMatrixClient._sync user_id:{self.user_id} sync_token:{prev_sync_token}'
+        )
         self._handle_thread.link_exception(lambda g: self.sync_thread.kill(g.exception))
         self._handle_thread.start()
 

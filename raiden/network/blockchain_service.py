@@ -6,14 +6,18 @@ from raiden.network.proxies import (
     Discovery,
     PaymentChannel,
     SecretRegistry,
+    ServiceRegistry,
     Token,
     TokenNetwork,
     TokenNetworkRegistry,
+    UserDeposit,
 )
 from raiden.network.rpc.client import JSONRPCClient
+from raiden.utils import CanonicalIdentifier
 from raiden.utils.typing import (
     Address,
-    ChannelID,
+    BlockHash,
+    BlockNumber,
     PaymentNetworkID,
     T_ChannelID,
     TokenNetworkAddress,
@@ -35,6 +39,8 @@ class BlockChainService:
         self.address_to_token = dict()
         self.address_to_token_network = dict()
         self.address_to_token_network_registry = dict()
+        self.address_to_user_deposit = dict()
+        self.address_to_service_registry = dict()
         self.identifier_to_payment_channel = dict()
 
         self.client = jsonrpc_client
@@ -48,14 +54,19 @@ class BlockChainService:
         self._token_network_creation_lock = Semaphore()
         self._token_network_registry_creation_lock = Semaphore()
         self._secret_registry_creation_lock = Semaphore()
+        self._service_registry_creation_lock = Semaphore()
         self._payment_channel_creation_lock = Semaphore()
+        self._user_deposit_creation_lock = Semaphore()
 
     @property
     def node_address(self) -> Address:
         return self.client.address
 
-    def block_number(self) -> int:
+    def block_number(self) -> BlockNumber:
         return self.client.block_number()
+
+    def block_hash(self) -> BlockHash:
+        return self.client.blockhash_from_blocknumber('latest')
 
     def get_block(self, block_identifier):
         return self.client.web3.eth.getBlock(block_identifier=block_identifier)
@@ -185,11 +196,24 @@ class BlockChainService:
 
         return self.address_to_secret_registry[address]
 
+    def service_registry(self, address: Address) -> ServiceRegistry:
+        with self._service_registry_creation_lock:
+            if address not in self.address_to_service_registry:
+                self.address_to_service_registry[address] = ServiceRegistry(
+                    jsonrpc_client=self.client,
+                    service_registry_address=address,
+                    contract_manager=self.contract_manager,
+                )
+
+        return self.address_to_service_registry[address]
+
     def payment_channel(
             self,
-            token_network_address: TokenNetworkAddress,
-            channel_id: ChannelID,
+            canonical_identifier: CanonicalIdentifier,
     ) -> PaymentChannel:
+
+        token_network_address = TokenNetworkAddress(canonical_identifier.token_network_address)
+        channel_id = canonical_identifier.channel_identifier
 
         if not is_binary_address(token_network_address):
             raise ValueError('address must be a valid address')
@@ -209,3 +233,17 @@ class BlockChainService:
                 )
 
         return self.identifier_to_payment_channel[dict_key]
+
+    def user_deposit(self, address: Address) -> UserDeposit:
+        if not is_binary_address(address):
+            raise ValueError('address must be a valid address')
+
+        with self._user_deposit_creation_lock:
+            if address not in self.address_to_user_deposit:
+                self.address_to_user_deposit[address] = UserDeposit(
+                    jsonrpc_client=self.client,
+                    user_deposit_address=address,
+                    contract_manager=self.contract_manager,
+                )
+
+        return self.address_to_user_deposit[address]

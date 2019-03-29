@@ -14,7 +14,8 @@ from raiden.network.transport import MatrixTransport, UDPTransport
 from raiden.raiden_event_handler import RaidenEventHandler
 from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS, DEFAULT_RETRY_TIMEOUT
 from raiden.tests.utils.factories import UNIT_CHAIN_ID
-from raiden.utils import merge_dict
+from raiden.transfer.views import state_from_raiden
+from raiden.utils import CanonicalIdentifier, merge_dict, pex
 from raiden.waiting import wait_for_payment_network
 
 CHAIN = object()  # Flag used by create a network does make a loop with the channels
@@ -23,6 +24,7 @@ BlockchainServices = namedtuple(
     (
         'deploy_registry',
         'secret_registry',
+        'service_registry',
         'deploy_service',
         'blockchain_services',
     ),
@@ -37,13 +39,16 @@ def check_channel(
         settle_timeout,
         deposit_amount,
 ):
+    canonical_identifier = CanonicalIdentifier(
+        chain_identifier=state_from_raiden(app1.raiden).chain_id,
+        token_network_address=token_network_identifier,
+        channel_identifier=channel_identifier,
+    )
     netcontract1 = app1.raiden.chain.payment_channel(
-        token_network_identifier,
-        channel_identifier,
+        canonical_identifier=canonical_identifier,
     )
     netcontract2 = app2.raiden.chain.payment_channel(
-        token_network_identifier,
-        channel_identifier,
+        canonical_identifier=canonical_identifier,
     )
 
     # Check a valid settle timeout was used, the netting contract has an
@@ -97,13 +102,17 @@ def payment_channel_open_and_deposit(app0, app1, token_address, deposit, settle_
         given_block_identifier='latest',
     )
     assert channel_identifier
+    canonical_identifier = CanonicalIdentifier(
+        chain_identifier=state_from_raiden(app0.raiden).chain_id,
+        token_network_address=token_network_proxy.address,
+        channel_identifier=channel_identifier,
+    )
 
     for app in [app0, app1]:
         # Use each app's own chain because of the private key / local signing
         token = app.raiden.chain.token(token_address)
         payment_channel_proxy = app.raiden.chain.payment_channel(
-            token_network_proxy.address,
-            channel_identifier,
+            canonical_identifier=canonical_identifier,
         )
 
         # This check can succeed and the deposit still fail, if channels are
@@ -112,7 +121,7 @@ def payment_channel_open_and_deposit(app0, app1, token_address, deposit, settle_
         assert previous_balance >= deposit
 
         # the payment channel proxy will call approve
-        # token.approve(token_network_proxy.address, deposit, 'latest')
+        # token.approve(token_network_proxy.address, deposit)
         payment_channel_proxy.set_total_deposit(total_deposit=deposit, block_identifier='latest')
 
         # Balance must decrease by at least but not exactly `deposit` amount,
@@ -135,13 +144,11 @@ def create_all_channels_for_network(
         token_addresses,
         channel_individual_deposit,
         channel_settle_timeout,
-        token_network_registry_address,
-        retry_timeout,
 ):
-    greenlets = []
+    greenlets = set()
     for token_address in token_addresses:
         for app_pair in app_channels:
-            greenlets.append(gevent.spawn(
+            greenlets.add(gevent.spawn(
                 payment_channel_open_and_deposit,
                 app_pair[0],
                 app_pair[1],
@@ -268,10 +275,13 @@ def create_sequential_channels(raiden_apps, channels_per_node):
 
 def create_apps(
         chain_id,
+        contracts_path,
         blockchain_services,
         endpoint_discovery_services,
         token_network_registry_address,
         secret_registry_address,
+        service_registry_address,
+        user_deposit_address,
         raiden_udp_ports,
         reveal_timeout,
         settle_timeout,
@@ -304,6 +314,7 @@ def create_apps(
             'unrecoverable_error_should_crash': unrecoverable_error_should_crash,
             'reveal_timeout': reveal_timeout,
             'settle_timeout': settle_timeout,
+            'contracts_path': contracts_path,
             'database_path': database_paths[idx],
             'blockchain': {
                 'confirmation_blocks': DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
@@ -353,6 +364,14 @@ def create_apps(
         registry = blockchain.token_network_registry(token_network_registry_address)
         secret_registry = blockchain.secret_registry(secret_registry_address)
 
+        service_registry = None
+        if service_registry_address:
+            service_registry = blockchain.service_registry(service_registry_address)
+
+        user_deposit = None
+        if user_deposit_address:
+            user_deposit = blockchain.user_deposit(user_deposit_address)
+
         if use_matrix:
             transport = MatrixTransport(config['transport']['matrix'])
         else:
@@ -378,25 +397,43 @@ def create_apps(
             query_start_block=0,
             default_registry=registry,
             default_secret_registry=secret_registry,
+            default_service_registry=service_registry,
             transport=transport,
             raiden_event_handler=raiden_event_handler,
             message_handler=message_handler,
             discovery=discovery,
+            user_deposit=user_deposit,
         )
         apps.append(app)
 
     return apps
 
 
+def parallel_start_apps(raiden_apps):
+    """Start all the raiden apps in parallel."""
+    start_tasks = set()
+
+    for app in raiden_apps:
+        greenlet = gevent.spawn(app.raiden.start)
+        greenlet.name = f'Fixture:raiden_network node:{pex(app.raiden.address)}'
+        start_tasks.add(greenlet)
+
+    gevent.joinall(start_tasks, raise_error=True)
+
+
 def jsonrpc_services(
         deploy_service,
         private_keys,
         secret_registry_address,
+        service_registry_address,
         token_network_registry_address,
         web3,
         contract_manager,
 ):
     secret_registry = deploy_service.secret_registry(secret_registry_address)
+    service_registry = None
+    if service_registry_address:
+        service_registry = deploy_service.service_registry(service_registry_address)
     deploy_registry = deploy_service.token_network_registry(token_network_registry_address)
 
     blockchain_services = list()
@@ -409,10 +446,11 @@ def jsonrpc_services(
         blockchain_services.append(blockchain)
 
     return BlockchainServices(
-        deploy_registry,
-        secret_registry,
-        deploy_service,
-        blockchain_services,
+        deploy_registry=deploy_registry,
+        secret_registry=secret_registry,
+        service_registry=service_registry,
+        deploy_service=deploy_service,
+        blockchain_services=blockchain_services,
     )
 
 

@@ -4,9 +4,9 @@ import random
 from enum import Enum
 
 import pytest
-from eth_utils import denoms, remove_0x_prefix, to_normalized_address
+from eth_utils import remove_0x_prefix, to_normalized_address
 
-from raiden.constants import Environment
+from raiden.constants import RAIDEN_DB_VERSION, RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT, Environment
 from raiden.network.utils import get_free_port
 from raiden.settings import (
     DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
@@ -20,12 +20,6 @@ from raiden_contracts.constants import TEST_SETTLE_TIMEOUT_MAX, TEST_SETTLE_TIME
 
 # we need to use fixture for the default values otherwise
 # pytest.mark.parametrize won't work (pytest 2.9.2)
-
-DEFAULT_BALANCE = denoms.ether * 10  # pylint: disable=no-member
-DEFAULT_BALANCE_BIN = str(DEFAULT_BALANCE)
-DEFAULT_PASSPHRASE = 'notsosecret'  # Geth's account passphrase
-
-RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT = int(0.075 * 10 ** 18)
 
 DUPLICATED_BRACKETS = str.maketrans({'{': '{{', '}': '}}'})
 
@@ -196,7 +190,7 @@ def privatekey_seed(request):
 
 
 @pytest.fixture
-def token_amount(number_of_nodes, deposit):
+def token_amount(number_of_nodes):
     total_per_node = RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT * 4
     total_token = total_per_node * number_of_nodes
     return total_token
@@ -320,20 +314,15 @@ def database_paths(tmpdir, private_keys):
         )
         if not os.path.exists(app_dir):
             os.makedirs(app_dir)
-        database_paths.append(os.path.join(app_dir, 'log.db'))
+        database_paths.append(os.path.join(app_dir, f'v{RAIDEN_DB_VERSION}_log.db'))
 
     return database_paths
 
 
 @pytest.fixture
-def private_rooms():
-    return False
-
-
-@pytest.fixture
 def environment_type():
     """Specifies the environment type"""
-    return Environment.PRODUCTION
+    return Environment.DEVELOPMENT
 
 
 @pytest.fixture
@@ -367,3 +356,10 @@ def skip_if_not_matrix(request):
     if request.config.option.transport in ('matrix', 'all'):
         return
     pytest.skip('This test works only with Matrix transport')
+
+
+@pytest.fixture
+def skip_if_parity(blockchain_type):
+    """Skip the test if it is run with a Parity node"""
+    if blockchain_type == 'parity':
+        pytest.skip('This test does not work with parity.')

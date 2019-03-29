@@ -5,7 +5,7 @@ import re
 import sys
 import time
 from itertools import zip_longest
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, NamedTuple, Optional, Tuple, Union
 
 import gevent
 from eth_keys import keys
@@ -24,6 +24,35 @@ from raiden import constants
 from raiden.exceptions import InvalidAddress
 from raiden.utils import typing
 from raiden.utils.signing import sha3  # noqa
+
+# Placeholder chain ID for refactoring in scope of #3493
+CHAIN_ID_UNSPECIFIED = typing.ChainID(-1)
+# Placeholder channel ID for refactoring in scope of #3493
+CHANNEL_ID_UNSPECIFIED = typing.ChannelID(-2)
+
+
+class CanonicalIdentifier(NamedTuple):
+    chain_identifier: typing.ChainID
+    # introducing the type as Union, to avoid casting for now. Should be only `..Address` later
+    token_network_address: Union[typing.TokenNetworkAddress, typing.TokenNetworkID]
+    channel_identifier: typing.ChannelID
+
+    def to_dict(self) -> typing.Dict[str, typing.Any]:
+        return dict(
+            chain_identifier=str(self.chain_identifier),
+            token_network_address=encode_hex(self.token_network_address),
+            channel_identifier=str(self.channel_identifier),
+        )
+
+    @classmethod
+    def from_dict(cls, data: typing.Dict[str, typing.Any]) -> 'CanonicalIdentifier':
+        return cls(
+            chain_identifier=typing.ChainID(int(data['chain_identifier'])),
+            token_network_address=typing.TokenNetworkAddress(
+                decode_hex(data['token_network_address']),
+            ),
+            channel_identifier=typing.ChannelID(int(data['channel_identifier'])),
+        )
 
 
 def random_secret():
@@ -160,11 +189,10 @@ def get_system_spec() -> typing.Dict[str, str]:
             platform.architecture()[0],
         )
     else:
-        system_info = '{} {} {} {}'.format(
+        system_info = '{} {} {}'.format(
             platform.system(),
-            '_'.join(platform.architecture()),
+            '_'.join(part for part in platform.architecture() if part),
             platform.release(),
-            platform.machine(),
         )
 
     try:
@@ -181,6 +209,7 @@ def get_system_spec() -> typing.Dict[str, str]:
         'python_implementation': platform.python_implementation(),
         'python_version': platform.python_version(),
         'system': system_info,
+        'architecture': platform.machine(),
         'distribution': 'bundled' if getattr(sys, 'frozen', False) else 'source',
     }
     return system_spec
@@ -265,3 +294,8 @@ def safe_gas_limit(*estimates: int) -> int:
     assert None not in estimates, 'if estimateGas returned None it should not reach here'
     calculated_limit = max(estimates)
     return int(calculated_limit * constants.GAS_FACTOR)
+
+
+def to_rdn(rei: int) -> float:
+    """ Convert REI value to RDN. """
+    return rei / 10 ** 18

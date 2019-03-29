@@ -31,7 +31,11 @@ from raiden.exceptions import (
     EthNodeInterfaceError,
     InsufficientFunds,
 )
-from raiden.network.rpc.middleware import block_hash_cache_middleware, connection_test_middleware
+from raiden.network.rpc.middleware import (
+    block_hash_cache_middleware,
+    connection_test_middleware,
+    http_retry_with_backoff_middleware,
+)
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
 from raiden.utils import is_supported_client, pex, privatekey_to_address
 from raiden.utils.filters import StatelessFilter
@@ -44,12 +48,21 @@ from raiden.utils.typing import (
     ABI,
     Address,
     AddressHex,
+    BlockHash,
     BlockSpecification,
     Nonce,
     TransactionHash,
 )
 
 log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+def logs_blocks_sanity_check(from_block: BlockSpecification, to_block: BlockSpecification) -> None:
+    """Checks that the from/to blocks passed onto log calls contain only appropriate types"""
+    is_valid_from = isinstance(from_block, int) or isinstance(from_block, str)
+    assert is_valid_from, 'event log from block can be integer or latest,pending, earliest'
+    is_valid_to = isinstance(to_block, int) or isinstance(to_block, str)
+    assert is_valid_to, 'event log to block can be integer or latest,pending, earliest'
 
 
 def geth_assert_rpc_interfaces(web3: Web3):
@@ -154,13 +167,14 @@ def geth_discover_next_available_nonce(
     # the user, these will be the younger transactions. Because this needs the
     # largest nonce, queued is checked first.
 
+    address = to_checksum_address(address)
     queued = pool.get('queued', {}).get(address)
     if queued:
-        return max(queued.keys()) + 1
+        return Nonce(max(int(k) for k in queued.keys()) + 1)
 
     pending = pool.get('pending', {}).get(address)
     if pending:
-        return max(pending.keys()) + 1
+        return Nonce(max(int(k) for k in pending.keys()) + 1)
 
     # The first valid nonce is 0, therefore the count is already the next
     # available nonce
@@ -338,6 +352,12 @@ def monkey_patch_web3(web3, gas_price_strategy):
         # set gas price strategy
         web3.eth.setGasPriceStrategy(gas_price_strategy)
 
+        # In the version of web3.py we are using the http_retry_request_middleware
+        # is not on by default. But in recent ones it is. This solves some random
+        # crashes that happen on the mainnet as reported in issue
+        # https://github.com/raiden-network/raiden/issues/3558
+        web3.middleware_stack.add(http_retry_with_backoff_middleware)
+
         # we use a PoA chain for smoketest, use this middleware to fix this
         web3.middleware_stack.inject(geth_poa_middleware, layer=0)
     except ValueError:
@@ -369,6 +389,7 @@ class JSONRPCClient:
             web3: Web3,
             privkey: bytes,
             gas_price_strategy: Callable = rpc_gas_price_strategy,
+            gas_estimate_correction: Callable = lambda gas: gas,
             block_num_confirmations: int = 0,
             uses_infura=False,
     ):
@@ -431,6 +452,7 @@ class JSONRPCClient:
 
         self._available_nonce = available_nonce
         self._nonce_lock = Semaphore()
+        self._gas_estimate_correction = gas_estimate_correction
 
         log.debug(
             'JSONRPCClient created',
@@ -446,13 +468,30 @@ class JSONRPCClient:
         """ Return the most recent block. """
         return self.web3.eth.blockNumber
 
+    def blockhash_from_blocknumber(self, block_number: BlockSpecification) -> BlockHash:
+        """Given a block number, query the chain to get its corresponding block hash"""
+        return bytes(self.web3.eth.getBlock(block_number)['hash'])
+
+    def can_query_state_for_block(self, block_identifier: BlockSpecification) -> bool:
+        """
+        Returns if the provided block identifier is safe enough to query chain
+        state for. If it's close to the state pruning blocks then state should
+        not be queried.
+        More info: https://github.com/raiden-network/raiden/issues/3566.
+        """
+        latest_block_number = self.block_number()
+        preconditions_block = self.web3.eth.getBlock(block_identifier)
+        preconditions_block_number = int(preconditions_block['number'])
+        difference = latest_block_number - preconditions_block_number
+        return difference < constants.NO_STATE_QUERY_AFTER_BLOCKS
+
     def balance(self, account: Address):
         """ Return the balance of the account of the given address. """
         return self.web3.eth.getBalance(to_checksum_address(account), 'pending')
 
     def parity_get_pending_transaction_hash_by_nonce(
             self,
-            checksummed_address: AddressHex,
+            address: AddressHex,
             nonce: Nonce,
     ) -> Optional[TransactionHash]:
         """Queries the local parity transaction pool and searches for a transaction.
@@ -465,7 +504,7 @@ class JSONRPCClient:
         transactions = self.web3.manager.request_blocking('parity_allTransactions', [])
         log.debug('RETURNED TRANSACTIONS', transactions=transactions)
         for tx in transactions:
-            address_match = to_checksum_address(tx['from']) == checksummed_address
+            address_match = to_checksum_address(tx['from']) == address
             if address_match and int(tx['nonce'], 16) == nonce:
                 return tx['hash']
         return None
@@ -617,7 +656,7 @@ class JSONRPCClient:
         transaction_hash = self.send_transaction(
             to=Address(b''),
             data=contract_transaction['data'],
-            startgas=contract_transaction['gas'],
+            startgas=self._gas_estimate_correction(contract_transaction['gas']),
         )
 
         self.poll(transaction_hash)
@@ -633,10 +672,7 @@ class JSONRPCClient:
                 ),
             )
 
-        return self.new_contract_proxy(
-            contract_interface,
-            contract_address,
-        )
+        return self.new_contract_proxy(contract_interface, contract_address), receipt
 
     def send_transaction(
             self,
@@ -750,6 +786,7 @@ class JSONRPCClient:
             to_block: BlockSpecification = 'latest',
     ) -> StatelessFilter:
         """ Create a filter in the ethereum node. """
+        logs_blocks_sanity_check(from_block, to_block)
         return StatelessFilter(
             self.web3,
             {
@@ -768,6 +805,7 @@ class JSONRPCClient:
             to_block: BlockSpecification = 'latest',
     ) -> List[Dict]:
         """ Get events for the given query. """
+        logs_blocks_sanity_check(from_block, to_block)
         return self.web3.eth.getLogs({
             'fromBlock': from_block,
             'toBlock': to_block,

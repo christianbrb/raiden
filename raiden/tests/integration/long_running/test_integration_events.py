@@ -26,7 +26,7 @@ from raiden.transfer.events import ContractSendChannelClose
 from raiden.transfer.mediated_transfer.events import SendLockedTransfer
 from raiden.transfer.mediated_transfer.state_change import ReceiveSecretReveal
 from raiden.transfer.state_change import ContractReceiveSecretReveal
-from raiden.utils import sha3, wait_until
+from raiden.utils import CanonicalIdentifier, sha3, wait_until
 from raiden.utils.typing import Address, BlockSpecification, ChannelID
 from raiden_contracts.constants import (
     CONTRACT_TOKEN_NETWORK,
@@ -302,6 +302,7 @@ def test_query_events(
         settle_timeout,
         retry_timeout,
         contract_manager,
+        blockchain_type,
 ):
     app0, app1 = raiden_chain  # pylint: disable=unbalanced-tuple-unpacking
     registry_address = app0.raiden.default_registry.address
@@ -339,15 +340,18 @@ def test_query_events(
         },
     )
 
-    events = get_token_network_registry_events(
-        chain=app0.raiden.chain,
-        token_network_registry_address=app0.raiden.default_registry.address,
-        contract_manager=contract_manager,
-        events=ALL_EVENTS,
-        from_block=999999998,
-        to_block=999999999,
-    )
-    assert not events
+    if blockchain_type == 'geth':
+        # FIXME: This is apparently meant to verify that querying nonexisting blocks
+        # returns an empty list, which is not true for parity.
+        events = get_token_network_registry_events(
+            chain=app0.raiden.chain,
+            token_network_registry_address=app0.raiden.default_registry.address,
+            contract_manager=contract_manager,
+            events=ALL_EVENTS,
+            from_block=999999998,
+            to_block=999999999,
+        )
+        assert not events
 
     RaidenAPI(app0.raiden).channel_open(
         registry_address,
@@ -378,15 +382,17 @@ def test_query_events(
     assert _event
     channel_id = _event['args']['channel_identifier']
 
-    events = get_token_network_events(
-        chain=app0.raiden.chain,
-        token_network_address=manager0.address,
-        contract_manager=contract_manager,
-        events=ALL_EVENTS,
-        from_block=999999998,
-        to_block=999999999,
-    )
-    assert not events
+    if blockchain_type == 'geth':
+        # see above
+        events = get_token_network_events(
+            chain=app0.raiden.chain,
+            token_network_address=manager0.address,
+            contract_manager=contract_manager,
+            events=ALL_EVENTS,
+            from_block=999999998,
+            to_block=999999999,
+        )
+        assert not events
 
     # channel is created but not opened and without funds
     channelcount1 = views.total_token_network_channels(
@@ -546,10 +552,14 @@ def test_secret_revealed_on_chain(
 
     # Close the channel. This must register the secret on chain
     channel_close_event = ContractSendChannelClose(
-        channel_identifier=channel_state2_1.identifier,
+        canonical_identifier=CanonicalIdentifier(
+            chain_identifier=channel_state2_1.chain_id,
+            token_network_address=token_network_identifier,
+            channel_identifier=channel_state2_1.identifier,
+        ),
         token_address=channel_state2_1.token_address,
-        token_network_identifier=token_network_identifier,
         balance_proof=channel_state2_1.partner_state.balance_proof,
+        triggered_by_block_hash=app0.raiden.chain.block_hash(),
     )
     app2.raiden.raiden_event_handler.on_raiden_event(app2.raiden, channel_close_event)
 
@@ -581,7 +591,7 @@ def test_secret_revealed_on_chain(
 
 
 @pytest.mark.parametrize('number_of_nodes', [2])
-def test_clear_closed_queue(raiden_network, token_addresses, deposit, network_wait):
+def test_clear_closed_queue(raiden_network, token_addresses, network_wait):
     """ Closing a channel clears the respective message queue. """
     app0, app1 = raiden_network
 

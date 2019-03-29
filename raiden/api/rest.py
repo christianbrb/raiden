@@ -51,7 +51,7 @@ from raiden.api.v1.resources import (
     TokensResource,
     create_blueprint,
 )
-from raiden.constants import GENESIS_BLOCK_NUMBER, Environment
+from raiden.constants import GENESIS_BLOCK_NUMBER, UINT256_MAX, Environment
 from raiden.exceptions import (
     AddressWithoutCode,
     AlreadyRegisteredTokenAddress,
@@ -225,7 +225,13 @@ def api_error(errors, status_code):
 
 
 @parser.error_handler
-def handle_request_parsing_error(err, _req, _schema):
+def handle_request_parsing_error(
+        err,
+        _req,
+        _schema,
+        _err_status_code,
+        _err_headers,
+):
     """ This handles request parsing errors generated for example by schema
     field validation failing."""
     abort(HTTPStatus.BAD_REQUEST, errors=err.messages)
@@ -471,9 +477,10 @@ class APIServer(Runnable):
 
     def start(self):
         log.debug(
-            'Starting rest api',
+            'REST API starting',
             host=self.config['host'],
             port=self.config['port'],
+            node=pex(self.rest_api.raiden_api.address),
         )
 
         # WSGI expects an stdlib logger. With structlog there's conflict of
@@ -500,22 +507,33 @@ class APIServer(Runnable):
 
         self.wsgiserver = wsgiserver
 
-        log.debug('REST API started', node=pex(self.rest_api.raiden_api.address))
+        log.debug(
+            'REST API started',
+            host=self.config['host'],
+            port=self.config['port'],
+            node=pex(self.rest_api.raiden_api.address),
+        )
 
         super().start()
 
     def stop(self):
         log.debug(
-            'Stopping rest api',
+            'REST API stoping',
             host=self.config['host'],
             port=self.config['port'],
+            node=pex(self.rest_api.raiden_api.address),
         )
 
         if self.wsgiserver is not None:
             self.wsgiserver.stop()
             self.wsgiserver = None
 
-        log.debug('REST API stopped', node=pex(self.rest_api.raiden_api.address))
+        log.debug(
+            'REST API stopped',
+            host=self.config['host'],
+            port=self.config['port'],
+            node=pex(self.rest_api.raiden_api.address),
+        )
 
     def unhandled_exception(self, exception: Exception):
         """ Flask.errorhandler when an exception wasn't correctly handled """
@@ -561,6 +579,7 @@ class RestAPI:
                 errors='Registering a new token is currently disabled in the Ethereum mainnet',
                 status_code=HTTPStatus.NOT_IMPLEMENTED,
             )
+
         log.debug(
             'Registering token',
             node=pex(self.raiden_api.address),
@@ -569,8 +588,10 @@ class RestAPI:
         )
         try:
             token_network_address = self.raiden_api.token_network_register(
-                registry_address,
-                token_address,
+                registry_address=registry_address,
+                token_address=token_address,
+                channel_participant_deposit_limit=UINT256_MAX,
+                token_network_deposit_limit=UINT256_MAX,
             )
         except (InvalidAddress, AlreadyRegisteredTokenAddress, TransactionThrew) as e:
             return api_error(
@@ -604,6 +625,7 @@ class RestAPI:
             token_address=to_checksum_address(token_address),
             settle_timeout=settle_timeout,
         )
+
         try:
             token = self.raiden_api.raiden.chain.token(token_address)
         except AddressWithoutCode as e:
@@ -611,6 +633,7 @@ class RestAPI:
                 errors=str(e),
                 status_code=HTTPStatus.CONFLICT,
             )
+
         balance = token.balance_of(self.raiden_api.raiden.address)
 
         if total_deposit is not None and total_deposit > balance:
@@ -631,8 +654,14 @@ class RestAPI:
                 partner_address,
                 settle_timeout,
             )
-        except (InvalidAddress, InvalidSettleTimeout, SamePeerAddress,
-                AddressWithoutCode, DuplicatedChannelError, TokenNotRegistered) as e:
+        except (
+                InvalidAddress,
+                InvalidSettleTimeout,
+                SamePeerAddress,
+                AddressWithoutCode,
+                DuplicatedChannelError,
+                TokenNotRegistered,
+        ) as e:
             return api_error(
                 errors=str(e),
                 status_code=HTTPStatus.CONFLICT,
@@ -825,6 +854,28 @@ class RestAPI:
         tokens_list = AddressList(raiden_service_result)
         result = self.address_list_schema.dump(tokens_list)
         return api_response(result=result.data)
+
+    def get_token_network_for_token(
+            self,
+            registry_address: typing.PaymentNetworkID,
+            token_address: typing.TokenAddress,
+    ):
+        log.debug(
+            'Getting token network for token',
+            node=pex(self.raiden_api.address),
+            token_address=to_checksum_address(token_address),
+        )
+        token_network_address = self.raiden_api.get_token_network_address_for_token_address(
+            registry_address=registry_address,
+            token_address=token_address,
+        )
+
+        if token_network_address is not None:
+            return api_response(result=to_checksum_address(token_network_address))
+        else:
+            pretty_address = to_checksum_address(token_address)
+            message = f'No token network registered for token "{pretty_address}"'
+            return api_error(message, status_code=HTTPStatus.NOT_FOUND)
 
     def get_blockchain_events_network(
             self,

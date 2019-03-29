@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import platform
 import random
 import shutil
 import socket
@@ -11,7 +12,8 @@ from datetime import timedelta
 from enum import Enum
 from pathlib import Path
 from tarfile import TarFile
-from typing import Any, Dict
+from typing import Any, Dict, Set
+from urllib.parse import urljoin
 from zipfile import ZipFile
 
 import gevent
@@ -20,6 +22,7 @@ import structlog
 from cachetools.func import ttl_cache
 from eth_keyfile import create_keyfile_json
 from eth_utils import to_checksum_address
+from eth_utils.typing import ChecksumAddress
 from gevent import Greenlet
 from gevent.pool import Group, Pool
 from mirakuru import ProcessExitedWithError
@@ -33,12 +36,8 @@ log = structlog.get_logger(__name__)
 
 
 RAIDEN_RELEASES_URL = 'https://raiden-nightlies.ams3.digitaloceanspaces.com/'
-if sys.platform == 'darwin':
-    RAIDEN_RELEASES_LATEST_FILE = '_LATEST-macOS.txt'
-    RAIDEN_RELEASE_VERSIONED_NAME_TEMPLATE = 'raiden-v{version}-macOS.zip'
-else:
-    RAIDEN_RELEASES_LATEST_FILE = '_LATEST-linux.txt'
-    RAIDEN_RELEASE_VERSIONED_NAME_TEMPLATE = 'raiden-v{version}-linux.tar.gz'
+RAIDEN_RELEASES_LATEST_FILE_TEMPLATE = '_LATEST-{platform}-{arch}.txt'
+RAIDEN_RELEASES_VERSIONED_NAME_TEMPLATE = 'raiden-v{version}-{platform}-{arch}.zip'
 
 
 MANAGED_CONFIG_OPTIONS = {
@@ -64,6 +63,7 @@ MANAGED_CONFIG_OPTIONS_OVERRIDABLE = {
     'endpoint-registry-contract-address',
     'tokennetwork-registry-contract-address',
     'secret-registry-contract-address',
+    'pathfinding-service-address',
 }
 
 
@@ -97,7 +97,10 @@ class RaidenReleaseKeeper:
         else:
             if version.startswith('v'):
                 version = version.lstrip('v')
-            release_file_name = RAIDEN_RELEASE_VERSIONED_NAME_TEMPLATE.format(version=version)
+            release_file_name = self._expand_release_template(
+                RAIDEN_RELEASES_VERSIONED_NAME_TEMPLATE,
+                version=version,
+            )
 
         release_file_path = self._get_release_file(release_file_name)
         return self._get_bin_for_release(release_file_path)
@@ -151,9 +154,20 @@ class RaidenReleaseKeeper:
     @property
     @ttl_cache(maxsize=1, ttl=600)
     def _latest_release_name(self):
-        url = RAIDEN_RELEASES_URL + RAIDEN_RELEASES_LATEST_FILE
-        log.debug('Fetching latest Raiden release')
+        latest_release_file_name = self._expand_release_template(
+            RAIDEN_RELEASES_LATEST_FILE_TEMPLATE,
+        )
+        url = urljoin(RAIDEN_RELEASES_URL, latest_release_file_name)
+        log.debug('Fetching latest Raiden release', lookup_url=url)
         return requests.get(url).text.strip()
+
+    @staticmethod
+    def _expand_release_template(template, **kwargs):
+        return template.format(
+            platform='macOS' if sys.platform == 'darwin' else sys.platform,
+            arch=platform.machine(),
+            **kwargs,
+        )
 
 
 class NodeRunner:
@@ -238,7 +252,7 @@ class NodeRunner:
         self._executor = None
 
     @property
-    def address(self):
+    def address(self) -> ChecksumAddress:
         if not self._address:
             with self._keystore_file.open('r') as keystore_file:
                 keystore_contents = json.load(keystore_file)
@@ -303,8 +317,13 @@ class NodeRunner:
             self.api_address,
             '--no-web-ui',
         ]
+
+        pfs_address = self._pfs_address
+        if pfs_address:
+            cmd.extend(['--pathfinding-service-address', pfs_address])
+
         for option_name in MANAGED_CONFIG_OPTIONS_OVERRIDABLE:
-            if option_name == 'api-address':
+            if option_name in ('api-address', 'pathfinding-service-address'):
                 # already handled above
                 continue
             if option_name in self._options:
@@ -373,6 +392,22 @@ class NodeRunner:
     def _stderr_file(self):
         return self._datadir.joinpath(f'run-{self._runner.run_number:03d}.stderr')
 
+    @property
+    def _pfs_address(self):
+        local_pfs = self._options.get('pathfinding-service-address')
+        global_pfs = self._runner.scenario.services.get('pfs', {}).get('url')
+        if local_pfs:
+            if global_pfs:
+                log.warning(
+                    'Overriding global PFS configuration',
+                    global_pfs_address=global_pfs,
+                    local_pfs_address=local_pfs,
+                    node=self._index,
+                )
+            return local_pfs
+        if global_pfs:
+            return global_pfs
+
     def _validate_options(self, options: Dict[str, Any]):
         for option_name, option_value in options.items():
             if option_name.startswith('no-'):
@@ -398,12 +433,12 @@ class NodeRunner:
 
 class NodeController:
     def __init__(
-        self,
-        runner: ScenarioRunner,
-        raiden_version,
-        node_count,
-        global_options,
-        node_options,
+            self,
+            runner: ScenarioRunner,
+            raiden_version,
+            node_count,
+            global_options,
+            node_options,
     ):
         self._runner = runner
         self._global_options = global_options
@@ -444,13 +479,13 @@ class NodeController:
 
     def stop(self):
         log.info('Stopping nodes')
-        stop_tasks = [gevent.spawn(runner.stop) for runner in self._node_runners]
+        stop_tasks = set(gevent.spawn(runner.stop) for runner in self._node_runners)
         gevent.joinall(stop_tasks, raise_error=True)
         log.info('Nodes stopped')
 
     def kill(self):
         log.info('Killing nodes')
-        kill_tasks = [gevent.spawn(runner.kill) for runner in self._node_runners]
+        kill_tasks = set(gevent.spawn(runner.kill) for runner in self._node_runners)
         gevent.joinall(kill_tasks, raise_error=True)
         log.info('Nodes killed')
 
@@ -459,7 +494,7 @@ class NodeController:
             runner.initialize()
 
     @property
-    def addresses(self):
+    def addresses(self) -> Set[ChecksumAddress]:
         return {runner.address for runner in self._node_runners}
 
     def start_node_monitor(self):

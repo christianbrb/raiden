@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from datetime import datetime
 from itertools import islice
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, Optional, Set, Tuple, Union
 
 import click
 import mirakuru
@@ -25,8 +25,9 @@ from web3.gas_strategies.time_based import fast_gas_price_strategy, medium_gas_p
 from raiden.accounts import Account
 from raiden.network.rpc.client import JSONRPCClient, check_address_has_code
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
-from raiden_contracts.constants import CONTRACT_CUSTOM_TOKEN
-from raiden_contracts.contract_manager import ContractManager, contracts_precompiled_path
+from raiden.utils.typing import TransactionHash
+from raiden_contracts.constants import CONTRACT_CUSTOM_TOKEN, CONTRACT_USER_DEPOSIT
+from raiden_contracts.contract_manager import get_contracts_deployment_info
 from scenario_player.exceptions import ScenarioError, ScenarioTxError
 
 RECLAIM_MIN_BALANCE = 10 ** 12  # 1 µEth (a.k.a. Twei, szabo)
@@ -157,14 +158,18 @@ class HTTPExecutor(mirakuru.HTTPExecutor):
         return self
 
 
-def wait_for_txs(client_or_web3, txhashes, timeout=360):
+def wait_for_txs(
+        client_or_web3: Union[Web3, JSONRPCClient],
+        txhashes: Set[TransactionHash],
+        timeout: int = 360,
+):
     if isinstance(client_or_web3, Web3):
         web3 = client_or_web3
     else:
         web3 = client_or_web3.web3
     start = time.monotonic()
     outstanding = False
-    txhashes = txhashes[:]
+    txhashes = set(txhashes)
     while txhashes and time.monotonic() - start < timeout:
         remaining_timeout = timeout - (time.monotonic() - start)
         if outstanding != len(txhashes) or int(remaining_timeout) % 10 == 0:
@@ -174,9 +179,12 @@ def wait_for_txs(client_or_web3, txhashes, timeout=360):
                 outstanding=outstanding,
                 timeout_remaining=int(remaining_timeout),
             )
-        for txhash in txhashes[:]:
-            tx = web3.eth.getTransaction(txhash)
+        for txhash in txhashes.copy():
+            tx = web3.eth.getTransactionReceipt(txhash)
             if tx and tx['blockNumber'] is not None:
+                status = tx.get('status')
+                if status is not None and status == 0:
+                    raise ScenarioTxError(f"Transaction {encode_hex(txhash)} failed.")
                 txhashes.remove(txhash)
             time.sleep(.1)
         time.sleep(1)
@@ -187,23 +195,25 @@ def wait_for_txs(client_or_web3, txhashes, timeout=360):
         )
 
 
-def get_or_deploy_token(runner) -> ContractProxy:
+def get_or_deploy_token(runner) -> Tuple[ContractProxy, int]:
     """ Deploy or reuse  """
-    contract_manager = ContractManager(contracts_precompiled_path())
-    token_contract = contract_manager.get_contract(CONTRACT_CUSTOM_TOKEN)
+    token_contract = runner.contract_manager.get_contract(CONTRACT_CUSTOM_TOKEN)
 
     token_config = runner.scenario.get('token', {})
     if not token_config:
         token_config = {}
     address = token_config.get('address')
+    block = token_config.get('block', 0)
     reuse = token_config.get('reuse', False)
 
-    token_address_file = runner.data_path.joinpath('token.addr')
+    token_address_file = runner.data_path.joinpath('token.infos')
     if reuse:
         if address:
             raise ScenarioError('Token settings "address" and "reuse" are mutually exclusive.')
         if token_address_file.exists():
-            address = token_address_file.read_text()
+            token_data = json.loads(token_address_file.read_text())
+            address = token_data['address']
+            block = token_data['block']
     if address:
         check_address_has_code(runner.client, address, 'Token')
         token_ctr = runner.client.new_contract_proxy(token_contract['abi'], address)
@@ -214,7 +224,7 @@ def get_or_deploy_token(runner) -> ContractProxy:
             name=token_ctr.contract.functions.name().call(),
             symbol=token_ctr.contract.functions.symbol().call(),
         )
-        return token_ctr
+        return token_ctr, block
 
     token_id = uuid.uuid4()
     now = datetime.now()
@@ -224,14 +234,18 @@ def get_or_deploy_token(runner) -> ContractProxy:
 
     log.debug("Deploying token", name=name, symbol=symbol, decimals=decimals)
 
-    token_ctr = runner.client.deploy_solidity_contract(
+    token_ctr, receipt = runner.client.deploy_solidity_contract(
         'CustomToken',
-        contract_manager.contracts,
+        runner.contract_manager.contracts,
         constructor_parameters=(0, decimals, name, symbol),
     )
+    contract_deployment_block = receipt['blockNumber']
     contract_checksum_address = to_checksum_address(token_ctr.contract_address)
     if reuse:
-        token_address_file.write_text(contract_checksum_address)
+        token_address_file.write_text(json.dumps({
+            'address': contract_checksum_address,
+            'block': contract_deployment_block,
+        }))
 
     log.info(
         "Deployed token",
@@ -239,7 +253,53 @@ def get_or_deploy_token(runner) -> ContractProxy:
         name=name,
         symbol=symbol,
     )
-    return token_ctr
+    return token_ctr, contract_deployment_block
+
+
+def get_udc_and_token(runner) -> Tuple[Optional[ContractProxy], Optional[ContractProxy]]:
+    """ Return contract proxies for the UserDepositContract and associated token """
+    from scenario_player.runner import ScenarioRunner
+    assert isinstance(runner, ScenarioRunner)
+
+    udc_config = runner.scenario.services.get('udc', {})
+
+    if not udc_config.get('enable', False):
+        return None, None
+
+    udc_address = udc_config.get('address')
+    if udc_address is None:
+        log.error('chain id', id=runner.chain_id)
+        contracts = get_contracts_deployment_info(chain_id=runner.chain_id)
+        udc_address = contracts['contracts'][CONTRACT_USER_DEPOSIT]['address']
+    udc_abi = runner.contract_manager.get_contract_abi(CONTRACT_USER_DEPOSIT)
+    udc_proxy = runner.client.new_contract_proxy(udc_abi, udc_address)
+
+    ud_token_address = udc_proxy.contract.functions.token().call()
+    # FIXME: We assume the UD token is a CustomToken (supporting the `mint()` function)
+    custom_token_abi = runner.contract_manager.get_contract_abi(CONTRACT_CUSTOM_TOKEN)
+    ud_token_proxy = runner.client.new_contract_proxy(custom_token_abi, ud_token_address)
+
+    return udc_proxy, ud_token_proxy
+
+
+def mint_token_if_balance_low(
+        token_contract: ContractProxy,
+        target_address: str,
+        min_balance: int,
+        fund_amount: int,
+        gas_limit: int,
+        mint_msg: str,
+        no_action_msg: str = None,
+) -> Optional[TransactionHash]:
+    """ Check token balance and mint if below minimum """
+    balance = token_contract.contract.functions.balanceOf(target_address).call()
+    if balance < min_balance:
+        mint_amount = fund_amount - balance
+        log.debug(mint_msg, address=target_address, amount=mint_amount)
+        return token_contract.transact('mintFor', gas_limit, mint_amount, target_address)
+    else:
+        if no_action_msg:
+            log.debug(no_action_msg, balance=balance)
 
 
 def send_notification_mail(target_mail, subject, message, api_key):

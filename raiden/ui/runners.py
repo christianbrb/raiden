@@ -25,7 +25,7 @@ from raiden.exceptions import (
 )
 from raiden.log_config import configure_logging
 from raiden.network.sockfactory import SocketFactory
-from raiden.tasks import check_gas_reserve, check_network_id, check_version
+from raiden.tasks import check_gas_reserve, check_network_id, check_rdn_deposits, check_version
 from raiden.utils import get_system_spec, merge_dict, split_endpoint, typing
 from raiden.utils.echo_node import EchoNode
 from raiden.utils.runnable import Runnable
@@ -38,8 +38,8 @@ log = structlog.get_logger(__name__)
 
 ETHEREUM_NODE_COMMUNICATION_ERROR = (
     '\n'
-    'Could not contact the ethereum node through JSON-RPC.\n'
-    'Please make sure that the ethereum node is running and JSON-RPC is enabled.'
+    'Could not contact the Ethereum node through JSON-RPC.\n'
+    'Please make sure that the Ethereum node is running and JSON-RPC is enabled.'
 )
 
 
@@ -75,7 +75,6 @@ class NodeRunner:
             log.debug('Using config file', config_file=self._options['config_file'])
 
     def _start_services(self):
-        from raiden.ui.console import Console
         from raiden.api.python import RaidenAPI
 
         config = deepcopy(App.DEFAULT_CONFIG)
@@ -148,6 +147,8 @@ class NodeRunner:
             tasks.append(api_server)
 
         if self._options['console']:
+            from raiden.ui.console import Console
+
             console = Console(app_)
             console.start()
             tasks.append(console)
@@ -164,6 +165,21 @@ class NodeRunner:
             app_.raiden.chain.network_id,
             app_.raiden.chain.client.web3,
         ))
+
+        spawn_user_deposit_task = (
+            app_.user_deposit and
+            (
+                self._options['pathfinding_service_address'] or
+                self._options['enable_monitoring']
+            )
+        )
+        if spawn_user_deposit_task:
+            # spawn a greenlet to handle RDN deposits check
+            tasks.append(gevent.spawn(
+                check_rdn_deposits,
+                app_.raiden,
+                app_.user_deposit,
+            ))
 
         # spawn a greenlet to handle the functions
 

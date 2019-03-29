@@ -23,6 +23,11 @@ templates:
       default: "udp"
       type: enum
       enum: ["udp", "matrix"]
+    environment-type:
+      description: "Environment configuration to be used."
+      default: "production"
+      type: enum
+      enum: ["production", "development"]
     additional-args:
       description: "additional arguments to run smoketest if needed"
       default: ""
@@ -32,9 +37,11 @@ templates:
     GETH_URL_LINUX: 'https://gethstore.blob.core.windows.net/builds/geth-linux-amd64-1.8.22-7fa3509e.tar.gz'
     GETH_URL_MACOS: 'https://gethstore.blob.core.windows.net/builds/geth-darwin-amd64-1.8.22-7fa3509e.tar.gz'
     GETH_VERSION: '1.8.22'
-    SOLC_URL_LINUX: 'https://github.com/ethereum/solidity/releases/download/v0.4.23/solc-static-linux'
-    SOLC_URL_MACOS: 'https://www.dropbox.com/s/4amq3on2ds1dq36/solc_0.4.23?dl=0'
-    SOLC_VERSION: 'v0.4.23'
+    PARITY_URL_LINUX: 'https://releases.parity.io/ethereum/v2.3.3/x86_64-unknown-linux-gnu/parity'
+    PARITY_URL_MACOS: 'https://releases.parity.io/ethereum/v2.3.3/x86_64-apple-darwin/parity'
+    PARITY_VERSION: 'v2.3.3'
+    SOLC_URL_LINUX: 'https://github.com/ethereum/solidity/releases/download/v0.5.4/solc-static-linux'
+    SOLC_VERSION: 'v0.5.4'
 
 
 executors:
@@ -133,7 +140,7 @@ commands:
           name: Installing System Dependencies
           command: |
             export LOCAL_BASE=~/.local-${OS_NAME}
-            .circleci/fetch_geth_solc.sh
+            .circleci/fetch_geth_parity_solc.sh
             ln -s ${LOCAL_BASE} ~/.local
       - save_cache:
           key: system-deps-v2-{{ arch }}-geth-{{ checksum "/tmp/geth-version" }}-solc-{{ checksum "/tmp/solc-version" }}
@@ -288,8 +295,8 @@ jobs:
             set -e
             set -x
       - run:
-          name: Running Raiden Smoketest with << parameters.transport-layer >>
-          command: raiden --transport=<< parameters.transport-layer >> smoketest << parameters.additional-args >>
+          name: Running Raiden Smoketest with << parameters.transport-layer >> and environment << parameters.environment-type >>
+          command: raiden --environment-type=<< parameters.environment-type >> --transport=<< parameters.transport-layer >> smoketest << parameters.additional-args >>
 
   test:
     parameters:
@@ -301,7 +308,8 @@ jobs:
       blockchain-type:
         description: "blockchain type client passed to test run if needed"
         default: "geth"
-        type: string
+        type: enum
+        enum: ["geth", "parity"]
       parallelism:
         description: "number of containers to be used in parallel for this test"
         default: 1
@@ -314,7 +322,7 @@ jobs:
     environment:
       RAIDEN_TESTS_SYNAPSE_BASE_DIR: /home/circleci/.cache/synapse
       RAIDEN_TESTS_SYNAPSE_LOGS_DIR: /tmp/synapse-logs
-      RAIDEN_TESTS_GETH_DATADIR: /tmp/geth
+      RAIDEN_TESTS_GETH_LOGSDIR: /tmp/geth/logs
       COVERAGE_DIR: /home/circleci/raiden/coverage
 
     parallelism: << parameters.parallelism >>
@@ -431,24 +439,57 @@ jobs:
     parameters:
       py-version:
         <<: *py-version-template
+      resource:
+        description: "resource type for underlying VM"
+        default: "medium"
+        type: enum
+        enum: ["small", "medium", "medium+", "large", "xlarge"]
+      remote-host:
+        description: "name of the arm server"
+        default: ""
+        type: enum
+        enum: ["", "armv7", "armv8"]
+      architecture:
+        description: "defines the architecture for which the binary is built"
+        default: "x86_64"
+        type: enum
+        enum: ["x86_64", "armv7l", "aarch64"]
+
 
     executor:
       name: docker
       py-version: "3.7"
+      resource: << parameters.resource >>
 
     steps:
+      - add_ssh_keys:
+          fingerprints:
+            - "7b:c7:3d:f7:ff:1a:2b:8e:2d:18:93:be:c6:7b:b0:7c"
       - attach-and-link:
           py-version: << parameters.py-version >>
       - conditional-skip
       - config-path
-      - setup_remote_docker:
-          docker_layer_caching: true
+      - when:
+          condition: << parameters.remote-host >>
+          steps:
+            - run:
+                name: "set remote docker host"
+                command: echo 'export DOCKER_HOST=localhost:23760' >> ${BASH_ENV}
+            - run:
+                name: SSH Port Forwarding To ARM Server
+                command: |
+                  ssh -f -N -L 127.0.0.1:23760:localhost:2376 ci@<< parameters.remote-host >>.ci.raiden.network -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no
+      - unless:
+          condition: << parameters.remote-host >>
+          steps:
+            - setup_remote_docker:
+                docker_layer_caching: true
       - run:
           name: Build Linux Binary
           command: |
             source .circleci/get_archive_tag.sh
             make bundle-docker
-            echo raiden-${ARCHIVE_TAG}-linux.tar.gz > dist/archive/_LATEST-linux.txt
+            echo raiden-${ARCHIVE_TAG}-linux-<<parameters.architecture>>.tar.gz > dist/archive/_LATEST-linux-<<parameters.architecture>>.txt
       - persist_to_workspace:
           root: "~"
           paths:
@@ -474,12 +515,13 @@ jobs:
             pip uninstall -y pdbpp
             mkdir -p dist/archive
             source .circleci/get_archive_tag.sh
+            echo $(uname -m)
       - run:
           name: Build macOS Binary
           command: |
             pyinstaller --noconfirm --clean raiden.spec
-            zip -9 --junk-paths dist/archive/raiden-${ARCHIVE_TAG}-macOS.zip dist/raiden-${ARCHIVE_TAG}-macOS
-            echo raiden-${ARCHIVE_TAG}-macOS.zip > dist/archive/_LATEST-macOS.txt
+            zip -9 --junk-paths dist/archive/raiden-${ARCHIVE_TAG}-macOS-x86_64.zip dist/raiden-${ARCHIVE_TAG}-macOS-x86_64
+            echo raiden-${ARCHIVE_TAG}-macOS-x86_64.zip > dist/archive/_LATEST-macOS-x86_64.txt
       - persist_to_workspace:
           root: "~"
           paths:
@@ -508,6 +550,9 @@ jobs:
             git config --global user.email "contact@raiden.network"
             git config --global user.name "Raiden Network"
       - run:
+          name: Configure SSH
+          command: .circleci/fetch_ssh_hostkey.sh github.com "SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8"
+      - run:
           name: Checkout homebrew-raiden
           command: |
             git clone git@github.com:raiden-network/homebrew-raiden
@@ -515,18 +560,19 @@ jobs:
           name: Update Formula
           command: |
             source .circleci/get_archive_tag.sh
-            UPDATED_SHA256=$(openssl dgst -sha256 dist/archive/raiden-${ARCHIVE_TAG}-macOS.zip)
-            FORMULA_FILE="homebrew-raiden/raiden.rb"
-            sed -i .bak -E "s/[0-9]+\.[0-9]+\.[0-9]+/${ARCHIVE_TAG/v/}/g" ${FORMULA_FILE}
-            sed -i .bak -E "s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${UPDATED_SHA256: -64}\"/g" ${FORMULA_FILE}
-            rm $FORMULA_FILE.bak
+            export UPDATED_SHA256=$(openssl dgst -sha256 dist/archive/raiden-${ARCHIVE_TAG}-macOS-x86_64.zip)
+            export FORMULA_FILE="homebrew-raiden/raiden.rb"
+            sed -i.bak -r "s/[0-9]+\.[0-9]+\.[0-9]+(-?rc.)?/${ARCHIVE_TAG/v/}/g" ${FORMULA_FILE}
+            sed -i.bak -r "s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${UPDATED_SHA256: -64}\"/g" ${FORMULA_FILE}
+            rm ${FORMULA_FILE}.bak
       - run:
           name: Commit and Push Updated Formula
           command: |
+            source .circleci/get_archive_tag.sh
             pushd homebrew-raiden
             git add raiden.rb
-            git commit -m "Update formula to ${TRAVIS_TAG}"
-            git tag -a "${TRAVIS_TAG}" -m "${TRAVIS_TAG}"
+            git commit -m "Update formula to ${ARCHIVE_TAG}"
+            git tag -a "${ARCHIVE_TAG}" -m "${ARCHIVE_TAG}"
             git push --follow-tags
             popd
 
@@ -567,9 +613,10 @@ jobs:
             - run:
                 name: "Publish Release on GitHub"
                 command: |
+                  rm dist/archive/*.txt
                   echo "TAG: ${CIRCLE_TAG}"
                   RAIDEN_VERSION=${CIRCLE_TAG}
-                  ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} -replace ${RAIDEN_VERSION} build/archive/
+                  ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} -replace ${RAIDEN_VERSION} dist/archive/
 
   deploy-pypi:
     parameters:
@@ -628,16 +675,34 @@ workflows:
             - prepare-python-linux-3.7
 
       - smoketest:
-          name: smoketest-udp-3.7
+          name: smoketest-udp-production-3.7
           py-version: "3.7"
           transport-layer: "udp"
+          environment-type: "production"
           requires:
             - prepare-python-linux-3.7
 
       - smoketest:
-          name: smoketest-matrix-3.7
+          name: smoketest-udp-development-3.7
+          py-version: "3.7"
+          transport-layer: "udp"
+          environment-type: "development"
+          requires:
+            - prepare-python-linux-3.7
+
+      - smoketest:
+          name: smoketest-matrix-production-3.7
           py-version: "3.7"
           transport-layer: "matrix"
+          environment-type: "production"
+          requires:
+            - prepare-python-linux-3.7
+
+      - smoketest:
+          name: smoketest-matrix-development-3.7
+          py-version: "3.7"
+          transport-layer: "matrix"
+          environment-type: "development"
           requires:
             - prepare-python-linux-3.7
 
@@ -659,7 +724,7 @@ workflows:
             - prepare-python-linux-3.7
 
       - test:
-          name: test-integration-udp-3.7
+          name: test-integration-udp-geth-3.7
           py-version: "3.7"
           resource: "medium+"
           test-type: "integration"
@@ -667,12 +732,13 @@ workflows:
           transport-layer: "udp"
           parallelism: 25
           requires:
-            - smoketest-udp-3.7
+            - smoketest-udp-production-3.7
+            - smoketest-udp-development-3.7
             - test-unit-3.7
             - test-fuzz-3.7
 
       - test:
-          name: test-integration-matrix-3.7
+          name: test-integration-matrix-geth-3.7
           py-version: "3.7"
           resource: "medium+"
           test-type: "integration"
@@ -680,7 +746,40 @@ workflows:
           transport-layer: "matrix"
           parallelism: 25
           requires:
-            - smoketest-matrix-3.7
+            - smoketest-matrix-production-3.7
+            - smoketest-matrix-development-3.7
+            - test-unit-3.7
+            - test-fuzz-3.7
+
+      - test:
+          name: test-integration-udp-parity-3.7
+          py-version: "3.7"
+          resource: "medium+"
+          test-type: "integration"
+          blockchain-type: "parity"
+          transport-layer: "udp"
+          parallelism: 25
+          requires:
+            - smoketest-udp-production-3.7
+            # Issue https://github.com/raiden-network/raiden/issues/3565
+            # tracks fixing and unskipping this
+            # - smoketest-udp-development-3.7
+            - test-unit-3.7
+            - test-fuzz-3.7
+
+      - test:
+          name: test-integration-matrix-parity-3.7
+          py-version: "3.7"
+          resource: "medium+"
+          test-type: "integration"
+          blockchain-type: "parity"
+          transport-layer: "matrix"
+          parallelism: 25
+          requires:
+            - smoketest-matrix-production-3.7
+            # Issue https://github.com/raiden-network/raiden/issues/3565
+            # tracks fixing and unskipping this
+            # - smoketest-matrix-development-3.7
             - test-unit-3.7
             - test-fuzz-3.7
 
@@ -688,8 +787,10 @@ workflows:
           requires:
             - lint-3.7
             - mypy-3.7
-            - test-integration-udp-3.7
-            - test-integration-matrix-3.7
+            - test-integration-udp-geth-3.7
+            - test-integration-matrix-geth-3.7
+            - test-integration-udp-parity-3.7
+            - test-integration-matrix-parity-3.7
 
   deploy-release:
     jobs:
@@ -724,6 +825,27 @@ workflows:
             <<: *only-tagged-version-filter
 
       - build-binary-linux:
+          name: build-binary-linux-x86
+          requires:
+            - prepare-python-linux
+          filters:
+            <<: *only-tagged-version-filter
+
+      - build-binary-linux:
+          name: build-binary-linux-armv7l
+          resource: "small"
+          remote-host: "armv7"
+          architecture: "armv7l"
+          requires:
+            - prepare-python-linux
+          filters:
+            <<: *only-tagged-version-filter
+
+      - build-binary-linux:
+          name: build-binary-linux-aarch64
+          resource: "small"
+          remote-host: "armv8"
+          architecture: "aarch64"
           requires:
             - prepare-python-linux
           filters:
@@ -744,7 +866,9 @@ workflows:
       - deploy-digitalocean:
           context: "Raiden Context"
           requires:
-            - build-binary-linux
+            - build-binary-linux-x86
+            - build-binary-linux-armv7l
+            - build-binary-linux-aarch64
             - build-binary-macos
           filters:
             <<: *only-tagged-version-filter
@@ -752,7 +876,9 @@ workflows:
       - deploy-github-release:
           context: "Raiden Context"
           requires:
-            - build-binary-linux
+            - build-binary-linux-x86
+            - build-binary-linux-armv7l
+            - build-binary-linux-aarch64
             - build-binary-macos
           filters:
             <<: *only-tagged-version-filter
@@ -791,16 +917,34 @@ workflows:
           - prepare-python-linux-3.7
 
       - smoketest:
-          name: smoketest-udp-3.7
+          name: smoketest-udp-production-3.7
           py-version: "3.7"
           transport-layer: "udp"
+          environment-type: "production"
           requires:
           - prepare-python-linux-3.7
 
       - smoketest:
-          name: smoketest-matrix-3.7
+          name: smoketest-udp-development-3.7
+          py-version: "3.7"
+          transport-layer: "udp"
+          environment-type: "development"
+          requires:
+          - prepare-python-linux-3.7
+
+      - smoketest:
+          name: smoketest-matrix-production-3.7
           py-version: "3.7"
           transport-layer: "matrix"
+          environment-type: "production"
+          requires:
+          - prepare-python-linux-3.7
+
+      - smoketest:
+          name: smoketest-matrix-development-3.7
+          py-version: "3.7"
+          transport-layer: "matrix"
+          environment-type: "development"
           requires:
           - prepare-python-linux-3.7
 
@@ -822,7 +966,7 @@ workflows:
           - prepare-python-linux-3.7
 
       - test:
-          name: test-integration-udp-3.7
+          name: test-integration-udp-geth-3.7
           py-version: "3.7"
           resource: "medium+"
           test-type: "integration"
@@ -830,12 +974,13 @@ workflows:
           transport-layer: "udp"
           parallelism: 25
           requires:
-          - smoketest-udp-3.7
+          - smoketest-udp-production-3.7
+          - smoketest-udp-development-3.7
           - test-unit-3.7
           - test-fuzz-3.7
 
       - test:
-          name: test-integration-matrix-3.7
+          name: test-integration-matrix-geth-3.7
           py-version: "3.7"
           resource: "medium+"
           test-type: "integration"
@@ -843,7 +988,40 @@ workflows:
           transport-layer: "matrix"
           parallelism: 25
           requires:
-          - smoketest-matrix-3.7
+          - smoketest-matrix-production-3.7
+          - smoketest-matrix-development-3.7
+          - test-unit-3.7
+          - test-fuzz-3.7
+
+      - test:
+          name: test-integration-udp-parity-3.7
+          py-version: "3.7"
+          resource: "medium+"
+          test-type: "integration"
+          blockchain-type: "parity"
+          transport-layer: "udp"
+          parallelism: 25
+          requires:
+          - smoketest-udp-production-3.7
+          # Issue https://github.com/raiden-network/raiden/issues/3565
+          # tracks fixing and unskipping this
+          # - smoketest-udp-development-3.7
+          - test-unit-3.7
+          - test-fuzz-3.7
+
+      - test:
+          name: test-integration-matrix-parity-3.7
+          py-version: "3.7"
+          resource: "medium+"
+          test-type: "integration"
+          blockchain-type: "parity"
+          transport-layer: "matrix"
+          parallelism: 25
+          requires:
+          - smoketest-matrix-production-3.7
+          # Issue https://github.com/raiden-network/raiden/issues/3565
+          # tracks fixing and unskipping this
+          # - smoketest-matrix-development-3.7
           - test-unit-3.7
           - test-fuzz-3.7
 
@@ -851,12 +1029,31 @@ workflows:
           requires:
           - lint-3.7
           - mypy-3.7
-          - test-integration-udp-3.7
-          - test-integration-matrix-3.7
+          - test-integration-udp-geth-3.7
+          - test-integration-matrix-geth-3.7
+          - test-integration-udp-parity-3.7
+          - test-integration-matrix-parity-3.7
 
       - build-binary-linux:
-            requires:
-              - finalize
+          name: build-binary-linux-x86
+          requires:
+            - finalize
+
+      - build-binary-linux:
+          name: build-binary-linux-armv7l
+          resource: "small"
+          remote-host: "armv7"
+          architecture: "armv7l"
+          requires:
+            - finalize
+
+      - build-binary-linux:
+          name: build-binary-linux-aarch64
+          resource: "small"
+          remote-host: "armv8"
+          architecture: "aarch64"
+          requires:
+            - finalize
 
       - prepare-system-macos:
           requires:
@@ -876,7 +1073,9 @@ workflows:
       - deploy-digitalocean:
           context: "Raiden Context"
           requires:
-            - build-binary-linux
+            - build-binary-linux-x86
+            - build-binary-linux-armv7l
+            - build-binary-linux-aarch64
             - build-binary-macos
 
     triggers:

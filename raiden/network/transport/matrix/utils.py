@@ -17,12 +17,12 @@ from raiden.exceptions import InvalidSignature, TransportError
 from raiden.network.transport.matrix.client import GMatrixClient, Room, User
 from raiden.network.utils import get_http_rtt
 from raiden.utils.signer import Signer, recover
-from raiden.utils.typing import Address
+from raiden.utils.typing import Address, ChainID
 from raiden_contracts.constants import ID_TO_NETWORKNAME
 
 log = structlog.get_logger(__name__)
 
-JOIN_RETRIES = 5
+JOIN_RETRIES = 10
 USERID_RE = re.compile(r'^@(0x[0-9a-f]{40})(?:\.[0-9a-f]{8})?(?::.+)?$')
 ROOM_NAME_SEPARATOR = '_'
 ROOM_NAME_PREFIX = 'raiden'
@@ -253,11 +253,11 @@ def sort_servers_closest(servers: Sequence[str]) -> Sequence[Tuple[str, float]]:
     if not {urlparse(url).scheme for url in servers}.issubset({'http', 'https'}):
         raise TransportError('Invalid server urls')
 
-    get_rtt_jobs = [
+    get_rtt_jobs = set(
         gevent.spawn(lambda url: (url, get_http_rtt(url)), server_url)
         for server_url
         in servers
-    ]
+    )
     # these tasks should never raise, returns None on errors
     gevent.joinall(get_rtt_jobs, raise_error=False)  # block and wait tasks
     sorted_servers: List[Tuple[str, float]] = sorted(
@@ -309,7 +309,7 @@ def make_client(servers: Sequence[str], *args, **kwargs) -> GMatrixClient:
     return client
 
 
-def make_room_alias(chain_id: int, *suffixes: str) -> str:
+def make_room_alias(chain_id: ChainID, *suffixes: str) -> str:
     """Given a chain_id and any number of suffixes (global room names, pair of addresses),
     compose and return the canonical room name for raiden network
 

@@ -8,11 +8,27 @@ from raiden.tests.utils.network import (
     create_apps,
     create_network_channels,
     create_sequential_channels,
+    parallel_start_apps,
     wait_for_alarm_start,
     wait_for_channels,
     wait_for_token_networks,
 )
 from raiden.tests.utils.tests import shutdown_apps_and_cleanup_tasks
+from raiden.waiting import wait_for_block_using_web3
+
+
+def wait_for_confirmed_block(blockchain_services, raiden_apps):
+    wait_for_block_using_web3(
+        web3=blockchain_services.deploy_service.client.web3,
+        block_number=raiden_apps[0].raiden.confirmation_blocks + 1,
+        retry_timout=0.5,
+    )
+
+
+def timeout(blockchain_type: str):
+    """As parity nodes are slower, we need to set a longer timeout when
+    waiting for onchain events to complete."""
+    return 120 if blockchain_type == 'parity' else 30
 
 
 @pytest.fixture
@@ -39,7 +55,9 @@ def raiden_chain(
         unrecoverable_error_should_crash,
         local_matrix_servers,
         private_rooms,
-        retry_timeout,
+        blockchain_type,
+        contracts_path,
+        user_deposit_address,
 ):
 
     if len(token_addresses) != 1:
@@ -50,12 +68,17 @@ def raiden_chain(
         'with 0, 1 or 2 channels'
     )
 
+    service_registry_address = None
+    if blockchain_services.service_registry:
+        service_registry_address = blockchain_services.service_registry.address
     raiden_apps = create_apps(
         chain_id=chain_id,
         blockchain_services=blockchain_services.blockchain_services,
         endpoint_discovery_services=endpoint_discovery_services,
         token_network_registry_address=token_network_registry_address,
         secret_registry_address=blockchain_services.secret_registry.address,
+        service_registry_address=service_registry_address,
+        user_deposit_address=user_deposit_address,
         raiden_udp_ports=raiden_udp_ports,
         reveal_timeout=reveal_timeout,
         settle_timeout=settle_timeout,
@@ -71,10 +94,11 @@ def raiden_chain(
         unrecoverable_error_should_crash=unrecoverable_error_should_crash,
         local_matrix_url=local_matrix_servers[0],
         private_rooms=private_rooms,
+        contracts_path=contracts_path,
     )
 
-    start_tasks = [gevent.spawn(app.raiden.start) for app in raiden_apps]
-    gevent.joinall(start_tasks, raise_error=True)
+    wait_for_confirmed_block(blockchain_services, raiden_apps)
+    parallel_start_apps(raiden_apps)
 
     from_block = GENESIS_BLOCK_NUMBER
     for app in raiden_apps:
@@ -85,7 +109,7 @@ def raiden_chain(
         )
 
     exception = RuntimeError('`raiden_chain` fixture setup failed, token networks unavailable')
-    with gevent.Timeout(seconds=30, exception=exception):
+    with gevent.Timeout(seconds=timeout(blockchain_type), exception=exception):
         wait_for_token_networks(
             raiden_apps=raiden_apps,
             token_network_registry_address=token_network_registry_address,
@@ -102,12 +126,10 @@ def raiden_chain(
         token_addresses=token_addresses,
         channel_individual_deposit=deposit,
         channel_settle_timeout=settle_timeout,
-        token_network_registry_address=token_network_registry_address,
-        retry_timeout=retry_timeout,
     )
 
     exception = RuntimeError('`raiden_chain` fixture setup failed, nodes are unreachable')
-    with gevent.Timeout(seconds=30, exception=exception):
+    with gevent.Timeout(seconds=timeout(blockchain_type), exception=exception):
         wait_for_channels(
             app_channels,
             blockchain_services.deploy_registry.address,
@@ -144,15 +166,22 @@ def raiden_network(
         unrecoverable_error_should_crash,
         local_matrix_servers,
         private_rooms,
-        retry_timeout,
+        blockchain_type,
+        contracts_path,
+        user_deposit_address,
 ):
-
+    service_registry_address = None
+    if blockchain_services.service_registry:
+        service_registry_address = blockchain_services.service_registry.address
     raiden_apps = create_apps(
         chain_id=chain_id,
+        contracts_path=contracts_path,
         blockchain_services=blockchain_services.blockchain_services,
         endpoint_discovery_services=endpoint_discovery_services,
         token_network_registry_address=token_network_registry_address,
         secret_registry_address=blockchain_services.secret_registry.address,
+        service_registry_address=service_registry_address,
+        user_deposit_address=user_deposit_address,
         raiden_udp_ports=raiden_udp_ports,
         reveal_timeout=reveal_timeout,
         settle_timeout=settle_timeout,
@@ -170,11 +199,11 @@ def raiden_network(
         private_rooms=private_rooms,
     )
 
-    start_tasks = [gevent.spawn(app.raiden.start) for app in raiden_apps]
-    gevent.joinall(start_tasks, raise_error=True)
+    wait_for_confirmed_block(blockchain_services, raiden_apps)
+    parallel_start_apps(raiden_apps)
 
     exception = RuntimeError('`raiden_chain` fixture setup failed, token networks unavailable')
-    with gevent.Timeout(seconds=30, exception=exception):
+    with gevent.Timeout(seconds=timeout(blockchain_type), exception=exception):
         wait_for_token_networks(
             raiden_apps=raiden_apps,
             token_network_registry_address=token_network_registry_address,
@@ -191,12 +220,10 @@ def raiden_network(
         token_addresses=token_addresses,
         channel_individual_deposit=deposit,
         channel_settle_timeout=settle_timeout,
-        token_network_registry_address=token_network_registry_address,
-        retry_timeout=retry_timeout,
     )
 
     exception = RuntimeError('`raiden_network` fixture setup failed, nodes are unreachable')
-    with gevent.Timeout(seconds=30, exception=exception):
+    with gevent.Timeout(seconds=timeout(blockchain_type), exception=exception):
         wait_for_channels(
             app_channels,
             blockchain_services.deploy_registry.address,

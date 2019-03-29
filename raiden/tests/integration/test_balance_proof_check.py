@@ -17,7 +17,6 @@ from raiden.transfer.state_change import ContractReceiveChannelSettled
 def test_node_can_settle_if_close_didnt_use_any_balance_proof(
         raiden_network,
         number_of_nodes,
-        deposit,
         token_addresses,
         network_wait,
 ):
@@ -72,13 +71,6 @@ def test_node_can_settle_if_close_didnt_use_any_balance_proof(
         signature=EMPTY_SIGNATURE,
         given_block_identifier='latest',
     )
-    waiting.wait_for_close(
-        raiden=app0.raiden,
-        payment_network_id=registry_address,
-        token_address=token_address,
-        channel_ids=[channel_identifier],
-        retry_timeout=app0.raiden.alarm.sleep_time,
-    )
     waiting.wait_for_settle(
         raiden=app0.raiden,
         payment_network_id=registry_address,
@@ -90,10 +82,12 @@ def test_node_can_settle_if_close_didnt_use_any_balance_proof(
         from_identifier=0,
         to_identifier='latest',
     )
-    assert search_for_item(state_changes, ContractReceiveChannelSettled, {
-        'token_network_identifier': token_network_identifier,
-        'channel_identifier': channel_identifier,
-    })
+    assert search_for_item(
+        state_changes, ContractReceiveChannelSettled, {
+            'token_network_identifier': token_network_identifier,
+            'channel_identifier': channel_identifier,
+        },
+    )
 
 
 @pytest.mark.parametrize('deposit', [10])
@@ -102,10 +96,8 @@ def test_node_can_settle_if_close_didnt_use_any_balance_proof(
 def test_node_can_settle_if_partner_does_not_call_update_transfer(
         raiden_network,
         number_of_nodes,
-        deposit,
         token_addresses,
         network_wait,
-        chain_id,
 ):
     """ A node must be able to settle a channel, even if the partner did not
     call update transfer.
@@ -145,13 +137,6 @@ def test_node_can_settle_if_partner_does_not_call_update_transfer(
         token_address=token_address,
         partner_address=app1.raiden.address,
     )
-    waiting.wait_for_close(
-        raiden=app0.raiden,
-        payment_network_id=registry_address,
-        token_address=token_address,
-        channel_ids=[channel_identifier],
-        retry_timeout=app0.raiden.alarm.sleep_time,
-    )
 
     # app1 won't update the channel
 
@@ -166,7 +151,9 @@ def test_node_can_settle_if_partner_does_not_call_update_transfer(
         from_identifier=0,
         to_identifier='latest',
     )
-    assert search_for_item(state_changes, ContractReceiveChannelSettled, {
-        'token_network_identifier': token_network_identifier,
-        'channel_identifier': channel_identifier,
-    })
+    assert search_for_item(
+        state_changes, ContractReceiveChannelSettled, {
+            'token_network_identifier': token_network_identifier,
+            'channel_identifier': channel_identifier,
+        },
+    )

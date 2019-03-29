@@ -19,7 +19,6 @@ REFUNDTRANSFER = 8
 REVEALSECRET = 11
 DELIVERED = 12
 LOCKEXPIRED = 13
-REQUESTMONITORING = 20
 
 
 # pylint: disable=invalid-name
@@ -27,6 +26,8 @@ log = structlog.get_logger(__name__)
 
 
 nonce = make_field('nonce', 8, '8s', integer(0, UINT64_MAX))
+updating_nonce = make_field('updating_nonce', 8, '8s', integer(0, UINT64_MAX))
+other_nonce = make_field('other_nonce', 8, '8s', integer(0, UINT64_MAX))
 payment_identifier = make_field('payment_identifier', 8, '8s', integer(0, UINT64_MAX))
 chain_id = make_field('chain_id', 32, '32s', integer(0, UINT256_MAX))
 message_identifier = make_field('message_identifier', 8, '8s', integer(0, UINT64_MAX))
@@ -44,6 +45,8 @@ token = make_field('token', 20, '20s')
 recipient = make_field('recipient', 20, '20s')
 target = make_field('target', 20, '20s')
 initiator = make_field('initiator', 20, '20s')
+updating_participant = make_field('updating_participant', 20, '20s')
+other_participant = make_field('other_participant', 20, '20s')
 channel_identifier = make_field('channel_identifier', 32, '32s', integer(0, UINT256_MAX))
 
 locksroot = make_field('locksroot', 32, '32s')
@@ -56,6 +59,9 @@ locked_amount = make_field('locked_amount', 32, '32s', integer(0, UINT256_MAX))
 amount = make_field('amount', 32, '32s', integer(0, UINT256_MAX))
 reward_amount = make_field('reward_amount', 32, '32s', integer(0, UINT256_MAX))
 fee = make_field('fee', 32, '32s', integer(0, UINT256_MAX))
+reveal_timeout = make_field('reveal_timeout', 32, '32s', integer(0, UINT256_MAX))
+updating_capacity = make_field('updating_capacity', 32, '32s', integer(0, UINT256_MAX))
+other_capacity = make_field('other_capacity', 32, '32s', integer(0, UINT256_MAX))
 
 signature = make_field('signature', 65, '65s')
 non_closing_signature = make_field('non_closing_signature', 65, '65s')
@@ -231,8 +237,6 @@ Lock = namedbuffer(
 RequestMonitoring = namedbuffer(
     'request_monitoring',
     [
-        cmdid(REQUESTMONITORING),
-        pad(3),
         nonce,
         chain_id,
         token_network_address,
@@ -243,6 +247,24 @@ RequestMonitoring = namedbuffer(
         non_closing_signature,
         reward_amount,
         reward_proof_signature,
+    ],
+)
+
+
+UpdatePFS = namedbuffer(
+    'update_pfs',
+    [
+        chain_id,
+        token_network_address,
+        channel_identifier,
+        updating_participant,
+        other_participant,
+        updating_nonce,
+        other_nonce,
+        updating_capacity,
+        other_capacity,
+        reveal_timeout,
+        signature,
     ],
 )
 
@@ -257,7 +279,6 @@ CMDID_MESSAGE = {
     REFUNDTRANSFER: RefundTransfer,
     DELIVERED: Delivered,
     LOCKEXPIRED: LockExpired,
-    REQUESTMONITORING: RequestMonitoring,
 }
 
 

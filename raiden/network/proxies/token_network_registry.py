@@ -23,10 +23,13 @@ from raiden.network.rpc.transactions import check_transaction_threw
 from raiden.utils import pex, safe_gas_limit
 from raiden.utils.typing import (
     Address,
+    Any,
     BlockSpecification,
+    List,
     PaymentNetworkID,
     T_TargetAddress,
     TokenAddress,
+    TokenAmount,
 )
 from raiden_contracts.constants import CONTRACT_TOKEN_NETWORK_REGISTRY, EVENT_TOKEN_NETWORK_CREATED
 from raiden_contracts.contract_manager import ContractManager
@@ -81,7 +84,7 @@ class TokenNetworkRegistry:
 
         address = self.proxy.contract.functions.token_to_token_networks(
             to_checksum_address(token_address),
-        ).call()
+        ).call(block_identifier=block_identifier)
         address = to_canonical_address(address)
 
         if is_same_address(address, NULL_ADDRESS):
@@ -89,7 +92,41 @@ class TokenNetworkRegistry:
 
         return address
 
-    def add_token(self, token_address: TokenAddress, given_block_identifier: BlockSpecification):
+    def add_token_with_limits(
+            self,
+            token_address: TokenAddress,
+            channel_participant_deposit_limit: TokenAmount,
+            token_network_deposit_limit: TokenAmount,
+    ) -> Address:
+        """
+        Register token of `token_address` with the token network.
+        The limits apply for version 0.13.0 and above of raiden-contracts,
+        since instantiation also takes the limits as constructor arguments.
+        """
+        return self._add_token(
+            token_address=token_address,
+            additional_arguments=[channel_participant_deposit_limit, token_network_deposit_limit],
+        )
+
+    def add_token_without_limits(
+            self,
+            token_address: TokenAddress,
+    ) -> Address:
+        """
+        Register token of `token_address` with the token network.
+        This applies for versions prior to 0.13.0 of raiden-contracts,
+        since limits were hardcoded into the TokenNetwork contract.
+        """
+        return self._add_token(
+            token_address=token_address,
+            additional_arguments=list(),
+        )
+
+    def _add_token(
+            self,
+            token_address: TokenAddress,
+            additional_arguments: List[Any],
+    ) -> Address:
         # given_block_identifier is not really used in this function yet as there
         # are no preconditions to check with the given block
         if not is_binary_address(token_address):
@@ -104,10 +141,12 @@ class TokenNetworkRegistry:
 
         checking_block = self.client.get_checking_block()
         error_prefix = 'Call to createERC20TokenNetwork will fail'
+
+        arguments = [token_address] + additional_arguments
         gas_limit = self.proxy.estimate_gas(
             checking_block,
             'createERC20TokenNetwork',
-            token_address,
+            *arguments,
         )
 
         if gas_limit:
@@ -115,7 +154,7 @@ class TokenNetworkRegistry:
             transaction_hash = self.proxy.transact(
                 'createERC20TokenNetwork',
                 safe_gas_limit(gas_limit, GAS_REQUIRED_FOR_CREATE_ERC20_TOKEN_NETWORK),
-                token_address,
+                *arguments,
             )
 
             self.client.poll(transaction_hash)

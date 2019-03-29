@@ -3,9 +3,10 @@ import sqlite3
 
 import pytest
 
+from raiden.constants import RAIDEN_DB_VERSION
 from raiden.exceptions import InvalidDBData
 from raiden.storage.serialize import JSONSerializer
-from raiden.storage.sqlite import RAIDEN_DB_VERSION, SerializedSQLiteStorage
+from raiden.storage.sqlite import SerializedSQLiteStorage
 from raiden.storage.utils import TimestampedEvent
 from raiden.storage.wal import WriteAheadLog, restore_to_state_change
 from raiden.tests.utils import factories
@@ -73,10 +74,11 @@ def test_write_read_log():
     wal = new_wal(state_transition_noop)
 
     block_number = 1337
+    block_hash = factories.make_transaction_hash()
     block = Block(
         block_number=block_number,
         gas_limit=1,
-        block_hash=factories.make_transaction_hash(),
+        block_hash=block_hash,
     )
     unlocked_amount = 10
     returned_amount = 5
@@ -85,13 +87,16 @@ def test_write_read_log():
     locksroot = sha3(b'test_write_read_log')
     contract_receive_unlock = ContractReceiveChannelBatchUnlock(
         transaction_hash=factories.make_transaction_hash(),
-        token_network_identifier=factories.make_address(),
+        canonical_identifier=factories.make_canonical_identifier(
+            token_network_address=factories.make_address(),
+        ),
         participant=participant,
         partner=partner,
         locksroot=locksroot,
         unlocked_amount=unlocked_amount,
         returned_tokens=returned_amount,
         block_number=block_number,
+        block_hash=block_hash,
     )
 
     state_changes1 = wal.storage.get_statechanges_by_identifier(

@@ -1,3 +1,4 @@
+import gevent
 import pytest
 
 from raiden.messages import Ping
@@ -5,7 +6,7 @@ from raiden.transfer import state, views
 
 
 @pytest.mark.parametrize('number_of_nodes', [2])
-def test_udp_reachable_node(raiden_network, skip_if_not_udp):
+def test_udp_reachable_node(raiden_network, skip_if_not_udp):  # pylint: disable=unused-argument
     """A node that answers the ping message must have its state set to
     reachable.
     """
@@ -31,7 +32,7 @@ def test_udp_reachable_node(raiden_network, skip_if_not_udp):
 
 
 @pytest.mark.parametrize('number_of_nodes', [2])
-def test_udp_unreachable_node(raiden_network, skip_if_not_udp):
+def test_udp_unreachable_node(raiden_network, skip_if_not_udp):  # pylint: disable=unused-argument
     """A node that does *not* answer the ping message must have its state set to
     reachable.
     """
@@ -63,3 +64,33 @@ def test_udp_unreachable_node(raiden_network, skip_if_not_udp):
         app1.raiden.address,
     )
     assert network_state is state.NODE_NETWORK_UNREACHABLE
+
+
+@pytest.mark.parametrize('number_of_nodes', [1])
+@pytest.mark.parametrize('channels_per_node', [0])
+@pytest.mark.parametrize('number_of_tokens', [1])
+def test_suite_survives_unhandled_exception(
+        raiden_network,
+        skip_if_parity,  # pylint: disable=unused-argument
+):
+    """ Commit 56a617085e59fc88517e7043b629ffc9dcc0b8c4 removed code that changed
+    gevent's SYSTEM_ERROR for tests. This test aims to show that there is no regression. """
+    class UnhandledTestException(Exception):
+        pass
+
+    def do_fail(*args, **kwargs):  # pylint: disable=unused-argument
+        raise UnhandledTestException()
+
+    raiden_service = raiden_network[0].raiden
+    gevent.spawn(do_fail).join()
+
+    with pytest.raises(UnhandledTestException):
+        gevent.spawn(do_fail).get()
+    with pytest.raises(UnhandledTestException):
+        gevent.getcurrent().throw(UnhandledTestException())
+    assert hasattr(raiden_service, 'exception')
+    assert raiden_service.exception is None
+    raiden_service.alarm.register_callback(do_fail)
+    raiden_service.join(timeout=5)
+    assert raiden_service.exception is not None
+    assert isinstance(raiden_service.exception, UnhandledTestException)

@@ -53,10 +53,7 @@ def transfer_exists(
     return secrethash in payment_state.initiator_transfers
 
 
-def cancel_other_transfers(
-        payment_state: InitiatorPaymentState,
-        unlocked_secrethash: SecretHash,
-) -> None:
+def cancel_other_transfers(payment_state: InitiatorPaymentState) -> None:
     for initiator_state in payment_state.initiator_transfers.values():
         initiator_state.transfer_state = 'transfer_cancelled'
 
@@ -69,7 +66,9 @@ def can_cancel(initiator: InitiatorTransferState) -> bool:
     )
 
 
-def events_for_cancel_current_route(transfer_description) -> List[Event]:
+def events_for_cancel_current_route(
+        transfer_description: TransferDescriptionWithSecretState,
+) -> List[Event]:
     unlock_failed = EventUnlockFailed(
         identifier=transfer_description.payment_identifier,
         secrethash=transfer_description.secrethash,
@@ -141,7 +140,6 @@ def subdispatch_to_initiatortransfer(
         state_change: StateChange,
         channelidentifiers_to_channels: ChannelMap,
         pseudo_random_generator: random.Random,
-        block_number: BlockNumber,
 ) -> TransitionResult[InitiatorPaymentState]:
     channel_identifier = initiator_state.channel_identifier
     channel_state = channelidentifiers_to_channels.get(channel_identifier)
@@ -153,7 +151,6 @@ def subdispatch_to_initiatortransfer(
         state_change=state_change,
         channel_state=channel_state,
         pseudo_random_generator=pseudo_random_generator,
-        block_number=block_number,
     )
 
     if sub_iteration.new_state is None:
@@ -167,7 +164,6 @@ def subdispatch_to_all_initiatortransfer(
         state_change: StateChange,
         channelidentifiers_to_channels: ChannelMap,
         pseudo_random_generator: random.Random,
-        block_number: BlockNumber,
 ) -> TransitionResult[InitiatorPaymentState]:
     events = list()
     ''' Copy and iterate over the list of keys because this loop
@@ -182,7 +178,6 @@ def subdispatch_to_all_initiatortransfer(
             state_change=state_change,
             channelidentifiers_to_channels=channelidentifiers_to_channels,
             pseudo_random_generator=pseudo_random_generator,
-            block_number=block_number,
         )
         events.extend(sub_iteration.events)
     return TransitionResult(payment_state, events)
@@ -193,14 +188,12 @@ def handle_block(
         state_change: Block,
         channelidentifiers_to_channels: ChannelMap,
         pseudo_random_generator: random.Random,
-        block_number: BlockNumber,
 ) -> TransitionResult[InitiatorPaymentState]:
     return subdispatch_to_all_initiatortransfer(
         payment_state=payment_state,
         state_change=state_change,
         channelidentifiers_to_channels=channelidentifiers_to_channels,
         pseudo_random_generator=pseudo_random_generator,
-        block_number=block_number,
     )
 
 
@@ -346,7 +339,6 @@ def handle_lock_expired(
         payment_state: InitiatorPaymentState,
         state_change: ReceiveLockExpired,
         channelidentifiers_to_channels: ChannelMap,
-        pseudo_random_generator: random.Random,
         block_number: BlockNumber,
 ) -> TransitionResult[InitiatorPaymentState]:
     """Initiator also needs to handle LockExpired messages when refund transfers are involved.
@@ -395,7 +387,6 @@ def handle_offchain_secretreveal(
         state_change: ReceiveSecretReveal,
         channelidentifiers_to_channels: ChannelMap,
         pseudo_random_generator: random.Random,
-        block_number: BlockNumber,
 ) -> TransitionResult:
     initiator_state = payment_state.initiator_transfers.get(state_change.secrethash)
 
@@ -410,12 +401,11 @@ def handle_offchain_secretreveal(
         state_change=state_change,
         channelidentifiers_to_channels=channelidentifiers_to_channels,
         pseudo_random_generator=pseudo_random_generator,
-        block_number=block_number,
     )
 
     # The current secretreveal unlocked the transfer
     if not transfer_exists(payment_state, state_change.secrethash):
-        cancel_other_transfers(payment_state, state_change.secrethash)
+        cancel_other_transfers(payment_state)
 
     return TransitionResult(payment_state, sub_iteration.events)
 
@@ -425,7 +415,6 @@ def handle_onchain_secretreveal(
         state_change: ContractReceiveSecretReveal,
         channelidentifiers_to_channels: ChannelMap,
         pseudo_random_generator: random.Random,
-        block_number: BlockNumber,
 ) -> TransitionResult[InitiatorPaymentState]:
     initiator_state = payment_state.initiator_transfers.get(state_change.secrethash)
 
@@ -440,12 +429,11 @@ def handle_onchain_secretreveal(
         state_change=state_change,
         channelidentifiers_to_channels=channelidentifiers_to_channels,
         pseudo_random_generator=pseudo_random_generator,
-        block_number=block_number,
     )
 
     # The current secretreveal unlocked the transfer
     if not transfer_exists(payment_state, state_change.secrethash):
-        cancel_other_transfers(payment_state, state_change.secrethash)
+        cancel_other_transfers(payment_state)
 
     return TransitionResult(payment_state, sub_iteration.events)
 
@@ -455,7 +443,6 @@ def handle_secretrequest(
         state_change: ReceiveSecretRequest,
         channelidentifiers_to_channels: ChannelMap,
         pseudo_random_generator: random.Random,
-        block_number: BlockNumber,
 ) -> TransitionResult[InitiatorPaymentState]:
     initiator_state = payment_state.initiator_transfers.get(state_change.secrethash)
 
@@ -471,7 +458,6 @@ def handle_secretrequest(
         state_change=state_change,
         channelidentifiers_to_channels=channelidentifiers_to_channels,
         pseudo_random_generator=pseudo_random_generator,
-        block_number=block_number,
     )
 
     return TransitionResult(payment_state, sub_iteration.events)
@@ -492,7 +478,6 @@ def state_transition(
             state_change,
             channelidentifiers_to_channels,
             pseudo_random_generator,
-            block_number,
         )
     elif type(state_change) == ActionInitInitiator:
         assert isinstance(state_change, ActionInitInitiator), MYPY_ANNOTATION
@@ -510,7 +495,6 @@ def state_transition(
             state_change,
             channelidentifiers_to_channels,
             pseudo_random_generator,
-            block_number,
         )
     elif type(state_change) == ReceiveTransferRefundCancelRoute:
         assert isinstance(state_change, ReceiveTransferRefundCancelRoute), MYPY_ANNOTATION
@@ -534,7 +518,6 @@ def state_transition(
             state_change,
             channelidentifiers_to_channels,
             pseudo_random_generator,
-            block_number,
         )
     elif type(state_change) == ReceiveLockExpired:
         assert isinstance(state_change, ReceiveLockExpired), MYPY_ANNOTATION
@@ -542,7 +525,6 @@ def state_transition(
             payment_state,
             state_change,
             channelidentifiers_to_channels,
-            pseudo_random_generator,
             block_number,
         )
     elif type(state_change) == ContractReceiveSecretReveal:
@@ -552,7 +534,6 @@ def state_transition(
             state_change,
             channelidentifiers_to_channels,
             pseudo_random_generator,
-            block_number,
         )
     else:
         iteration = TransitionResult(payment_state, list())

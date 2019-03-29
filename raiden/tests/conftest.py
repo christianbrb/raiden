@@ -15,6 +15,7 @@ from _pytest.pathlib import LOCK_TIMEOUT, ensure_reset_dir, make_numbered_dir_wi
 from _pytest.tmpdir import get_user
 
 from raiden.log_config import configure_logging
+from raiden.settings import SUPPORTED_ETH_CLIENTS
 from raiden.tests.fixtures.variables import *  # noqa: F401,F403
 from raiden.tests.utils.transport import make_requests_insecure
 from raiden.utils.cli import LogLevelConfigType
@@ -23,7 +24,7 @@ from raiden.utils.cli import LogLevelConfigType
 def pytest_addoption(parser):
     parser.addoption(
         '--blockchain-type',
-        choices=['geth'],
+        choices=SUPPORTED_ETH_CLIENTS,
         default='geth',
     )
 
@@ -48,30 +49,21 @@ def pytest_addoption(parser):
         help='Run integration tests with udp, with matrix, with both or not at all.',
     )
 
-    parser.addoption(
-        '--gevent-monitoring-signal',
-        action='store_true',
-        dest='gevent_monitoring_signal',
-        default=False,
-        help='Install a SIGUSR1 signal handler to print gevent run_info.',
-    )
-
 
 @pytest.fixture(scope='session', autouse=True)
-def enable_gevent_monitoring_signal(request):
+def enable_gevent_monitoring_signal():
     """ Install a signal handler for SIGUSR1 that executes gevent.util.print_run_info().
     This can help evaluating the gevent greenlet tree.
     See http://www.gevent.org/monitoring.html for more information.
 
     Usage:
-        pytest [...] --gevent-monitoring-signal
+        pytest [...]
         # while test is running (or stopped in a pdb session):
         kill -SIGUSR1 $(pidof -x pytest)
     """
-    if request.config.option.gevent_monitoring_signal:
-        import gevent.util
-        import signal
-        signal.signal(signal.SIGUSR1, gevent.util.print_run_info)
+    import gevent.util
+    import signal
+    signal.signal(signal.SIGUSR1, gevent.util.print_run_info)
 
 
 @pytest.fixture(scope='session', autouse=True)
@@ -165,7 +157,6 @@ def dont_exit_pytest():
 
     This allows the test suite to finish in case an exception is unhandled.
     """
-    gevent.get_hub().SYSTEM_ERROR = BaseException
     gevent.get_hub().NOT_ERROR = (gevent.GreenletExit, SystemExit)
 
 
@@ -176,29 +167,55 @@ def insecure_tls():
 
 # Convert `--transport all` to two separate invocations with `matrix` and `udp`
 def pytest_generate_tests(metafunc):
-    if 'transport' in metafunc.fixturenames:
-        transport = metafunc.config.getoption('transport')
-        transport_and_privacy = list()
+    fixtures = metafunc.fixturenames
 
+    if 'transport' in fixtures:
+        transport = metafunc.config.getoption('transport')
+        parmeterize_private_rooms = True
+        transport_and_privacy = list()
+        number_of_transports = list()
+
+        # Filter existing parametrization which is already done in the test
+        for mark in metafunc.definition.own_markers:
+            if mark.name == 'parametrize':
+                # Check if 'private_rooms' gets parameterized
+                if 'private_rooms' in mark.args[0]:
+                    parmeterize_private_rooms = False
+                # Check if more than one transport is used
+                if 'number_of_transports' == mark.args[0]:
+                    number_of_transports = mark.args[1]
         # avoid collecting test if 'skip_if_not_*'
-        if transport in ('udp', 'all') and 'skip_if_not_matrix' not in metafunc.fixturenames:
+        if transport in ('udp', 'all') and 'skip_if_not_matrix' not in fixtures:
             transport_and_privacy.append(('udp', None))
 
-        if transport in ('matrix', 'all') and 'skip_if_not_udp' not in metafunc.fixturenames:
-            if 'public_and_private_rooms' in metafunc.fixturenames:
-                transport_and_privacy.extend([('matrix', False), ('matrix', True)])
-            else:
-                transport_and_privacy.append(('matrix', False))
+        if transport in ('matrix', 'all') and 'skip_if_not_udp' not in fixtures:
 
-        if 'private_rooms' in metafunc.fixturenames:
-            metafunc.parametrize('transport,private_rooms', transport_and_privacy)
-        else:
-            # If the test function isn't taking the `private_rooms` fixture only give the
-            # transport values
+            if 'public_and_private_rooms' in fixtures:
+                if number_of_transports:
+                    transport_and_privacy.extend([
+                        ('matrix', [False for _ in range(number_of_transports[0])]),
+                        ('matrix', [True for _ in range(number_of_transports[0])]),
+                    ])
+                else:
+                    transport_and_privacy.extend([('matrix', False), ('matrix', True)])
+            else:
+                if number_of_transports:
+                    transport_and_privacy.extend([
+                        ('matrix', [False for _ in range(number_of_transports[0])]),
+                    ])
+                else:
+                    transport_and_privacy.append(('matrix', False))
+
+        if not parmeterize_private_rooms or 'private_rooms' not in fixtures:
+            # If the test does not expect the private_rooms parameter or parametrizes
+            # `private_rooms` itself, only give he transport values
             metafunc.parametrize(
                 'transport',
                 list(set(transport_type for transport_type, _ in transport_and_privacy)),
             )
+
+        else:
+            metafunc.parametrize('transport,private_rooms', transport_and_privacy)
 
 
 if sys.platform == 'darwin':
@@ -207,7 +224,7 @@ if sys.platform == 'darwin':
     # we override the pytest tmpdir machinery to produce shorter paths.
 
     @pytest.fixture(scope='session', autouse=True)
-    def _tmpdir_short(request):
+    def _tmpdir_short():
         """Shorten tmpdir paths"""
         from _pytest.tmpdir import TempPathFactory
 

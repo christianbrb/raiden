@@ -2,16 +2,13 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 
-from raiden.constants import SQLITE_MIN_REQUIRED_VERSION
+from raiden.constants import RAIDEN_DB_VERSION, SQLITE_MIN_REQUIRED_VERSION
 from raiden.exceptions import InvalidDBData, InvalidNumberInput
 from raiden.storage.utils import DB_SCRIPT_CREATE_TABLES, TimestampedEvent
 from raiden.utils import get_system_spec
-from raiden.utils.typing import Any, Dict, NamedTuple, Optional, Tuple
+from raiden.utils.typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 from .serialize import SerializationBase
-
-# The latest DB version
-RAIDEN_DB_VERSION = 18
 
 
 class EventRecord(NamedTuple):
@@ -35,6 +32,35 @@ def assert_sqlite_version() -> bool:
     if sqlite3.sqlite_version_info < SQLITE_MIN_REQUIRED_VERSION:
         return False
     return True
+
+
+def _sanitize_limit_and_offset(
+        limit: int = None,
+        offset: int = None,
+) -> Tuple[int, int]:
+    if limit is not None and (not isinstance(limit, int) or limit < 0):
+        raise InvalidNumberInput('limit must be a positive integer')
+
+    if offset is not None and (not isinstance(offset, int) or offset < 0):
+        raise InvalidNumberInput('offset must be a positive integer')
+
+    limit = -1 if limit is None else limit
+    offset = 0 if offset is None else offset
+    return limit, offset
+
+
+def _filter_from_dict(current: Dict[str, Any]) -> Dict[str, Any]:
+    """Takes in a nested dictionary as a filter and returns a flattened filter dictionary"""
+    filter_ = dict()
+
+    for k, v in current.items():
+        if isinstance(v, dict):
+            for sub, v2 in _filter_from_dict(v).items():
+                filter_[f'{k}.{sub}'] = v2
+        else:
+            filter_[k] = v
+
+    return filter_
 
 
 class SQLiteStorage(SerializationBase):
@@ -138,7 +164,7 @@ class SQLiteStorage(SerializationBase):
 
         return last_id
 
-    def write_events(self, state_change_identifier, events, log_time):
+    def write_events(self, events):
         """ Save events.
 
         Args:
@@ -214,6 +240,7 @@ class SQLiteStorage(SerializationBase):
         """ Return all state changes filtered by a named field and value."""
         cursor = self.conn.cursor()
 
+        filters = _filter_from_dict(filters)
         where_clauses = []
         args = []
         for field, value in filters.items():
@@ -233,23 +260,53 @@ class SQLiteStorage(SerializationBase):
             state_change_identifier=0,
             data=None,
         )
-        try:
-            row = cursor.fetchone()
-            if row:
-                event_id = row[0]
-                state_change_identifier = row[1]
-                event = row[2]
-                result = EventRecord(
-                    event_identifier=event_id,
-                    state_change_identifier=state_change_identifier,
-                    data=event,
-                )
-        except AttributeError:
-            raise InvalidDBData(
-                'Your local database is corrupt. Bailing ...',
+
+        row = cursor.fetchone()
+        if row:
+            event_id = row[0]
+            state_change_identifier = row[1]
+            event = row[2]
+            result = EventRecord(
+                event_identifier=event_id,
+                state_change_identifier=state_change_identifier,
+                data=event,
             )
 
         return result
+
+    def _form_and_execute_json_query(
+            self,
+            query: str,
+            limit: int = None,
+            offset: int = None,
+            filters: List[Tuple[str, Any]] = None,
+            logical_and: bool = True,
+    ) -> sqlite3.Cursor:
+        limit, offset = _sanitize_limit_and_offset(limit, offset)
+        cursor = self.conn.cursor()
+        where_clauses = []
+        args = []
+        if filters:
+            for field, value in filters:
+                where_clauses.append(f'json_extract(data, ?) LIKE ?')
+                args.append(f'$.{field}')
+                args.append(value)
+
+            if logical_and:
+                query += (
+                    f"WHERE {' AND '.join(where_clauses)}"
+                )
+            else:
+                query += (
+                    f"WHERE {' OR '.join(where_clauses)}"
+                )
+
+        query += 'ORDER BY identifier ASC LIMIT ? OFFSET ?'
+        args.append(limit)
+        args.append(offset)
+
+        cursor.execute(query, args)
+        return cursor
 
     def get_latest_state_change_by_data_field(
             self,
@@ -260,6 +317,7 @@ class SQLiteStorage(SerializationBase):
 
         where_clauses = []
         args = []
+        filters = _filter_from_dict(filters)
         for field, value in filters.items():
             where_clauses.append('json_extract(data, ?)=?')
             args.append(f'$.{field}')
@@ -276,21 +334,81 @@ class SQLiteStorage(SerializationBase):
         cursor.execute(sql, args)
 
         result = StateChangeRecord(state_change_identifier=0, data=None)
-        try:
-            row = cursor.fetchone()
-            if row:
-                state_change_identifier = row[0]
-                state_change = row[1]
-                result = StateChangeRecord(
-                    state_change_identifier=state_change_identifier,
-                    data=state_change,
-                )
-        except AttributeError:
-            raise InvalidDBData(
-                'Your local database is corrupt. Bailing ...',
+        row = cursor.fetchone()
+        if row:
+            state_change_identifier = row[0]
+            state_change = row[1]
+            result = StateChangeRecord(
+                state_change_identifier=state_change_identifier,
+                data=state_change,
             )
 
         return result
+
+    def _get_state_changes(
+            self,
+            limit: int = None,
+            offset: int = None,
+            filters: List[Tuple[str, Any]] = None,
+            logical_and: bool = True,
+    ) -> List[StateChangeRecord]:
+        """ Return a batch of state change records (identifier and data)
+
+        The batch size can be tweaked with the `limit` and `offset` arguments.
+
+        Additionally the returned state changes can be optionally filtered with
+        the `filters` parameter to search for specific data in the state change data.
+        """
+        cursor = self._form_and_execute_json_query(
+            query='SELECT identifier, data FROM state_changes ',
+            limit=limit,
+            offset=offset,
+            filters=filters,
+            logical_and=logical_and,
+        )
+        result = [
+            StateChangeRecord(
+                state_change_identifier=row[0],
+                data=row[1],
+            )
+            for row in cursor
+        ]
+
+        return result
+
+    def batch_query_state_changes(
+            self,
+            batch_size: int,
+            filters: List[Tuple[str, Any]] = None,
+            logical_and: bool = True,
+    ) -> Iterator[List[StateChangeRecord]]:
+        """Batch query state change records with a given batch size and an optional filter
+
+        This is a generator function returning each batch to the caller to work with.
+        """
+        limit = batch_size
+        offset = 0
+        result_length = 1
+
+        while result_length != 0:
+            result = self._get_state_changes(
+                limit=limit,
+                offset=offset,
+                filters=filters,
+                logical_and=logical_and,
+            )
+            result_length = len(result)
+            offset += result_length
+            yield result
+
+    def update_state_changes(self, state_changes_data: List[Tuple[str, int]]) -> None:
+        """Given a list of identifier/data state tuples update them in the DB"""
+        cursor = self.conn.cursor()
+        cursor.executemany(
+            'UPDATE state_changes SET data=? WHERE identifier=?',
+            state_changes_data,
+        )
+        self.maybe_commit()
 
     def get_statechanges_by_identifier(self, from_identifier, to_identifier):
         if not (from_identifier == 'latest' or isinstance(from_identifier, int)):
@@ -320,25 +438,11 @@ class SQLiteStorage(SerializationBase):
                 'BETWEEN ? AND ? ORDER BY identifier ASC', (from_identifier, to_identifier),
             )
 
-        try:
-            result = [entry[0] for entry in cursor.fetchall()]
-        except AttributeError:
-            raise InvalidDBData(
-                'Your local database is corrupt. Bailing ...',
-            )
-
+        result = [entry[0] for entry in cursor]
         return result
 
     def _query_events(self, limit: int = None, offset: int = None):
-        if limit is not None and (not isinstance(limit, int) or limit < 0):
-            raise InvalidNumberInput('limit must be a positive integer')
-
-        if offset is not None and (not isinstance(offset, int) or offset < 0):
-            raise InvalidNumberInput('offset must be a positive integer')
-
-        limit = -1 if limit is None else limit
-        offset = 0 if offset is None else offset
-
+        limit, offset = _sanitize_limit_and_offset(limit, offset)
         cursor = self.conn.cursor()
 
         cursor.execute(
@@ -350,6 +454,71 @@ class SQLiteStorage(SerializationBase):
         )
 
         return cursor.fetchall()
+
+    def _get_event_records(
+            self,
+            limit: int = None,
+            offset: int = None,
+            filters: List[Tuple[str, Any]] = None,
+            logical_and: bool = True,
+    ) -> List[EventRecord]:
+        """ Return a batch of event records
+
+        The batch size can be tweaked with the `limit` and `offset` arguments.
+
+        Additionally the returned events can be optionally filtered with
+        the `filters` parameter to search for specific data in the event data.
+        """
+        cursor = self._form_and_execute_json_query(
+            query='SELECT identifier, source_statechange_id, data FROM state_events ',
+            limit=limit,
+            offset=offset,
+            filters=filters,
+            logical_and=logical_and,
+        )
+
+        result = [
+            EventRecord(
+                event_identifier=row[0],
+                state_change_identifier=row[1],
+                data=row[2],
+            ) for row in cursor
+        ]
+        return result
+
+    def batch_query_event_records(
+            self,
+            batch_size: int,
+            filters: List[Tuple[str, Any]] = None,
+            logical_and: bool = True,
+    ) -> Iterator[List[EventRecord]]:
+        """Batch query event records with a given batch size and an optional filter
+
+        This is a generator function returning each batch to the caller to work with.
+        """
+        limit = batch_size
+        offset = 0
+        result_length = 1
+
+        while result_length != 0:
+            result = self._get_event_records(
+                limit=limit,
+                offset=offset,
+                filters=filters,
+                logical_and=logical_and,
+            )
+            result_length = len(result)
+            offset += result_length
+            yield result
+
+    def update_events(self, events_data: List[Tuple[str, int]]) -> None:
+        """Given a list of identifier/data event tuples update them in the DB"""
+        cursor = self.conn.cursor()
+        cursor.executemany(
+            'UPDATE state_events SET data=? WHERE identifier=?',
+            events_data,
+        )
+        self.maybe_commit()
 
     def get_events_with_timestamps(self, limit: int = None, offset: int = None):
         entries = self._query_events(limit, offset)
@@ -365,11 +534,10 @@ class SQLiteStorage(SerializationBase):
     def get_snapshots(self):
         cursor = self.conn.cursor()
         cursor.execute('SELECT identifier, statechange_id, data FROM state_snapshot')
-        snapshots = cursor.fetchall()
 
         return [
             SnapshotRecord(snapshot[0], snapshot[1], snapshot[2])
-            for snapshot in snapshots
+            for snapshot in cursor
         ]
 
     def update_snapshot(self, identifier, new_snapshot):
@@ -377,6 +545,19 @@ class SQLiteStorage(SerializationBase):
         cursor.execute(
             'UPDATE state_snapshot SET data=? WHERE identifier=?',
             (new_snapshot, identifier),
+        )
+        self.maybe_commit()
+
+    def update_snapshots(self, snapshots_data: List[Tuple[str, int]]):
+        """Given a list of snapshot data, update them in the DB
+
+        The snapshots_data should be a list of tuples of snapshots data
+        and identifiers in that order.
+        """
+        cursor = self.conn.cursor()
+        cursor.executemany(
+            'UPDATE state_snapshot SET data=? WHERE identifier=?',
+            snapshots_data,
         )
         self.maybe_commit()
 
@@ -427,7 +608,7 @@ class SerializedSQLiteStorage(SQLiteStorage):
             (None, state_change_identifier, log_time, self.serializer.serialize(event))
             for event in events
         ]
-        return super().write_events(state_change_identifier, events_data, log_time)
+        return super().write_events(events_data)
 
     def get_latest_state_snapshot(self) -> Optional[Tuple[int, Any]]:
         """ Return the tuple of (last_applied_state_change_id, snapshot) or None"""

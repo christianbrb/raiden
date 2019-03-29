@@ -24,9 +24,9 @@ _SYNAPSE_LOGS_PATH = os.environ.get('RAIDEN_TESTS_SYNAPSE_LOGS_DIR', False)
 _SYNAPSE_CONFIG_TEMPLATE = Path(__file__).parent.joinpath('synapse_config.yaml.template')
 
 
-class MockDiscovery(object):
+class MockDiscovery:
     @staticmethod
-    def get(node_address: bytes):
+    def get(node_address: bytes):  # pylint: disable=unused-argument
         return '127.0.0.1:5252'
 
 
@@ -53,7 +53,7 @@ class ParsedURL(str):
 
 
 # Used from within synapse during tests
-class EthAuthProvider(object):
+class EthAuthProvider:
     __version__ = '0.1'
     _user_re = re.compile(r'^@(0x[0-9a-f]{40}):(.+)$')
     _password_re = re.compile(r'^0x[0-9a-f]{130}$')
@@ -215,7 +215,7 @@ def matrix_server_starter(
                         '-m',
                         'synapse.app.homeserver',
                         f'--server-name={server_name}',
-                        f'--config-path={config_file.name}',
+                        f'--config-path={config_file!s}',
                     ],
                     url=urljoin(server_url, '/_matrix/client/versions'),
                     method='GET',
