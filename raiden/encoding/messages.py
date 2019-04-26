@@ -264,6 +264,7 @@ UpdatePFS = namedbuffer(
         updating_capacity,
         other_capacity,
         reveal_timeout,
+        fee,
         signature,
     ],
 )
@@ -288,18 +289,18 @@ def wrap(data):
         cmdid = data[0]
     except IndexError:
         log.warning('data is empty')
-        return
+        return None
 
     try:
         message_type = CMDID_MESSAGE[cmdid]
     except KeyError:
         log.error('unknown cmdid %s', cmdid)
-        return
+        return None
 
     try:
         message = message_type(data)
     except ValueError:
         log.error('trying to decode invalid message')
-        return
+        return None
 
     return message

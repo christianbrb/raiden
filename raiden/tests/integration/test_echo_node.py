@@ -1,11 +1,15 @@
 import gevent
 import pytest
+from eth_utils import to_hex
 
 from raiden.api.python import RaidenAPI
+from raiden.messages import Unlock
+from raiden.tests.utils.detect_failure import raise_on_failure
 from raiden.tests.utils.events import search_for_item
 from raiden.tests.utils.network import CHAIN
+from raiden.tests.utils.protocol import WaitForMessage
 from raiden.transfer.events import EventPaymentReceivedSuccess
-from raiden.utils import wait_until
+from raiden.utils import random_secret, sha3, wait_until
 from raiden.utils.echo_node import EchoNode
 
 
@@ -14,43 +18,65 @@ from raiden.utils.echo_node import EchoNode
 @pytest.mark.parametrize('channels_per_node', [CHAIN])
 @pytest.mark.parametrize('reveal_timeout', [15])
 @pytest.mark.parametrize('settle_timeout', [120])
+@pytest.mark.skip('Issue: 3750')
 def test_event_transfer_received_success(
         token_addresses,
         raiden_chain,
-        network_wait,
 ):
-    app0, app1, app2, receiver_app = raiden_chain
+    raise_on_failure(
+        raiden_chain,
+        run_test_event_transfer_received_success,
+        token_addresses=token_addresses,
+        raiden_chain=raiden_chain,
+    )
+
+
+def run_test_event_transfer_received_success(
+        token_addresses,
+        raiden_chain,
+):
+    sender_apps = raiden_chain[:-1]
+    target_app = raiden_chain[-1]
+
     token_address = token_addresses[0]
+    registry_address = target_app.raiden.default_registry.address
+    target_address = target_app.raiden.address
 
-    expected = dict()
+    message_handler = WaitForMessage()
+    target_app.raiden.message_handler = message_handler
 
-    for num, app in enumerate([app0, app1, app2]):
-        amount = 1 + num
-        payment_status = RaidenAPI(app.raiden).transfer_async(
-            app.raiden.default_registry.address,
-            token_address,
-            amount,
-            receiver_app.raiden.address,
+    wait_for = list()
+    for amount, app in enumerate(sender_apps, 1):
+        secret = random_secret()
+
+        wait = message_handler.wait_for_message(
+            Unlock,
+            {'secret': secret},
         )
-        payment_status.payment_done.wait(timeout=20)
-        expected[app.raiden.address] = amount
+        wait_for.append((wait, app.raiden.address, amount))
 
-    # sleep is for the receiver's node to have time to process all events
-    gevent.sleep(1)
+        RaidenAPI(app.raiden).transfer_async(
+            registry_address=registry_address,
+            token_address=token_address,
+            amount=amount,
+            identifier=amount,
+            target=target_address,
+            secret=to_hex(secret),
+            secret_hash=to_hex(sha3(secret)),
+        )
 
-    def test_events(amount, address):
-        return search_for_item(
-            receiver_app.raiden.wal.storage.get_events(),
+    for wait, sender, amount in wait_for:
+        wait.wait()
+        assert search_for_item(
+            target_app.raiden.wal.storage.get_events(),
             EventPaymentReceivedSuccess,
-            {'amount': amount, 'initiator': address},
-        )
-
-    amounts = [1, 2, 3]
-    addrs = [app0.raiden.address, app1.raiden.address, app2.raiden.address]
-    for amount, address in zip(amounts, addrs):
-        assert wait_until(
-            lambda: test_events(amount, address),
-            network_wait,
+            {
+                'amount': amount,
+                'identifier': amount,
+                'initiator': sender,
+                'payment_network_identifier': registry_address,
+                # 'token_network_identifier': ,
+            },
         )
 
 
@@ -59,7 +85,18 @@ def test_event_transfer_received_success(
 @pytest.mark.parametrize('channels_per_node', [CHAIN])
 @pytest.mark.parametrize('reveal_timeout', [15])
 @pytest.mark.parametrize('settle_timeout', [120])
+@pytest.mark.skip('Issue: 3750')
 def test_echo_node_response(token_addresses, raiden_chain, network_wait):
+    raise_on_failure(
+        raiden_chain,
+        run_test_echo_node_response,
+        token_addresses=token_addresses,
+        raiden_chain=raiden_chain,
+        network_wait=network_wait,
+    )
+
+
+def run_test_echo_node_response(token_addresses, raiden_chain, network_wait):
     app0, app1, app2, echo_app = raiden_chain
     address_to_app = {app.raiden.address: app for app in raiden_chain}
     token_address = token_addresses[0]
@@ -100,7 +137,7 @@ def test_echo_node_response(token_addresses, raiden_chain, network_wait):
         }
 
         if len(received) != 1:
-            return
+            return None
         transfer = received.popitem()[1]
 
         is_not_valid = (
@@ -109,7 +146,7 @@ def test_echo_node_response(token_addresses, raiden_chain, network_wait):
         )
 
         if is_not_valid:
-            return
+            return None
         return transfer
 
     for handled_transfer in echo_node.seen_transfers:
@@ -123,7 +160,18 @@ def test_echo_node_response(token_addresses, raiden_chain, network_wait):
 @pytest.mark.parametrize('channels_per_node', [CHAIN])
 @pytest.mark.parametrize('reveal_timeout', [15])
 @pytest.mark.parametrize('settle_timeout', [120])
+@pytest.mark.skip('Issue: 3750')
 def test_echo_node_lottery(token_addresses, raiden_chain, network_wait):
+    raise_on_failure(
+        raiden_chain,
+        run_test_echo_node_lottery,
+        token_addresses=token_addresses,
+        raiden_chain=raiden_chain,
+        network_wait=network_wait,
+    )
+
+
+def run_test_echo_node_lottery(token_addresses, raiden_chain, network_wait):
     app0, app1, app2, app3, echo_app, app4, app5, app6 = raiden_chain
     address_to_app = {app.raiden.address: app for app in raiden_chain}
     token_address = token_addresses[0]
@@ -202,7 +250,7 @@ def test_echo_node_lottery(token_addresses, raiden_chain, network_wait):
         }
 
         if len(received) != 1:
-            return
+            return None
         return received.popitem()[1]
 
     def received_is_of_size(size):
@@ -216,6 +264,8 @@ def test_echo_node_lottery(token_addresses, raiden_chain, network_wait):
             received[event.identifier] = event
         if len(received) == size:
             return received
+
+        return None
 
     # wait for the expected echoed transfers to be handled
     received = wait_until(lambda: received_is_of_size(2), 2 * network_wait)

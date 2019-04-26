@@ -3,21 +3,18 @@ import random
 import gevent
 import pytest
 
-from raiden import message_handler, waiting
+from raiden import waiting
 from raiden.api.python import RaidenAPI
 from raiden.constants import UINT64_MAX
 from raiden.exceptions import RaidenUnrecoverableError
 from raiden.messages import LockedTransfer, LockExpired, RevealSecret
 from raiden.storage.restore import channel_state_until_state_change
 from raiden.tests.utils import factories
+from raiden.tests.utils.detect_failure import raise_on_failure
 from raiden.tests.utils.events import search_for_item
 from raiden.tests.utils.network import CHAIN
 from raiden.tests.utils.protocol import HoldOffChainSecretRequest, WaitForMessage
-from raiden.tests.utils.transfer import (
-    assert_synced_channel_state,
-    get_channelstate,
-    mediated_transfer,
-)
+from raiden.tests.utils.transfer import assert_synced_channel_state, get_channelstate, transfer
 from raiden.transfer import channel, views
 from raiden.transfer.state import UnlockProofState
 from raiden.transfer.state_change import (
@@ -49,6 +46,15 @@ def wait_for_batch_unlock(app, token_network_id, participant, partner):
 
 @pytest.mark.parametrize('number_of_nodes', [2])
 def test_settle_is_automatically_called(raiden_network, token_addresses):
+    raise_on_failure(
+        raiden_network,
+        run_test_settle_is_automatically_called,
+        raiden_network=raiden_network,
+        token_addresses=token_addresses,
+    )
+
+
+def run_test_settle_is_automatically_called(raiden_network, token_addresses):
     """Settle is automatically called by one of the nodes."""
     app0, app1 = raiden_network
     registry_address = app0.raiden.default_registry.address
@@ -136,6 +142,16 @@ def test_settle_is_automatically_called(raiden_network, token_addresses):
 @pytest.mark.parametrize('number_of_nodes', [2])
 def test_lock_expiry(raiden_network, token_addresses, deposit):
     """Test lock expiry and removal."""
+    raise_on_failure(
+        raiden_network,
+        run_test_lock_expiry,
+        raiden_network=raiden_network,
+        token_addresses=token_addresses,
+        deposit=deposit,
+    )
+
+
+def run_test_lock_expiry(raiden_network, token_addresses, deposit):
     alice_app, bob_app = raiden_network
     token_address = token_addresses[0]
     token_network_identifier = views.get_token_network_identifier_by_token_address(
@@ -184,11 +200,12 @@ def test_lock_expiry(raiden_network, token_addresses, deposit):
     )
 
     alice_app.raiden.start_mediated_transfer_with_secret(
-        token_network_identifier,
-        alice_to_bob_amount,
-        target,
-        identifier,
-        transfer_1_secret,
+        token_network_identifier=token_network_identifier,
+        amount=alice_to_bob_amount,
+        fee=0,
+        target=target,
+        identifier=identifier,
+        secret=transfer_1_secret,
     )
     transfer1_received.wait()
 
@@ -235,11 +252,12 @@ def test_lock_expiry(raiden_network, token_addresses, deposit):
     hold_event_handler.hold_secretrequest_for(secrethash=transfer_2_secrethash)
 
     alice_app.raiden.start_mediated_transfer_with_secret(
-        token_network_identifier,
-        alice_to_bob_amount,
-        target,
-        identifier,
-        transfer_2_secret,
+        token_network_identifier=token_network_identifier,
+        amount=alice_to_bob_amount,
+        fee=0,
+        target=target,
+        identifier=identifier,
+        secret=transfer_2_secret,
     )
     transfer2_received.wait()
 
@@ -253,6 +271,24 @@ def test_lock_expiry(raiden_network, token_addresses, deposit):
 
 @pytest.mark.parametrize('number_of_nodes', [2])
 def test_batch_unlock(
+        raiden_network,
+        token_addresses,
+        secret_registry_address,
+        deposit,
+        blockchain_type,
+):
+    raise_on_failure(
+        raiden_network,
+        run_test_batch_unlock,
+        raiden_network=raiden_network,
+        token_addresses=token_addresses,
+        secret_registry_address=secret_registry_address,
+        deposit=deposit,
+        blockchain_type=blockchain_type,
+    )
+
+
+def run_test_batch_unlock(
         raiden_network,
         token_addresses,
         secret_registry_address,
@@ -302,11 +338,12 @@ def test_batch_unlock(
     hold_event_handler.hold_secretrequest_for(secrethash=secrethash)
 
     alice_app.raiden.start_mediated_transfer_with_secret(
-        token_network_identifier,
-        alice_to_bob_amount,
-        target,
-        identifier,
-        secret,
+        token_network_identifier=token_network_identifier,
+        amount=alice_to_bob_amount,
+        fee=0,
+        target=target,
+        identifier=identifier,
+        secret=secret,
     )
 
     gevent.sleep(1)  # wait for the messages to be exchanged
@@ -409,7 +446,20 @@ def test_settled_lock(
         token_addresses,
         raiden_network,
         deposit,
-        skip_if_parity,  # pylint: disable=unused-argument
+):
+    raise_on_failure(
+        raiden_network,
+        run_test_settled_lock,
+        token_addresses=token_addresses,
+        raiden_network=raiden_network,
+        deposit=deposit,
+    )
+
+
+def run_test_settled_lock(
+        token_addresses,
+        raiden_network,
+        deposit,
 ):
     """ Any transfer following a secret reveal must update the locksroot, so
     that an attacker cannot reuse a secret to double claim a lock.
@@ -444,11 +494,12 @@ def test_settled_lock(
     secret_available = hold_event_handler.hold_secretrequest_for(secrethash=secrethash)
 
     app0.raiden.start_mediated_transfer_with_secret(
-        token_network_identifier,
-        amount,
-        target,
-        identifier,
-        secret,
+        token_network_identifier=token_network_identifier,
+        amount=amount,
+        fee=0,
+        target=target,
+        identifier=identifier,
+        secret=secret,
     )
 
     secret_available.wait()  # wait for the messages to be exchanged
@@ -463,10 +514,10 @@ def test_settled_lock(
         secrethash,
     )
 
-    mediated_transfer(
+    transfer(
         initiator_app=app0,
         target_app=app1,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=amount,
         identifier=2,
     )
@@ -508,6 +559,15 @@ def test_settled_lock(
 @pytest.mark.parametrize('number_of_nodes', [2])
 @pytest.mark.parametrize('channels_per_node', [1])
 def test_automatic_secret_registration(raiden_chain, token_addresses):
+    raise_on_failure(
+        raiden_chain,
+        run_test_automatic_secret_registration,
+        raiden_chain=raiden_chain,
+        token_addresses=token_addresses,
+    )
+
+
+def run_test_automatic_secret_registration(raiden_chain, token_addresses):
     app0, app1 = raiden_chain
     token_address = token_addresses[0]
     token_network_identifier = views.get_token_network_identifier_by_token_address(
@@ -520,25 +580,32 @@ def test_automatic_secret_registration(raiden_chain, token_addresses):
     identifier = 1
 
     hold_event_handler = HoldOffChainSecretRequest()
+    message_handler = WaitForMessage()
+
     app1.raiden.raiden_event_handler = hold_event_handler
+    app1.raiden.message_handler = message_handler
 
     target = app1.raiden.address
     secret = sha3(target)
     secrethash = sha3(secret)
 
     hold_event_handler.hold_secretrequest_for(secrethash=secrethash)
+    locked_transfer_received = message_handler.wait_for_message(LockedTransfer, {})
 
     app0.raiden.start_mediated_transfer_with_secret(
-        token_network_identifier,
-        amount,
-        target,
-        identifier,
-        secret,
+        token_network_identifier=token_network_identifier,
+        amount=amount,
+        fee=0,
+        target=target,
+        identifier=identifier,
+        secret=secret,
     )
 
-    gevent.sleep(1)  # wait for the messages to be exchanged
+    # Wait for app1 to receive the locked transfer.
+    locked_transfer_received.wait()
 
-    # Stop app0 to avoid sending the unlock
+    # Stop app0 to avoid sending the unlock, this must be done after the locked
+    # transfer is sent.
     app0.raiden.transport.stop()
 
     reveal_secret = RevealSecret(
@@ -546,7 +613,7 @@ def test_automatic_secret_registration(raiden_chain, token_addresses):
         secret=secret,
     )
     app0.raiden.sign(reveal_secret)
-    message_handler.MessageHandler().on_message(app1.raiden, reveal_secret)
+    message_handler.on_message(app1.raiden, reveal_secret)
 
     chain_state = views.state_from_app(app1)
 
@@ -564,6 +631,16 @@ def test_automatic_secret_registration(raiden_chain, token_addresses):
 @pytest.mark.xfail(reason='test incomplete')
 @pytest.mark.parametrize('number_of_nodes', [3])
 def test_start_end_attack(token_addresses, raiden_chain, deposit):
+    raise_on_failure(
+        raiden_chain,
+        run_test_start_end_attack,
+        token_addresses=token_addresses,
+        raiden_chain=raiden_chain,
+        deposit=deposit,
+    )
+
+
+def run_test_start_end_attack(token_addresses, raiden_chain, deposit):
     """ An attacker can try to steal tokens from a hub or the last node in a
     path.
 
@@ -597,11 +674,12 @@ def test_start_end_attack(token_addresses, raiden_chain, deposit):
     hold_event_handler.hold_secretrequest_for(secrethash=secrethash)
 
     app0.raiden.start_mediated_transfer_with_secret(
-        token_network_identifier,
-        amount,
-        target,
-        identifier,
-        secret,
+        token_network_identifier=token_network_identifier,
+        amount=amount,
+        fee=0,
+        target=target,
+        identifier=identifier,
+        secret=secret,
     )
 
     gevent.sleep(1)  # wait for the messages to be exchanged
@@ -667,6 +745,16 @@ def test_start_end_attack(token_addresses, raiden_chain, deposit):
 
 @pytest.mark.parametrize('number_of_nodes', [2])
 def test_automatic_dispute(raiden_network, deposit, token_addresses):
+    raise_on_failure(
+        raiden_network,
+        run_test_automatic_dispute,
+        raiden_network=raiden_network,
+        deposit=deposit,
+        token_addresses=token_addresses,
+    )
+
+
+def run_test_automatic_dispute(raiden_network, deposit, token_addresses):
     app0, app1 = raiden_network
     registry_address = app0.raiden.default_registry.address
     token_address = token_addresses[0]
@@ -682,27 +770,30 @@ def test_automatic_dispute(raiden_network, deposit, token_addresses):
     initial_balance1 = token_proxy.balance_of(app1.raiden.address)
 
     amount0_1 = 10
-    mediated_transfer(
+    transfer(
         initiator_app=app0,
         target_app=app1,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=amount0_1,
+        identifier=1,
     )
 
     amount1_1 = 50
-    mediated_transfer(
+    transfer(
         initiator_app=app1,
         target_app=app0,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=amount1_1,
+        identifier=2,
     )
 
     amount0_2 = 60
-    mediated_transfer(
+    transfer(
         initiator_app=app0,
         target_app=app1,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=amount0_2,
+        identifier=3,
     )
 
     # Alice can only provide one of Bob's transfer, so she is incentivized to
@@ -739,3 +830,156 @@ def test_automatic_dispute(raiden_network, deposit, token_addresses):
     expected_balance1 = initial_balance1 + deposit + total0 - total1
     assert token_proxy.balance_of(app0.raiden.address) == expected_balance0
     assert token_proxy.balance_of(app1.raiden.address) == expected_balance1
+
+
+@pytest.mark.parametrize('number_of_nodes', [2])
+def test_batch_unlock_after_restart(
+        raiden_network,
+        token_addresses,
+        deposit,
+):
+    raise_on_failure(
+        raiden_network,
+        run_test_batch_unlock_after_restart,
+        raiden_network=raiden_network,
+        token_addresses=token_addresses,
+        deposit=deposit,
+    )
+
+
+def run_test_batch_unlock_after_restart(
+        raiden_network,
+        token_addresses,
+        deposit,
+):
+    """Simulate the case where:
+    - A sends B a transfer
+    - B sends A a transfer
+    - Secrets were never revealed
+    - B closes channel
+    - A crashes
+    - Wait for settle
+    - Wait for unlock from B
+    - Restart A
+    At this point, the current unlock logic will try to unlock
+    iff the node gains from unlocking. Which means that the node will try to unlock
+    either side. In the above scenario, each node will unlock its side.
+    This test makes sure that we do NOT invalidate A's unlock transaction based
+    on the ContractReceiveChannelBatchUnlock caused by B's unlock.
+    """
+    alice_app, bob_app = raiden_network
+    registry_address = alice_app.raiden.default_registry.address
+    token_address = token_addresses[0]
+    token_network_identifier = views.get_token_network_identifier_by_token_address(
+        chain_state=views.state_from_app(alice_app),
+        payment_network_id=alice_app.raiden.default_registry.address,
+        token_address=token_address,
+    )
+
+    hold_event_handler = HoldOffChainSecretRequest()
+    bob_app.raiden.raiden_event_handler = hold_event_handler
+    alice_app.raiden.raiden_event_handler = hold_event_handler
+
+    token_network = views.get_token_network_by_identifier(
+        chain_state=views.state_from_app(alice_app),
+        token_network_id=token_network_identifier,
+    )
+
+    channel_identifier = get_channelstate(alice_app, bob_app, token_network_identifier).identifier
+
+    assert channel_identifier in token_network.partneraddresses_to_channelidentifiers[
+        bob_app.raiden.address
+    ]
+
+    alice_to_bob_amount = 10
+    identifier = 1
+
+    alice_transfer_secret = sha3(alice_app.raiden.address)
+    alice_transfer_secrethash = sha3(alice_transfer_secret)
+
+    bob_transfer_secret = sha3(bob_app.raiden.address)
+    bob_transfer_secrethash = sha3(bob_transfer_secret)
+
+    alice_transfer_hold = hold_event_handler.hold_secretrequest_for(
+        secrethash=alice_transfer_secrethash,
+    )
+    bob_transfer_hold = hold_event_handler.hold_secretrequest_for(
+        secrethash=bob_transfer_secrethash,
+    )
+
+    alice_app.raiden.start_mediated_transfer_with_secret(
+        token_network_identifier=token_network_identifier,
+        amount=alice_to_bob_amount,
+        fee=0,
+        target=bob_app.raiden.address,
+        identifier=identifier,
+        secret=alice_transfer_secret,
+    )
+
+    bob_app.raiden.start_mediated_transfer_with_secret(
+        token_network_identifier=token_network_identifier,
+        amount=alice_to_bob_amount,
+        fee=0,
+        target=alice_app.raiden.address,
+        identifier=identifier + 1,
+        secret=bob_transfer_secret,
+    )
+
+    alice_transfer_hold.wait()
+    bob_transfer_hold.wait()
+
+    alice_bob_channel_state = get_channelstate(alice_app, bob_app, token_network_identifier)
+    alice_lock = channel.get_lock(alice_bob_channel_state.our_state, alice_transfer_secrethash)
+    bob_lock = channel.get_lock(alice_bob_channel_state.partner_state, bob_transfer_secrethash)
+
+    # This is the current state of protocol:
+    #
+    #    A -> B LockedTransfer
+    #    - protocol didn't continue
+    assert_synced_channel_state(
+        token_network_identifier=token_network_identifier,
+        app0=alice_app,
+        balance0=deposit,
+        pending_locks0=[alice_lock],
+        app1=bob_app,
+        balance1=deposit,
+        pending_locks1=[bob_lock],
+    )
+
+    # A ChannelClose event will be generated, this will be polled by both apps
+    # and each must start a task for calling settle
+    RaidenAPI(bob_app.raiden).channel_close(
+        registry_address=registry_address,
+        token_address=token_address,
+        partner_address=alice_app.raiden.address,
+    )
+
+    alice_app.stop()
+
+    waiting.wait_for_settle(
+        raiden=alice_app.raiden,
+        payment_network_id=registry_address,
+        token_address=token_address,
+        channel_ids=[alice_bob_channel_state.identifier],
+        retry_timeout=alice_app.raiden.alarm.sleep_time,
+    )
+
+    # wait for the node to call batch unlock
+    timeout = 10
+    with gevent.Timeout(timeout):
+        wait_for_batch_unlock(
+            app=bob_app,
+            token_network_id=token_network_identifier,
+            participant=alice_bob_channel_state.partner_state.address,
+            partner=alice_bob_channel_state.our_state.address,
+        )
+
+    alice_app.start()
+
+    with gevent.Timeout(timeout):
+        wait_for_batch_unlock(
+            app=alice_app,
+            token_network_id=token_network_identifier,
+            participant=alice_bob_channel_state.partner_state.address,
+            partner=alice_bob_channel_state.our_state.address,
+        )

@@ -588,10 +588,7 @@ def test_api_close_insufficient_eth(
         api_server_test_instance,
         token_addresses,
         reveal_timeout,
-        skip_if_parity,
 ):
-    # FIXME parity version of this test fails:
-    # parity reports 'insufficient funds' correctly but raiden does not recognize it.
 
     # let's create a new channel
     partner_address = '0x61C808D82A3Ac53231750daDc13c777b59310bD9'
@@ -1275,7 +1272,6 @@ def test_register_token(
         token_addresses,
         raiden_network,
         contract_manager,
-        skip_if_parity,
 ):
     app0 = raiden_network[0]
     new_token_address = deploy_contract_web3(
@@ -1342,7 +1338,6 @@ def test_get_token_network_for_token(
         token_addresses,
         raiden_network,
         contract_manager,
-        skip_if_parity,
 ):
     app0 = raiden_network[0]
 
@@ -2111,6 +2106,7 @@ def test_pending_transfers_endpoint(raiden_network, token_addresses):
     initiator.raiden.start_mediated_transfer_with_secret(
         token_network_identifier=token_network_id,
         amount=amount,
+        fee=0,
         target=target.raiden.address,
         identifier=identifier,
         secret=secret,

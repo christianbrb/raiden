@@ -11,22 +11,22 @@ from urwid import SimpleFocusListWalker
 from scenario_player.runner import ScenarioRunner
 
 PALETTE = [
-    ('log_ts', 'light gray', 'default'),
+    ('log_ts', 'default', 'default'),
     ('log_lvl_not_set', 'default', 'dark red'),
     ('log_lvl_debug', 'dark cyan', 'default'),
     ('log_lvl_info', 'dark green', 'default'),
     ('log_lvl_warning', 'yellow', 'default'),
     ('log_lvl_error', 'dark red', 'default'),
     ('log_lvl_exception', 'dark red', 'default'),
-    ('log_lvl_critical', 'white', 'dark red'),
-    ('log_event', 'white', 'default'),
+    ('log_lvl_critical', 'default', 'dark red'),
+    ('log_event', 'default', 'default'),
     ('log_logger', 'light blue', 'default'),
     ('log_key', 'dark cyan', 'default'),
     ('log_value', 'dark magenta', 'default'),
     ('log_focus', '', 'dark blue'),
     ('focus', 'light blue', 'default'),
-    ('status', 'white', 'dark blue'),
-    ('task_state_initialized', 'white', 'default'),
+    ('status', 'default', 'dark blue'),
+    ('task_state_initialized', 'default', 'default'),
     ('task_state_running', 'yellow', 'default'),
     ('task_state_finished', 'dark green', 'default'),
     ('task_state_errored', 'dark red', 'default'),
@@ -186,11 +186,13 @@ class TabFocusSwitchingPile(uwd.Pile):
 
         if key == 'tab':
             self.focus_position = (self.focus_position + 1) % len(self.contents)
-            return
+            return None
 
         key = self.focus.keypress(size, key)
         if key:
             return key
+
+        return None
 
 
 class ScenarioUI:

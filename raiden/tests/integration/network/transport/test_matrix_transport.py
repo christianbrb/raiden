@@ -15,7 +15,7 @@ from raiden.constants import (
 )
 from raiden.exceptions import InsufficientFunds
 from raiden.messages import Processed, SecretRequest
-from raiden.network.transport.matrix import MatrixTransport, UserPresence, _RetryQueue
+from raiden.network.transport.matrix import AddressReachability, MatrixTransport, _RetryQueue
 from raiden.network.transport.matrix.client import Room
 from raiden.network.transport.matrix.utils import make_room_alias
 from raiden.raiden_service import (
@@ -40,6 +40,7 @@ from raiden.utils import pex
 from raiden.utils.signer import LocalSigner
 from raiden.utils.typing import Address, List, Optional, Union
 
+USERID0 = '@Arthur:RestaurantAtTheEndOfTheUniverse'
 USERID1 = '@Alice:Wonderland'
 
 
@@ -101,7 +102,8 @@ def mock_matrix(
     transport = MatrixTransport(config)
     transport._raiden_service = MockRaidenService()
     transport._stop_event.clear()
-    transport._address_to_userids[HOP1] = USERID1
+    transport._address_mgr.add_userid_for_address(HOP1, USERID1)
+    transport._client.user_id = USERID0
 
     monkeypatch.setattr(MatrixTransport, '_get_user', mock_get_user)
     monkeypatch.setattr(
@@ -158,6 +160,12 @@ def ping_pong_message_success(transport0, transport1):
     return all_messages_received
 
 
+def is_reachable(transport: MatrixTransport, address: Address) -> bool:
+    return (
+        transport._address_mgr.get_address_reachability(address) is AddressReachability.REACHABLE
+    )
+
+
 @pytest.fixture()
 def skip_userid_validation(monkeypatch):
     import raiden.network.transport.matrix
@@ -185,7 +193,6 @@ def skip_userid_validation(monkeypatch):
 
 
 def make_message(convert_to_hex: bool = False, overwrite_data=None):
-    from matrix_client.room import Room
     room = Room(None, '!roomID:server')
     if not overwrite_data:
         message = SecretRequest(
@@ -393,7 +400,6 @@ def test_matrix_message_sync(matrix_transports):
 @pytest.mark.parametrize('number_of_tokens', [1])
 def test_matrix_tx_error_handling(  # pylint: disable=unused-argument
         skip_if_not_matrix,
-        skip_if_parity,
         raiden_chain,
         token_addresses,
 ):
@@ -458,7 +464,9 @@ def test_matrix_message_retry(
     transport.log = MagicMock()
 
     # Receiver is online
-    transport._address_to_presence[partner_address] = UserPresence.ONLINE
+    transport._address_mgr._address_to_reachability[partner_address] = (
+        AddressReachability.REACHABLE
+    )
 
     queueid = QueueIdentifier(
         recipient=partner_address,
@@ -480,21 +488,25 @@ def test_matrix_message_retry(
     assert transport._send_raw.call_count == 1
 
     # Receiver goes offline
-    transport._address_to_presence[partner_address] = UserPresence.OFFLINE
+    transport._address_mgr._address_to_reachability[partner_address] = (
+        AddressReachability.UNREACHABLE
+    )
 
     gevent.sleep(retry_interval)
 
     transport.log.debug.assert_called_with(
         'Partner not reachable. Skipping.',
         partner=pex(partner_address),
-        status=UserPresence.OFFLINE,
+        status=AddressReachability.UNREACHABLE,
     )
 
     # Retrier did not call send_raw given that the receiver is still offline
     assert transport._send_raw.call_count == 1
 
     # Receiver comes back online
-    transport._address_to_presence[partner_address] = UserPresence.ONLINE
+    transport._address_mgr._address_to_reachability[partner_address] = (
+        AddressReachability.REACHABLE
+    )
 
     gevent.sleep(retry_interval)
 
@@ -765,8 +777,8 @@ def test_pfs_global_messages(
     channel_state.our_state.balance_proof = balance_proof
     channel_state.partner_state.balance_proof = balance_proof
     monkeypatch.setattr(
-        raiden.raiden_service,
-        'get_channelstate_by_token_network_and_partner',
+        raiden.transfer.views,
+        'get_channelstate_by_canonical_identifier',
         lambda *a, **kw: channel_state,
     )
     update_path_finding_service_from_balance_proof(
@@ -923,15 +935,15 @@ def test_matrix_invite_private_room_unhappy_case_2(
     transport0.start_health_check(raiden_service1.address)
     transport1.start_health_check(raiden_service0.address)
 
-    assert transport1._address_to_presence[raiden_service0.address].value == 'online'
-    assert transport0._address_to_presence[raiden_service1.address].value == 'online'
+    assert is_reachable(transport1, raiden_service0.address)
+    assert is_reachable(transport0, raiden_service1.address)
 
     transport1.stop()
     with Timeout(40):
-        while not transport0._address_to_presence[raiden_service1.address].value == 'offline':
+        while is_reachable(transport0, raiden_service1.address):
             gevent.sleep(.1)
 
-    assert transport0._address_to_presence[raiden_service1.address].value == 'offline'
+    assert not is_reachable(transport0, raiden_service1.address)
 
     room_id = transport0._get_room_for_address(raiden_service1.address).room_id
 
@@ -993,14 +1005,14 @@ def test_matrix_invite_private_room_unhappy_case_3(
     transport0.start_health_check(raiden_service1.address)
     transport1.start_health_check(raiden_service0.address)
 
-    assert transport1._address_to_presence[raiden_service0.address].value == 'online'
-    assert transport0._address_to_presence[raiden_service1.address].value == 'online'
+    assert is_reachable(transport1, raiden_service0.address)
+    assert is_reachable(transport0, raiden_service1.address)
     transport1.stop()
     with Timeout(40):
-        while not transport0._address_to_presence[raiden_service1.address].value == 'offline':
+        while is_reachable(transport0, raiden_service1.address):
             gevent.sleep(.1)
 
-    assert transport0._address_to_presence[raiden_service1.address].value == 'offline'
+    assert not is_reachable(transport0, raiden_service1.address)
 
     room_id = transport0._get_room_for_address(raiden_service1.address).room_id
     transport1.start(raiden_service1, raiden_service1.message_handler, None)
@@ -1047,10 +1059,10 @@ def test_matrix_user_roaming(matrix_transports):
 
     transport0.stop()
     with Timeout(40):
-        while not transport1._address_to_presence[raiden_service0.address].value == 'offline':
+        while is_reachable(transport1, raiden_service0.address):
             gevent.sleep(.1)
 
-    assert transport1._address_to_presence[raiden_service0.address].value == 'offline'
+    assert not is_reachable(transport1, raiden_service0.address)
 
     transport2.start(raiden_service0, message_handler0, '')
 
@@ -1060,17 +1072,17 @@ def test_matrix_user_roaming(matrix_transports):
 
     transport2.stop()
     with Timeout(40):
-        while not transport1._address_to_presence[raiden_service0.address].value == 'offline':
+        while is_reachable(transport1, raiden_service0.address):
             gevent.sleep(.1)
 
-    assert transport1._address_to_presence[raiden_service0.address].value == 'offline'
+    assert not is_reachable(transport1, raiden_service0.address)
 
     transport0.start(raiden_service0, message_handler0, '')
     with Timeout(40):
-        while not transport1._address_to_presence[raiden_service0.address].value == 'online':
+        while not is_reachable(transport1, raiden_service0.address):
             gevent.sleep(.1)
 
-    assert transport1._address_to_presence[raiden_service0.address].value == 'online'
+    assert is_reachable(transport1, raiden_service0.address)
 
     assert ping_pong_message_success(transport0, transport1)
 

@@ -2,6 +2,7 @@ import gevent
 import pytest
 
 from raiden.api.python import RaidenAPI
+from raiden.tests.utils.detect_failure import raise_on_failure
 from raiden.tests.utils.events import (
     raiden_events_search_for_item,
     search_for_item,
@@ -16,7 +17,7 @@ from raiden.tests.utils.protocol import (
 from raiden.tests.utils.transfer import (
     assert_synced_channel_state,
     get_channelstate,
-    mediated_transfer,
+    transfer,
     wait_assert,
 )
 from raiden.transfer import channel, views
@@ -35,6 +36,17 @@ from raiden.waiting import wait_for_block, wait_for_settle
 @pytest.mark.parametrize('number_of_nodes', [3])
 @pytest.mark.parametrize('settle_timeout', [50])
 def test_refund_messages(raiden_chain, token_addresses, deposit, network_wait):
+    raise_on_failure(
+        raiden_chain,
+        run_test_refund_messages,
+        raiden_chain=raiden_chain,
+        token_addresses=token_addresses,
+        deposit=deposit,
+        network_wait=network_wait,
+    )
+
+
+def run_test_refund_messages(raiden_chain, token_addresses, deposit, network_wait):
     # The network has the following topology:
     #
     #   App0 <---> App1 <---> App2
@@ -49,10 +61,10 @@ def test_refund_messages(raiden_chain, token_addresses, deposit, network_wait):
 
     # Exhaust the channel App1 <-> App2 (to force the refund transfer)
     exhaust_amount = deposit
-    mediated_transfer(
+    transfer(
         initiator_app=app1,
         target_app=app2,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=exhaust_amount,
         identifier=1,
     )
@@ -113,6 +125,26 @@ def test_refund_transfer(
         # https://github.com/raiden-network/raiden/issues/3185
         skip_if_not_matrix,  # pylint: disable=unused-argument
 ):
+    raise_on_failure(
+        raiden_chain,
+        run_test_refund_transfer,
+        raiden_chain=raiden_chain,
+        number_of_nodes=number_of_nodes,
+        token_addresses=token_addresses,
+        deposit=deposit,
+        network_wait=network_wait,
+        retry_timeout=retry_timeout,
+    )
+
+
+def run_test_refund_transfer(
+        raiden_chain,
+        number_of_nodes,
+        token_addresses,
+        deposit,
+        network_wait,
+        retry_timeout,
+):
     """A failed transfer must send a refund back.
 
     TODO:
@@ -135,22 +167,22 @@ def test_refund_transfer(
     # make a transfer to test the path app0 -> app1 -> app2
     identifier_path = 1
     amount_path = 1
-    mediated_transfer(
-        app0,
-        app2,
-        token_network_identifier,
-        amount_path,
-        identifier_path,
+    transfer(
+        initiator_app=app0,
+        target_app=app2,
+        token_address=token_address,
+        amount=amount_path,
+        identifier=identifier_path,
         timeout=network_wait * number_of_nodes,
     )
 
     # drain the channel app1 -> app2
     identifier_drain = 2
     amount_drain = deposit * 8 // 10
-    mediated_transfer(
+    transfer(
         initiator_app=app1,
         target_app=app2,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=amount_drain,
         identifier=identifier_drain,
         timeout=network_wait,
@@ -312,6 +344,28 @@ def test_different_view_of_last_bp_during_unlock(
         skip_if_not_matrix,  # pylint: disable=unused-argument
         blockchain_type,
 ):
+    raise_on_failure(
+        raiden_chain,
+        run_test_different_view_of_last_bp_during_unlock,
+        raiden_chain=raiden_chain,
+        number_of_nodes=number_of_nodes,
+        token_addresses=token_addresses,
+        deposit=deposit,
+        network_wait=network_wait,
+        retry_timeout=retry_timeout,
+        blockchain_type=blockchain_type,
+    )
+
+
+def run_test_different_view_of_last_bp_during_unlock(
+        raiden_chain,
+        number_of_nodes,
+        token_addresses,
+        deposit,
+        network_wait,
+        retry_timeout,
+        blockchain_type,
+):
     """Test for https://github.com/raiden-network/raiden/issues/3196#issuecomment-449163888"""
     # Topology:
     #
@@ -332,22 +386,22 @@ def test_different_view_of_last_bp_during_unlock(
     # make a transfer to test the path app0 -> app1 -> app2
     identifier_path = 1
     amount_path = 1
-    mediated_transfer(
-        app0,
-        app2,
-        token_network_identifier,
-        amount_path,
-        identifier_path,
+    transfer(
+        initiator_app=app0,
+        target_app=app2,
+        token_address=token_address,
+        amount=amount_path,
+        identifier=identifier_path,
         timeout=network_wait * number_of_nodes,
     )
 
     # drain the channel app1 -> app2
     identifier_drain = 2
     amount_drain = deposit * 8 // 10
-    mediated_transfer(
+    transfer(
         initiator_app=app1,
         target_app=app2,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=amount_drain,
         identifier=identifier_drain,
         timeout=network_wait,
@@ -511,6 +565,24 @@ def test_refund_transfer_after_2nd_hop(
         deposit,
         network_wait,
 ):
+    raise_on_failure(
+        raiden_chain,
+        run_test_refund_transfer_after_2nd_hop,
+        raiden_chain=raiden_chain,
+        number_of_nodes=number_of_nodes,
+        token_addresses=token_addresses,
+        deposit=deposit,
+        network_wait=network_wait,
+    )
+
+
+def run_test_refund_transfer_after_2nd_hop(
+        raiden_chain,
+        number_of_nodes,
+        token_addresses,
+        deposit,
+        network_wait,
+):
     """Test the refund transfer sent due to failure after 2nd hop"""
     # Topology:
     #
@@ -528,10 +600,10 @@ def test_refund_transfer_after_2nd_hop(
     # make a transfer to test the path app0 -> app1 -> app2 -> app3
     identifier_path = 1
     amount_path = 1
-    mediated_transfer(
+    transfer(
         initiator_app=app0,
         target_app=app3,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=amount_path,
         identifier=identifier_path,
         timeout=network_wait * number_of_nodes,
@@ -540,10 +612,10 @@ def test_refund_transfer_after_2nd_hop(
     # drain the channel app2 -> app3
     identifier_drain = 2
     amount_drain = deposit * 8 // 10
-    mediated_transfer(
+    transfer(
         initiator_app=app2,
         target_app=app3,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=amount_drain,
         identifier=identifier_drain,
         timeout=network_wait,

@@ -32,12 +32,14 @@ from raiden.messages import (
     message_from_sendevent,
 )
 from raiden.network.blockchain_service import BlockChainService
-from raiden.network.proxies import SecretRegistry, ServiceRegistry, TokenNetworkRegistry
-from raiden.settings import MONITORING_MIN_CAPACITY, MONITORING_REWARD
+from raiden.network.proxies.secret_registry import SecretRegistry
+from raiden.network.proxies.service_registry import ServiceRegistry
+from raiden.network.proxies.token_network_registry import TokenNetworkRegistry
+from raiden.settings import MEDIATION_FEE, MONITORING_MIN_CAPACITY, MONITORING_REWARD
 from raiden.storage import serialize, sqlite, wal
 from raiden.tasks import AlarmTask
 from raiden.transfer import channel, node, views
-from raiden.transfer.architecture import Event as RaidenEvent, State, StateChange
+from raiden.transfer.architecture import Event as RaidenEvent, StateChange
 from raiden.transfer.mediated_transfer.events import SendLockedTransfer
 from raiden.transfer.mediated_transfer.state import (
     TransferDescriptionWithSecretState,
@@ -50,6 +52,7 @@ from raiden.transfer.mediated_transfer.state_change import (
 )
 from raiden.transfer.state import (
     BalanceProofSignedState,
+    BalanceProofUnsignedState,
     ChainState,
     InitiatorTask,
     PaymentNetworkState,
@@ -61,7 +64,6 @@ from raiden.transfer.state_change import (
     Block,
     ContractReceiveNewPaymentNetwork,
 )
-from raiden.transfer.views import get_channelstate_by_token_network_and_partner
 from raiden.utils import create_default_identifier, lpex, pex, random_secret, sha3, to_rdn
 from raiden.utils.runnable import Runnable
 from raiden.utils.signer import LocalSigner, Signer
@@ -69,6 +71,7 @@ from raiden.utils.typing import (
     Address,
     BlockHash,
     BlockNumber,
+    FeeAmount,
     InitiatorAddress,
     Optional,
     PaymentAmount,
@@ -117,19 +120,21 @@ def initiator_init(
         transfer_identifier: PaymentID,
         transfer_amount: PaymentAmount,
         transfer_secret: Secret,
+        transfer_fee: FeeAmount,
         token_network_identifier: TokenNetworkID,
         target_address: TargetAddress,
 ):
     assert transfer_secret != constants.EMPTY_HASH, f'Empty secret node:{raiden!r}'
 
     transfer_state = TransferDescriptionWithSecretState(
-        raiden.default_registry.address,
-        transfer_identifier,
-        transfer_amount,
-        token_network_identifier,
-        InitiatorAddress(raiden.address),
-        target_address,
-        transfer_secret,
+        payment_network_identifier=raiden.default_registry.address,
+        payment_identifier=transfer_identifier,
+        amount=transfer_amount,
+        allocated_fee=transfer_fee,
+        token_network_identifier=token_network_identifier,
+        initiator=InitiatorAddress(raiden.address),
+        target=target_address,
+        secret=transfer_secret,
     )
     previous_address = None
     routes = routing.get_best_routes(
@@ -156,7 +161,7 @@ def mediator_init(raiden, transfer: LockedTransfer):
         token_network_id=TokenNetworkID(from_transfer.balance_proof.token_network_identifier),
         from_address=raiden.address,
         to_address=from_transfer.target,
-        amount=from_transfer.lock.amount,
+        amount=PaymentAmount(from_transfer.lock.amount),  # FIXME: mypy; deprecated through #3863
         previous_address=transfer.sender,
         config=raiden.config,
         privkey=raiden.privkey,
@@ -213,32 +218,40 @@ class PaymentStatus(NamedTuple):
 def update_services_from_balance_proof(
         raiden: 'RaidenService',
         chain_state: 'ChainState',
-        new_balance_proof: BalanceProofSignedState,
-):
-    update_monitoring_service_from_balance_proof(raiden, chain_state, new_balance_proof)
-    update_path_finding_service_from_balance_proof(raiden, chain_state, new_balance_proof)
+        balance_proof: Union[BalanceProofSignedState, BalanceProofUnsignedState],
+) -> None:
+    update_path_finding_service_from_balance_proof(
+        raiden=raiden,
+        chain_state=chain_state,
+        new_balance_proof=balance_proof,
+    )
+    if isinstance(balance_proof, BalanceProofSignedState):
+        update_monitoring_service_from_balance_proof(
+            raiden=raiden,
+            chain_state=chain_state,
+            new_balance_proof=balance_proof,
+        )
 
 
 def update_path_finding_service_from_balance_proof(
-        raiden,
+        raiden: 'RaidenService',
         chain_state: 'ChainState',
-        new_balance_proof: BalanceProofSignedState,
-):
-    channel_state = get_channelstate_by_token_network_and_partner(
+        new_balance_proof: Union[BalanceProofSignedState, BalanceProofUnsignedState],
+) -> None:
+    channel_state = views.get_channelstate_by_canonical_identifier(
         chain_state=chain_state,
-        token_network_id=TokenNetworkID(
-            new_balance_proof.canonical_identifier.token_network_address,
-        ),
-        partner_address=new_balance_proof.sender,
+        canonical_identifier=new_balance_proof.canonical_identifier,
     )
     network_address = new_balance_proof.canonical_identifier.token_network_address
     error_msg = (
-        'tried to send a balance proof in non-existant channel '
+        f'tried to send a balance proof in non-existant channel '
         f'token_network_address: {pex(network_address)} '
-        f'recipient: {pex(new_balance_proof.sender)}'
     )
     assert channel_state is not None, error_msg
-    assert channel_state.partner_state.balance_proof == new_balance_proof
+    if isinstance(new_balance_proof, BalanceProofSignedState):
+        assert channel_state.partner_state.balance_proof == new_balance_proof
+    else:  # BalanceProofUnsignedState
+        assert channel_state.our_state.balance_proof == new_balance_proof
 
     msg = UpdatePFS.from_channel_state(channel_state)
     msg.sign(raiden.signer)
@@ -254,7 +267,7 @@ def update_monitoring_service_from_balance_proof(
         raiden: 'RaidenService',
         chain_state: 'ChainState',
         new_balance_proof: BalanceProofSignedState,
-):
+) -> None:
     if raiden.config['services']['monitoring_enabled'] is False:
         return
 
@@ -352,7 +365,7 @@ class RaidenService(Runnable):
 
         self.stop_event = Event()
         self.stop_event.set()  # inits as stopped
-        self.greenlets = list()
+        self.greenlets: List[Greenlet] = list()
 
         self.wal: Optional[wal.WriteAheadLog] = None
         self.snapshot_group = 0
@@ -432,6 +445,7 @@ class RaidenService(Runnable):
             database_path=self.database_path,
             serializer=serialize.JSONSerializer(),
         )
+        storage.update_version()
         storage.log_run()
         self.wal = wal.restore_to_state_change(
             transition_function=node.state_transition,
@@ -681,8 +695,8 @@ class RaidenService(Runnable):
         raiden_event_list = self.wal.log_and_dispatch(state_change)
 
         current_state = views.state_from_raiden(self)
-        for balance_proof in views.detect_balance_proof_change(old_state, current_state):
-            update_services_from_balance_proof(self, current_state, balance_proof)
+        for changed_balance_proof in views.detect_balance_proof_change(old_state, current_state):
+            update_services_from_balance_proof(self, current_state, changed_balance_proof)
 
         log.debug(
             'Raiden events',
@@ -877,13 +891,16 @@ class RaidenService(Runnable):
                 # sufficient.
                 initiator = next(iter(task.manager_state.initiator_transfers.values()))
                 transfer = initiator.transfer
+                transfer_description = initiator.transfer_description
                 target = transfer.target
                 identifier = transfer.payment_identifier
                 balance_proof = transfer.balance_proof
                 self.targets_to_identifiers_to_statuses[target][identifier] = PaymentStatus(
                     payment_identifier=identifier,
-                    amount=transfer.lock.amount,
-                    token_network_identifier=balance_proof.token_network_identifier,
+                    amount=transfer_description.amount,
+                    token_network_identifier=TokenNetworkID(
+                        balance_proof.token_network_identifier,
+                    ),
                     payment_done=AsyncResult(),
                 )
 
@@ -951,8 +968,14 @@ class RaidenService(Runnable):
         assert self.wal, msg
 
         current_balance_proofs = views.detect_balance_proof_change(
-            State(),
-            chain_state,
+            old_state=ChainState(
+                pseudo_random_generator=chain_state.pseudo_random_generator,
+                block_number=GENESIS_BLOCK_NUMBER,
+                block_hash=constants.EMPTY_HASH,
+                our_address=chain_state.our_address,
+                chain_id=chain_state.chain_id,
+            ),
+            current_state=chain_state,
         )
         for balance_proof in current_balance_proofs:
             update_services_from_balance_proof(self, chain_state, balance_proof)
@@ -1044,6 +1067,7 @@ class RaidenService(Runnable):
             amount: PaymentAmount,
             target: TargetAddress,
             identifier: PaymentID,
+            fee: FeeAmount = MEDIATION_FEE,
             secret: Secret = None,
             secret_hash: SecretHash = None,
     ) -> PaymentStatus:
@@ -1061,12 +1085,13 @@ class RaidenService(Runnable):
             secret = random_secret()
 
         payment_status = self.start_mediated_transfer_with_secret(
-            token_network_identifier,
-            amount,
-            target,
-            identifier,
-            secret,
-            secret_hash,
+            token_network_identifier=token_network_identifier,
+            amount=amount,
+            fee=fee,
+            target=target,
+            identifier=identifier,
+            secret=secret,
+            secret_hash=secret_hash,
         )
 
         return payment_status
@@ -1075,6 +1100,7 @@ class RaidenService(Runnable):
             self,
             token_network_identifier: TokenNetworkID,
             amount: PaymentAmount,
+            fee: FeeAmount,
             target: TargetAddress,
             identifier: PaymentID,
             secret: Secret,
@@ -1136,6 +1162,7 @@ class RaidenService(Runnable):
             raiden=self,
             transfer_identifier=identifier,
             transfer_amount=amount,
+            transfer_fee=fee,
             transfer_secret=secret,
             token_network_identifier=token_network_identifier,
             target_address=target,

@@ -34,7 +34,7 @@ with open('constraints.txt') as req_file:
 test_requirements = []
 
 # Do not edit: this is maintained by bumpversion (see .bumpversion_client.cfg)
-version = '0.100.2'
+version = '0.100.3-rc4'
 
 setup(
     name='raiden',
@@ -43,7 +43,7 @@ setup(
     author='Brainbot Labs Est.',
     author_email='contact@brainbot.li',
     url='https://github.com/raiden-network/raiden',
-    packages=find_packages(),
+    packages=find_packages(exclude=('tools',)),
     package_data={"raiden": ["py.typed"]},
     include_package_data=True,
     license='MIT',

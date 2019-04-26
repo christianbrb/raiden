@@ -1,3 +1,4 @@
+import gevent
 import pytest
 from gevent import server
 
@@ -5,13 +6,16 @@ from raiden import waiting
 from raiden.api.python import RaidenAPI
 from raiden.app import App
 from raiden.message_handler import MessageHandler
-from raiden.messages import Unlock
 from raiden.network.transport import UDPTransport
 from raiden.raiden_event_handler import RaidenEventHandler
 from raiden.tests.utils.events import search_for_item
 from raiden.tests.utils.network import CHAIN
 from raiden.tests.utils.protocol import WaitForMessage
-from raiden.tests.utils.transfer import assert_synced_channel_state, mediated_transfer
+from raiden.tests.utils.transfer import (
+    assert_synced_channel_state,
+    transfer,
+    transfer_and_assert_path,
+)
 from raiden.transfer import views
 from raiden.transfer.state_change import (
     ContractReceiveChannelClosed,
@@ -34,9 +38,6 @@ def test_recovery_happy_case(
     app0, app1, app2 = raiden_network
     token_address = token_addresses[0]
 
-    app2_wait_for = WaitForMessage()
-    app2.raiden.message_handler = app2_wait_for
-
     chain_state = views.state_from_app(app0)
     payment_network_id = app0.raiden.default_registry.address
     token_network_identifier = views.get_token_network_identifier_by_token_address(
@@ -48,12 +49,13 @@ def test_recovery_happy_case(
     # make a few transfers from app0 to app2
     amount = 1
     spent_amount = deposit - 2
-    for _ in range(spent_amount):
-        mediated_transfer(
-            app0,
-            app2,
-            token_network_identifier,
-            amount,
+    identifier = 0
+    for identifier in range(spent_amount):
+        transfer_and_assert_path(
+            path=raiden_network,
+            token_address=token_address,
+            amount=amount,
+            identifier=identifier,
             timeout=network_wait * number_of_nodes,
         )
 
@@ -73,7 +75,7 @@ def test_recovery_happy_case(
     )
 
     raiden_event_handler = RaidenEventHandler()
-    message_handler = MessageHandler()
+    message_handler = WaitForMessage()
 
     app0_restart = App(
         config=app0.config,
@@ -116,22 +118,20 @@ def test_recovery_happy_case(
         network_wait,
     )
 
-    identifier = create_default_identifier()
-    wait_for_payment = app2_wait_for.wait_for_message(Unlock, {'payment_identifier': identifier})
-
-    mediated_transfer(
-        app2,
-        app0_restart,
-        token_network_identifier,
-        amount,
+    transfer(
+        initiator_app=app2,
+        target_app=app0_restart,
+        token_address=token_address,
+        amount=amount,
+        identifier=create_default_identifier(),
         timeout=network_wait * number_of_nodes * 2,
     )
-    mediated_transfer(
+    transfer(
         initiator_app=app0_restart,
         target_app=app2,
-        token_network_identifier=token_network_identifier,
+        token_address=token_address,
         amount=amount,
-        identifier=identifier,
+        identifier=create_default_identifier(),
         timeout=network_wait * number_of_nodes * 2,
     )
 
@@ -141,7 +141,6 @@ def test_recovery_happy_case(
         app1, deposit + spent_amount, [],
     )
 
-    wait_for_payment.wait()
     assert_synced_channel_state(
         token_network_identifier,
         app1, deposit - spent_amount, [],
@@ -174,12 +173,13 @@ def test_recovery_unhappy_case(
     # make a few transfers from app0 to app2
     amount = 1
     spent_amount = deposit - 2
-    for _ in range(spent_amount):
-        mediated_transfer(
-            app0,
-            app2,
-            token_network_identifier,
-            amount,
+    for identifier in range(spent_amount):
+        transfer(
+            initiator_app=app0,
+            target_app=app2,
+            token_address=token_address,
+            amount=amount,
+            identifier=identifier,
             timeout=network_wait * number_of_nodes,
         )
 
@@ -292,7 +292,6 @@ def test_recovery_blockchain_events(
 
     app0.stop()
 
-    import gevent
     gevent.sleep(1)
 
     raiden_event_handler = RaidenEventHandler()

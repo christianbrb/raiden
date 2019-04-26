@@ -4,13 +4,11 @@ from eth_utils import to_checksum_address
 from raiden.constants import DISCOVERY_DEFAULT_ROOM
 from raiden.exceptions import InvalidSettleTimeout
 from raiden.network.blockchain_service import BlockChainService
-from raiden.network.proxies import (
-    Discovery,
-    SecretRegistry,
-    ServiceRegistry,
-    TokenNetworkRegistry,
-    UserDeposit,
-)
+from raiden.network.proxies.discovery import Discovery
+from raiden.network.proxies.secret_registry import SecretRegistry
+from raiden.network.proxies.service_registry import ServiceRegistry
+from raiden.network.proxies.token_network_registry import TokenNetworkRegistry
+from raiden.network.proxies.user_deposit import UserDeposit
 from raiden.raiden_service import RaidenService
 from raiden.settings import (
     DEFAULT_NAT_INVITATION_TIMEOUT,
@@ -74,8 +72,8 @@ class App:  # pylint: disable=too-few-public-methods
         'console': False,
         'shutdown_timeout': DEFAULT_SHUTDOWN_TIMEOUT,
         'services': {
-            'pathfinding_url': None,
             'pathfinding_service_address': None,
+            'pathfinding_eth_address': None,
             'pathfinding_max_paths': DEFAULT_PATHFINDING_MAX_PATHS,
             'pathfinding_max_fee': DEFAULT_PATHFINDING_MAX_FEE,
             'pathfinding_iou_timeout': DEFAULT_PATHFINDING_IOU_TIMEOUT,

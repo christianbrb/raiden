@@ -3,7 +3,7 @@ import random
 from collections import defaultdict
 from functools import total_ordering
 from random import Random
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Tuple
 
 import networkx
 from eth_utils import encode_hex, to_canonical_address, to_checksum_address
@@ -11,7 +11,7 @@ from eth_utils import encode_hex, to_canonical_address, to_checksum_address
 from raiden.constants import EMPTY_MERKLE_ROOT, UINT64_MAX, UINT256_MAX
 from raiden.encoding import messages
 from raiden.encoding.format import buffer_for
-from raiden.transfer.architecture import SendMessageEvent, State
+from raiden.transfer.architecture import ContractSendEvent, SendMessageEvent, State
 from raiden.transfer.merkle_tree import merkleroot
 from raiden.transfer.queue_identifier import QueueIdentifier
 from raiden.transfer.utils import hash_balance_data, pseudo_random_generator_from_json
@@ -29,7 +29,9 @@ from raiden.utils.typing import (
     BlockTimeout,
     ChainID,
     ChannelID,
+    ChannelMap,
     Dict,
+    FeeAmount,
     Keccak256,
     List,
     LockHash,
@@ -38,6 +40,7 @@ from raiden.utils.typing import (
     Nonce,
     Optional,
     PaymentNetworkID,
+    PaymentWithFeeAmount,
     Secret,
     SecretHash,
     Signature,
@@ -47,11 +50,13 @@ from raiden.utils.typing import (
     T_ChainID,
     T_ChannelID,
     T_Keccak256,
+    T_PaymentWithFeeAmount,
     T_Secret,
     T_Signature,
     T_TokenAmount,
     TokenAddress,
     TokenAmount,
+    TokenNetworkAddress,
     TokenNetworkID,
     Union,
 )
@@ -60,6 +65,7 @@ if TYPE_CHECKING:
     # pylint: disable=unused-import
     from messages import EnvelopeMessage
     from raiden.transfer.mediated_transfer.state import MediatorTransferState, TargetTransferState
+    from raiden.transfer.mediated_transfer.state import InitiatorPaymentState
 
 SecretHashToLock = Dict[SecretHash, 'HashTimeLockState']
 SecretHashToPartialUnlockProof = Dict[SecretHash, 'UnlockPartialProofState']
@@ -123,12 +129,12 @@ def balanceproof_from_envelope(
 def make_empty_merkle_tree() -> 'MerkleTreeState':
     return MerkleTreeState([
         [],                   # the leaves are empty
-        [EMPTY_MERKLE_ROOT],  # the root is the constant 0
+        [Keccak256(EMPTY_MERKLE_ROOT)],  # the root is the constant 0
     ])
 
 
 def message_identifier_from_prng(prng: Random) -> MessageID:
-    return prng.randint(0, UINT64_MAX)
+    return MessageID(prng.randint(0, UINT64_MAX))
 
 
 def to_comparable_graph(network: networkx.Graph) -> List[List[Any]]:
@@ -136,6 +142,8 @@ def to_comparable_graph(network: networkx.Graph) -> List[List[Any]]:
 
 
 class TransferTask(State):
+    # TODO: When we turn these into dataclasses it would be a good time to move common attributes
+    # of all transfer tasks like the `token_network_identifier` into the common subclass
     pass
 
 
@@ -148,7 +156,7 @@ class InitiatorTask(TransferTask):
     def __init__(
             self,
             token_network_identifier: TokenNetworkID,
-            manager_state: State,
+            manager_state: 'InitiatorPaymentState',
     ) -> None:
         self.token_network_identifier = token_network_identifier
         self.manager_state = manager_state
@@ -310,14 +318,18 @@ class ChainState(State):
         self.block_number = block_number
         self.block_hash = block_hash
         self.chain_id = chain_id
-        self.identifiers_to_paymentnetworks = dict()
-        self.nodeaddresses_to_networkstates = dict()
+        self.identifiers_to_paymentnetworks: Dict[PaymentNetworkID, PaymentNetworkState] = dict()
+        self.nodeaddresses_to_networkstates: Dict[Address, str] = dict()
         self.our_address = our_address
         self.payment_mapping = PaymentMappingState()
-        self.pending_transactions = list()
+        self.pending_transactions: List[ContractSendEvent] = list()
         self.pseudo_random_generator = pseudo_random_generator
         self.queueids_to_queues: QueueIdsToQueues = dict()
         self.last_transport_authdata: Optional[str] = None
+        self.tokennetworkaddresses_to_paymentnetworkaddresses: Dict[
+            TokenNetworkAddress,
+            PaymentNetworkID,
+        ] = {}
 
     def __repr__(self):
         return (
@@ -332,6 +344,12 @@ class ChainState(State):
         )
 
     def __eq__(self, other: Any) -> bool:
+        if other is None:
+            return False
+
+        our_tnpn = self.tokennetworkaddresses_to_paymentnetworkaddresses
+        other_tnpn = other.tokennetworkaddresses_to_paymentnetworkaddresses
+
         return (
             isinstance(other, ChainState) and
             self.block_number == other.block_number and
@@ -342,7 +360,8 @@ class ChainState(State):
             self.nodeaddresses_to_networkstates == other.nodeaddresses_to_networkstates and
             self.payment_mapping == other.payment_mapping and
             self.chain_id == other.chain_id and
-            self.last_transport_authdata == other.last_transport_authdata
+            self.last_transport_authdata == other.last_transport_authdata and
+            our_tnpn == other_tnpn
         )
 
     def __ne__(self, other: Any) -> bool:
@@ -371,6 +390,11 @@ class ChainState(State):
                 self.queueids_to_queues,
             ),
             'last_transport_authdata': self.last_transport_authdata,
+            'tokennetworkaddresses_to_paymentnetworkaddresses': map_dict(
+                to_checksum_address,
+                to_checksum_address,
+                self.tokennetworkaddresses_to_paymentnetworkaddresses,
+            ),
         }
 
     @classmethod
@@ -382,7 +406,7 @@ class ChainState(State):
             block_number=BlockNumber(
                 T_BlockNumber(data['block_number']),
             ),
-            block_hash=serialization.deserialize_bytes(data['block_hash']),
+            block_hash=BlockHash(serialization.deserialize_bytes(data['block_hash'])),
             our_address=to_canonical_address(data['our_address']),
             chain_id=data['chain_id'],
         )
@@ -403,6 +427,11 @@ class ChainState(State):
             data['queueids_to_queues'],
         )
         restored.last_transport_authdata = data.get('last_transport_authdata')
+        restored.tokennetworkaddresses_to_paymentnetworkaddresses = map_dict(
+            to_canonical_address,
+            to_canonical_address,
+            data['tokennetworkaddresses_to_paymentnetworkaddresses'],
+        )
 
         return restored
 
@@ -418,18 +447,18 @@ class PaymentNetworkState(State):
 
     def __init__(
             self,
-            address: Address,
+            address: PaymentNetworkID,
             token_network_list: List['TokenNetworkState'],
     ) -> None:
         if not isinstance(address, T_Address):
             raise ValueError('address must be an address instance')
 
         self.address = address
-        self.tokenidentifiers_to_tokennetworks = {
+        self.tokenidentifiers_to_tokennetworks: Dict[TokenNetworkID, TokenNetworkState] = {
             token_network.address: token_network
             for token_network in token_network_list
         }
-        self.tokenaddresses_to_tokenidentifiers = {
+        self.tokenaddresses_to_tokenidentifiers: Dict[TokenAddress, TokenNetworkID] = {
             token_network.token_address: token_network.address
             for token_network in token_network_list
         }
@@ -491,7 +520,7 @@ class TokenNetworkState(State):
         self.token_address = token_address
         self.network_graph = TokenNetworkGraphState(self.address)
 
-        self.channelidentifiers_to_channels = dict()
+        self.channelidentifiers_to_channels: ChannelMap = dict()
         self.partneraddresses_to_channelidentifiers: Dict[Address, List[ChannelID]] = defaultdict(
             list,
         )
@@ -543,7 +572,7 @@ class TokenNetworkState(State):
         )
         restored.network_graph = data['network_graph']
         restored.channelidentifiers_to_channels = map_dict(
-            int,
+            serialization.deserialize_channel_id,
             serialization.identity,
             data['channelidentifiers_to_channels'],
         )
@@ -577,7 +606,10 @@ class TokenNetworkGraphState(State):
     def __init__(self, token_network_address: TokenNetworkID) -> None:
         self.token_network_id = token_network_address
         self.network = networkx.Graph()
-        self.channel_identifier_to_participants = {}
+        self.channel_identifier_to_participants: Dict[
+            ChannelID,
+            Tuple[Address, Address],
+        ] = {}
 
     def __repr__(self):
         return '<TokenNetworkGraphState num_edges:{}>'.format(len(self.network.edges))
@@ -611,7 +643,7 @@ class TokenNetworkGraphState(State):
         )
         restored.network = serialization.deserialize_networkx_graph(data['network'])
         restored.channel_identifier_to_participants = map_dict(
-            int,
+            serialization.deserialize_channel_id,
             serialization.deserialize_participants_tuple,
             data['channel_identifier_to_participants'],
         )
@@ -640,7 +672,7 @@ class PaymentMappingState(State):
     )
 
     def __init__(self) -> None:
-        self.secrethashes_to_task = dict()
+        self.secrethashes_to_task: Dict[SecretHash, TransferTask] = dict()
 
     def __repr__(self):
         return '<PaymentMappingState qtd_transfers:{}>'.format(
@@ -669,7 +701,7 @@ class PaymentMappingState(State):
     def from_dict(cls, data: Dict[str, Any]) -> 'PaymentMappingState':
         restored = cls()
         restored.secrethashes_to_task = map_dict(
-            serialization.deserialize_bytes,
+            serialization.deserialize_secret_hash,
             serialization.identity,
             data['secrethashes_to_task'],
         )
@@ -748,7 +780,7 @@ class BalanceProofUnsignedState(State):
 
     def __init__(
             self,
-            nonce: int,
+            nonce: Nonce,
             transferred_amount: TokenAmount,
             locked_amount: TokenAmount,
             locksroot: Locksroot,
@@ -1049,7 +1081,7 @@ class BalanceProofSignedState(State):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'BalanceProofSignedState':
         restored = cls(
-            nonce=data['nonce'],
+            nonce=Nonce(data['nonce']),
             transferred_amount=TokenAmount(int(data['transferred_amount'])),
             locked_amount=TokenAmount(int(data['locked_amount'])),
             locksroot=Locksroot(serialization.deserialize_bytes(data['locksroot'])),
@@ -1079,18 +1111,18 @@ class HashTimeLockState(State):
 
     def __init__(
             self,
-            amount: TokenAmount,
+            amount: PaymentWithFeeAmount,
             expiration: BlockExpiration,
             secrethash: SecretHash,
     ) -> None:
-        if not isinstance(amount, T_TokenAmount):
-            raise ValueError('amount must be a token_amount instance')
+        if not isinstance(amount, T_PaymentWithFeeAmount):
+            raise ValueError('amount must be a PaymentWithFeeAmount instance')
 
         if not isinstance(expiration, T_BlockNumber):
-            raise ValueError('expiration must be a block_number instance')
+            raise ValueError('expiration must be a BlockNumber instance')
 
         if not isinstance(secrethash, T_Keccak256):
-            raise ValueError('secrethash must be a keccak256 instance')
+            raise ValueError('secrethash must be a Keccak256 instance')
 
         packed = messages.Lock(buffer_for(messages.Lock))
         # pylint: disable=assigning-non-slot
@@ -1139,7 +1171,7 @@ class HashTimeLockState(State):
         restored = cls(
             amount=data['amount'],
             expiration=data['expiration'],
-            secrethash=serialization.deserialize_bytes(data['secrethash']),
+            secrethash=SecretHash(serialization.deserialize_bytes(data['secrethash'])),
         )
 
         return restored
@@ -1198,7 +1230,7 @@ class UnlockPartialProofState(State):
     def from_dict(cls, data: Dict[str, Any]) -> 'UnlockPartialProofState':
         restored = cls(
             lock=data['lock'],
-            secret=serialization.deserialize_bytes(data['secret']),
+            secret=Secret(serialization.deserialize_bytes(data['secret'])),
         )
 
         return restored
@@ -1252,9 +1284,12 @@ class UnlockProofState(State):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'UnlockProofState':
         restored = cls(
-            merkle_proof=map_list(serialization.deserialize_bytes, data['merkle_proof']),
+            merkle_proof=map_list(
+                serialization.deserialize_keccak,
+                data['merkle_proof'],
+            ),
             lock_encoded=serialization.deserialize_bytes(data['lock_encoded']),
-            secret=serialization.deserialize_bytes(data['secret']),
+            secret=Secret(serialization.deserialize_bytes(data['secret'])),
         )
 
         return restored
@@ -1482,26 +1517,28 @@ class NettingChannelEndState(State):
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'NettingChannelEndState':
-        onchain_locksroot = None
+        onchain_locksroot = EMPTY_MERKLE_ROOT
         if data['onchain_locksroot']:
-            onchain_locksroot = serialization.deserialize_bytes(data['onchain_locksroot'])
+            onchain_locksroot = Locksroot(
+                serialization.deserialize_bytes(data['onchain_locksroot']),
+            )
 
         restored = cls(
             address=to_canonical_address(data['address']),
-            balance=int(data['contract_balance']),
+            balance=Balance(int(data['contract_balance'])),
         )
         restored.secrethashes_to_lockedlocks = map_dict(
-            serialization.deserialize_bytes,
+            serialization.deserialize_secret_hash,
             serialization.identity,
             data['secrethashes_to_lockedlocks'],
         )
         restored.secrethashes_to_unlockedlocks = map_dict(
-            serialization.deserialize_bytes,
+            serialization.deserialize_secret_hash,
             serialization.identity,
             data['secrethashes_to_unlockedlocks'],
         )
         restored.secrethashes_to_onchain_unlockedlocks = map_dict(
-            serialization.deserialize_bytes,
+            serialization.deserialize_secret_hash,
             serialization.identity,
             data['secrethashes_to_onchain_unlockedlocks'],
         )
@@ -1523,6 +1560,7 @@ class NettingChannelState(State):
         'token_network_identifier',
         'reveal_timeout',
         'settle_timeout',
+        'mediation_fee',
         'our_state',
         'partner_state',
         'deposit_transaction_queue',
@@ -1539,6 +1577,7 @@ class NettingChannelState(State):
             payment_network_identifier: PaymentNetworkID,
             reveal_timeout: BlockTimeout,
             settle_timeout: BlockTimeout,
+            mediation_fee: FeeAmount,
             our_state: NettingChannelEndState,
             partner_state: NettingChannelEndState,
             open_transaction: TransactionExecutionStatus,
@@ -1603,6 +1642,7 @@ class NettingChannelState(State):
         self.close_transaction = close_transaction
         self.settle_transaction = settle_transaction
         self.update_transaction = update_transaction
+        self.mediation_fee = mediation_fee
 
     def __repr__(self):
         return '<NettingChannelState id:{} opened:{} closed:{} settled:{} updated:{}>'.format(
@@ -1624,6 +1664,7 @@ class NettingChannelState(State):
             self.token_network_identifier == other.token_network_identifier and
             self.reveal_timeout == other.reveal_timeout and
             self.settle_timeout == other.settle_timeout and
+            self.mediation_fee == other.mediation_fee and
             self.deposit_transaction_queue == other.deposit_transaction_queue and
             self.open_transaction == other.open_transaction and
             self.close_transaction == other.close_transaction and
@@ -1660,6 +1701,7 @@ class NettingChannelState(State):
             'token_network_identifier': to_checksum_address(self.token_network_identifier),
             'reveal_timeout': str(self.reveal_timeout),
             'settle_timeout': str(self.settle_timeout),
+            'mediation_fee': str(self.mediation_fee),
             'our_state': self.our_state,
             'partner_state': self.partner_state,
             'open_transaction': self.open_transaction,
@@ -1685,8 +1727,9 @@ class NettingChannelState(State):
             ),
             token_address=to_canonical_address(data['token_address']),
             payment_network_identifier=to_canonical_address(data['payment_network_identifier']),
-            reveal_timeout=int(data['reveal_timeout']),
-            settle_timeout=int(data['settle_timeout']),
+            reveal_timeout=BlockTimeout(int(data['reveal_timeout'])),
+            settle_timeout=BlockTimeout(int(data['settle_timeout'])),
+            mediation_fee=FeeAmount(int(data['mediation_fee'])),
             our_state=data['our_state'],
             partner_state=data['partner_state'],
             open_transaction=data['open_transaction'],
@@ -1776,7 +1819,7 @@ class TransactionChannelNewBalance(State):
     def from_dict(cls, data: Dict[str, Any]) -> 'TransactionChannelNewBalance':
         restored = cls(
             participant_address=to_canonical_address(data['participant_address']),
-            contract_balance=int(data['contract_balance']),
+            contract_balance=TokenAmount(int(data['contract_balance'])),
             deposit_block_number=BlockNumber(int(data['deposit_block_number'])),
         )
 

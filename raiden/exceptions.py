@@ -125,6 +125,11 @@ class AlreadyRegisteredTokenAddress(RaidenError):
     pass
 
 
+class InvalidToken(RaidenError):
+    """ Raised if the token does not follow the ERC20 standard """
+    pass
+
+
 # Exceptions raised due to protocol errors (this includes messages received
 # from a byzantine node)
 
@@ -234,3 +239,11 @@ class InsufficientGasReserve(RaidenError):
 
 class ServiceRequestFailed(RaidenError):
     """ Raised when a request to one of the raiden services fails. """
+
+
+class ServiceRequestIOURejected(ServiceRequestFailed):
+    """ Raised when a service request fails due to a problem with the iou. """
+
+    def __init__(self, message, error_code):
+        super().__init__(f'{message} ({error_code})')
+        self.error_code = error_code

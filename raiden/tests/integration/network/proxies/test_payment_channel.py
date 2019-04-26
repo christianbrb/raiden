@@ -4,7 +4,8 @@ from eth_utils import decode_hex, encode_hex, to_canonical_address, to_checksum_
 from raiden.constants import EMPTY_HASH
 from raiden.exceptions import ChannelOutdatedError
 from raiden.network.blockchain_service import BlockChainService
-from raiden.network.proxies import PaymentChannel, TokenNetwork
+from raiden.network.proxies.payment_channel import PaymentChannel
+from raiden.network.proxies.token_network import TokenNetwork
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.tests.integration.network.proxies import BalanceProof
 from raiden.utils import privatekey_to_address
@@ -12,14 +13,13 @@ from raiden.utils.signer import LocalSigner
 from raiden_contracts.constants import TEST_SETTLE_TIMEOUT_MIN
 
 
-def test_payment_channel_proxy_basics(  # pylint: disable=unused-argument
+def test_payment_channel_proxy_basics(
         token_network_proxy,
         private_keys,
         token_proxy,
         chain_id,
         web3,
         contract_manager,
-        skip_if_parity,
 ):
     token_network_address = to_canonical_address(token_network_proxy.proxy.contract.address)
 
@@ -128,9 +128,11 @@ def test_payment_channel_proxy_basics(  # pylint: disable=unused-argument
     assert channel_proxy_1.settle_timeout() == channel_proxy_2.settle_timeout()
     assert channel_proxy_1.settle_timeout() == TEST_SETTLE_TIMEOUT_MIN
 
-    # update transfer
+    # update transfer -- we need to wait on +1 since we use the latest block on parity for
+    # estimate gas and at the time the latest block is the settle timeout block.
+    # More info: https://github.com/raiden-network/raiden/pull/3699#discussion_r270477227
     c1_chain.wait_until_block(
-        target_block_number=c1_client.block_number() + TEST_SETTLE_TIMEOUT_MIN,
+        target_block_number=c1_client.block_number() + TEST_SETTLE_TIMEOUT_MIN + 1,
     )
 
     c2_token_network_proxy.settle(
@@ -152,13 +154,12 @@ def test_payment_channel_proxy_basics(  # pylint: disable=unused-argument
     assert len(events) == 4  # ChannelOpened, ChannelNewDeposit, ChannelClosed, ChannelSettled
 
 
-def test_payment_channel_outdated_channel_close(  # pylint: disable=unused-argument
+def test_payment_channel_outdated_channel_close(
         token_network_proxy,
         private_keys,
         chain_id,
         web3,
         contract_manager,
-        skip_if_parity,
 ):
     token_network_address = to_canonical_address(token_network_proxy.proxy.contract.address)
 
@@ -231,8 +232,10 @@ def test_payment_channel_outdated_channel_close(  # pylint: disable=unused-argum
     # check the settlement timeouts again
     assert channel_proxy_1.settle_timeout() == TEST_SETTLE_TIMEOUT_MIN
 
-    # update transfer
-    chain.wait_until_block(target_block_number=client.block_number() + TEST_SETTLE_TIMEOUT_MIN)
+    # update transfer -- we need to wait on +1 since we use the latest block on parity for
+    # estimate gas and at the time the latest block is the settle timeout block.
+    # More info: https://github.com/raiden-network/raiden/pull/3699#discussion_r270477227
+    chain.wait_until_block(target_block_number=client.block_number() + TEST_SETTLE_TIMEOUT_MIN + 1)
 
     token_network_proxy.settle(
         channel_identifier=channel_identifier,

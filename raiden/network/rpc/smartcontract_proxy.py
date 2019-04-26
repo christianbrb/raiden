@@ -4,7 +4,6 @@ from typing import Dict, List
 
 from eth_utils import decode_hex, to_canonical_address, to_checksum_address
 from web3.contract import Contract
-from web3.utils.abi import get_abi_input_types
 from web3.utils.contracts import encode_transaction_data, find_matching_fn_abi
 
 from raiden import constants
@@ -38,7 +37,7 @@ def inspect_client_error(val_err: ValueError, eth_node: EthClient) -> ClientErro
     except json.JSONDecodeError:
         return ClientErrorInspectResult.PROPAGATE_ERROR
 
-    if eth_node == EthClient.GETH:
+    if eth_node is EthClient.GETH:
         if error['code'] == -32000:
             if 'insufficient funds' in error['message']:
                 return ClientErrorInspectResult.INSUFFICIENT_FUNDS
@@ -49,9 +48,9 @@ def inspect_client_error(val_err: ValueError, eth_node: EthClient) -> ClientErro
             elif error['message'].startswith('known transaction:'):
                 return ClientErrorInspectResult.TRANSACTION_PENDING
 
-    elif eth_node == EthClient.PARITY:
+    elif eth_node is EthClient.PARITY:
         if error['code'] == -32010:
-            if 'insufficient funds' in error['message']:
+            if 'Insufficient funds' in error['message']:
                 return ClientErrorInspectResult.INSUFFICIENT_FUNDS
             elif 'another transaction with same nonce in the queue' in error['message']:
                 return ClientErrorInspectResult.TRANSACTION_UNDERPRICED
@@ -83,7 +82,12 @@ class ContractProxy:
             *args,
             **kargs,
     ) -> typing.TransactionHash:
-        data = ContractProxy.get_transaction_data(self.contract.abi, function_name, args)
+        data = ContractProxy.get_transaction_data(
+            self.contract.abi,
+            function_name,
+            args=args,
+            kwargs=kargs,
+        )
 
         try:
             txhash = self.jsonrpc_client.send_transaction(
@@ -91,7 +95,6 @@ class ContractProxy:
                 startgas=startgas,
                 value=kargs.pop('value', 0),
                 data=decode_hex(data),
-                **kargs,
             )
         except ValueError as e:
             action = inspect_client_error(e, self.jsonrpc_client.eth_node)
@@ -121,7 +124,7 @@ class ContractProxy:
                     address=hex_address,
                     nonce=self.jsonrpc_client._available_nonce,
                 )
-                if not txhash:
+                if txhash:
                     raise TransactionAlreadyPending(
                         'Transaction was submitted via parity but parity saw it as'
                         ' already pending. Could not find the transaction in the '
@@ -134,36 +137,27 @@ class ContractProxy:
         return txhash
 
     @staticmethod
-    def sanitize_args(abi: Dict, args: List):
-        """Prepare inputs to match the ABI"""
-        inputs = get_abi_input_types(abi)
-        output = []
-        assert len(inputs) == len(args)
-        for input_type, arg in zip(inputs, args):
-            if input_type == 'address':
-                output.append(to_checksum_address(arg))
-            elif input_type == 'bytes' and isinstance(arg, str):
-                output.append(arg.encode())
-            else:
-                output.append(arg)
-        return output
-
-    @staticmethod
-    def get_transaction_data(abi: Dict, function_name: str, args: List = None):
+    def get_transaction_data(
+            abi: Dict,
+            function_name: str,
+            args: List = None,
+            kwargs: Dict = None,
+    ):
         """Get encoded transaction data"""
         args = args or list()
         fn_abi = find_matching_fn_abi(
             abi,
             function_name,
-            args,
+            args=args,
+            kwargs=kwargs,
         )
-        args = ContractProxy.sanitize_args(fn_abi, args)
         return encode_transaction_data(
             None,
             function_name,
             contract_abi=abi,
             fn_abi=fn_abi,
             args=args,
+            kwargs=kwargs,
         )
 
     def decode_transaction_input(self, transaction_hash: bytes) -> Dict:
@@ -182,13 +176,19 @@ class ContractProxy:
     def encode_function_call(self, function: str, args: List = None):
         return self.get_transaction_data(self.contract.abi, function, args)
 
-    def estimate_gas(self, block_identifier, function: str, *args) -> typing.Optional[int]:
+    def estimate_gas(
+            self,
+            block_identifier,
+            function: str,
+            *args,
+            **kwargs,
+    ) -> typing.Optional[int]:
         """Returns a gas estimate for the function with the given arguments or
         None if the function call will fail due to Insufficient funds or
         the logic in the called function."""
         fn = getattr(self.contract.functions, function)
         address = to_checksum_address(self.jsonrpc_client.address)
-        if self.jsonrpc_client.eth_node == constants.EthClient.GETH:
+        if self.jsonrpc_client.eth_node is constants.EthClient.GETH:
             # Unfortunately geth does not follow the ethereum JSON-RPC spec and
             # does not accept a block identifier argument for eth_estimateGas
             # parity and py-evm (trinity) do.
@@ -202,7 +202,7 @@ class ContractProxy:
             # Relevant web3 PR: https://github.com/ethereum/web3.py/pull/1046
             block_identifier = None
         try:
-            return fn(*args).estimateGas(
+            return fn(*args, **kwargs).estimateGas(
                 transaction={'from': address},
                 block_identifier=block_identifier,
             )

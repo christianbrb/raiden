@@ -26,12 +26,21 @@ from raiden.transfer.state_change import ActionChangeNodeNetworkState
 from raiden.utils import pex
 from raiden.utils.notifying_queue import NotifyingQueue
 from raiden.utils.runnable import Runnable
-from raiden.utils.typing import MYPY_ANNOTATION, Address, Dict, List, MessageID, Tuple
+from raiden.utils.typing import (
+    MYPY_ANNOTATION,
+    Address,
+    Dict,
+    List,
+    MessageID,
+    Nonce,
+    Tuple,
+    UDPMessageID,
+)
 
 log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
 log_healthcheck = structlog.get_logger(__name__ + '.healthcheck')  # pylint: disable=invalid-name
 
-QueueItem_T = Tuple[bytes, int]
+QueueItem_T = Tuple[bytes, MessageID]
 Queue_T = List[QueueItem_T]
 
 # GOALS:
@@ -458,7 +467,7 @@ class UDPTransport(Runnable):
             self,
             recipient: Address,
             messagedata: bytes,
-            message_id: MessageID,
+            message_id: UDPMessageID,
     ) -> AsyncResult:
         """ Send message to recipient if the transport is running.
 
@@ -634,7 +643,7 @@ class UDPTransport(Runnable):
                 message_id=message_id,
             )
 
-    def get_ping(self, nonce: int) -> Ping:
+    def get_ping(self, nonce: Nonce) -> bytes:
         """ Returns a signed Ping message.
 
         Note: Ping messages don't have an enforced ordering, so a Ping message
@@ -645,9 +654,7 @@ class UDPTransport(Runnable):
             current_protocol_version=constants.PROTOCOL_VERSION,
         )
         self.raiden.sign(message)
-        message_data = message.encode()
-
-        return message_data
+        return message.encode()
 
     def set_node_network_state(self, node_address: Address, node_state):
         state_change = ActionChangeNodeNetworkState(node_address, node_state)

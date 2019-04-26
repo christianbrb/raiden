@@ -49,11 +49,11 @@ lint:
 	pylint --load-plugins=tools.pylint.gevent_checker --rcfile .pylint.rc $(LINT_PATHS)
 	python setup.py check --restructuredtext --strict
 
-mypy:
+	mypy raiden/transfer raiden/messages.py raiden/encoding --ignore-missing-imports
+
 	# We are starting small with a few files and directories here,
 	# but mypy should run on the whole codebase soon.
-	mypy raiden/transfer raiden/api raiden/messages.py raiden/blockchain \
-	raiden/encoding raiden/storage raiden/network \
+	mypy raiden/api raiden/blockchain raiden/storage raiden/network \
 	--ignore-missing-imports | grep error > mypy-out.txt || true
 	# Expecting status code 1 from `grep`, which indicates no match.
 	# Again, we are starting small, detecting only errors related to
@@ -61,9 +61,15 @@ mypy:
 	# detected soon.
 	grep BlockNumber mypy-out.txt; [ $$? -eq 1 ]
 	grep Address mypy-out.txt; [ $$? -eq 1 ]
+	grep 'Item "None" of' mypy-out.txt; [ $$? -eq 1 ]
 	grep ChannelID mypy-out.txt; [ $$? -eq 1 ]
 	grep BalanceProof mypy-out.txt; [ $$? -eq 1 ]
 	grep SendSecret mypy-out.txt; [ $$? -eq 1 ]
+	grep NetworkTimeout mypy-out.txt; [ $$? -eq 1 ]
+	grep Nonce mypy-out.txt; [ $$? -eq 1 ]
+	grep Locksroot mypy-out.txt; [ $$? -eq 1 ]
+	grep TransactionHash mypy-out.txt; [ $$? -eq 1 ]
+	grep TokenNetwork mypy-out.txt; [ $$? -eq 1 ]
 
 isort:
 	isort $(ISORT_PARAMS)
@@ -123,8 +129,11 @@ dist: clean
 	python setup.py bdist_wheel
 	ls -l dist
 
-install: clean
-	python setup.py install
+install: clean-pyc
+	pip install -c constraints.txt -r requirements.txt .
+
+install-dev: clean-pyc
+	pip install -c constraints-dev.txt -r requirements-dev.txt -e .
 
 logging_settings = :info,contracts:debug
 mkfile_root := $(dir $(realpath $(lastword $(MAKEFILE_LIST))))

@@ -25,6 +25,7 @@ from web3.gas_strategies.time_based import fast_gas_price_strategy, medium_gas_p
 from raiden.accounts import Account
 from raiden.network.rpc.client import JSONRPCClient, check_address_has_code
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
+from raiden.settings import DEVELOPMENT_CONTRACT_VERSION
 from raiden.utils.typing import TransactionHash
 from raiden_contracts.constants import CONTRACT_CUSTOM_TOKEN, CONTRACT_USER_DEPOSIT
 from raiden_contracts.contract_manager import get_contracts_deployment_info
@@ -82,10 +83,10 @@ class DummyStream:
 class ChainConfigType(click.ParamType):
     name = 'chain-config'
 
-    def get_metavar(self, param):
+    def get_metavar(self, param):  # pylint: disable=unused-argument,no-self-use
         return '<chain-name>:<eth-node-rpc-url>'
 
-    def convert(self, value, param, ctx):
+    def convert(self, value, param, ctx):  # pylint: disable=unused-argument
         name, _, rpc_url = value.partition(':')
         if name.startswith('http'):
             self.fail(f'Invalid value: {value}. Use {self.get_metavar(None)}.')
@@ -268,8 +269,10 @@ def get_udc_and_token(runner) -> Tuple[Optional[ContractProxy], Optional[Contrac
 
     udc_address = udc_config.get('address')
     if udc_address is None:
-        log.error('chain id', id=runner.chain_id)
-        contracts = get_contracts_deployment_info(chain_id=runner.chain_id)
+        contracts = get_contracts_deployment_info(
+            chain_id=runner.chain_id,
+            version=DEVELOPMENT_CONTRACT_VERSION,
+        )
         udc_address = contracts['contracts'][CONTRACT_USER_DEPOSIT]['address']
     udc_abi = runner.contract_manager.get_contract_abi(CONTRACT_USER_DEPOSIT)
     udc_proxy = runner.client.new_contract_proxy(udc_abi, udc_address)
@@ -300,6 +303,8 @@ def mint_token_if_balance_low(
     else:
         if no_action_msg:
             log.debug(no_action_msg, balance=balance)
+
+    return None
 
 
 def send_notification_mail(target_mail, subject, message, api_key):
@@ -377,7 +382,7 @@ def reclaim_eth(account: Account, chain_rpc_urls: dict, data_path: str, min_age_
 
     log.info('Reclaiming candidates', addresses=list(addresses.keys()))
 
-    txs = defaultdict(list)
+    txs = defaultdict(set)
     reclaim_amount = defaultdict(int)
     for chain_name, web3 in web3s.items():
         log.info('Checking chain', chain=chain_name)
@@ -393,7 +398,7 @@ def reclaim_eth(account: Account, chain_rpc_urls: dict, data_path: str, min_age_
                 )
                 reclaim_amount[chain_name] += drain_amount
                 client = JSONRPCClient(web3, privkey)
-                txs[chain_name].append(
+                txs[chain_name].add(
                     client.send_transaction(
                         to=account.address,
                         value=drain_amount,

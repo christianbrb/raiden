@@ -1,4 +1,3 @@
-import getpass
 import json
 import os
 import sys
@@ -6,12 +5,17 @@ from typing import Dict, Optional
 
 import structlog
 from eth_keyfile import decode_keyfile_json
-from eth_utils import add_0x_prefix, decode_hex, encode_hex, remove_0x_prefix, to_checksum_address
+from eth_utils import add_0x_prefix, decode_hex, encode_hex, remove_0x_prefix
 
 from raiden.utils import privatekey_to_address, privatekey_to_publickey
-from raiden.utils.typing import AddressHex
+from raiden.utils.typing import AddressHex, PrivateKey, PublicKey
 
 log = structlog.get_logger(__name__)
+
+
+class InvalidAccountFile(Exception):
+    """ Thrown when a file is not a valid keystore account file """
+    pass
 
 
 def _find_datadir() -> str:
@@ -97,6 +101,10 @@ class AccountManager:
                     try:
                         with open(fullpath) as data_file:
                             data = json.load(data_file)
+                            if not isinstance(data, dict) or 'address' not in data:
+                                # we expect a dict in specific format.
+                                # Anything else is not a keyfile
+                                raise InvalidAccountFile(f'Invalid keystore file {fullpath}')
                             address = add_0x_prefix(str(data['address']).lower())
                             self.accounts[address] = str(fullpath)
                     except OSError as ex:
@@ -106,6 +114,7 @@ class AccountManager:
                             json.JSONDecodeError,
                             KeyError,
                             UnicodeDecodeError,
+                            InvalidAccountFile,
                     ) as ex:
                         # Invalid file - skip
                         if f.startswith('UTC--'):
@@ -123,18 +132,17 @@ class AccountManager:
 
         return address.lower() in self.accounts
 
-    def get_privkey(self, address: AddressHex, password: str = None) -> str:
+    def get_privkey(self, address: AddressHex, password: str) -> PrivateKey:
         """Find the keystore file for an account, unlock it and get the private key
 
         Args:
-            address(str): The Ethereum address for which to find the keyfile in the system
-            password(str): Mostly for testing purposes. A password can be provided
+            address: The Ethereum address for which to find the keyfile in the system
+            password: Mostly for testing purposes. A password can be provided
                            as the function argument here. If it's not then the
                            user is interactively queried for one.
         Returns
-            str: The private key associated with the address
+            The private key associated with the address
         """
-
         address = add_0x_prefix(address).lower()
 
         if not self.address_in_keystore(address):
@@ -143,11 +151,6 @@ class AccountManager:
         with open(self.accounts[address]) as data_file:
             data = json.load(data_file)
 
-        # Since file was found prompt for a password if not already given
-        if password is None:
-            password = getpass.getpass(
-                f'Enter the password to unlock {to_checksum_address(address)}: ',
-            )
         acc = Account(data, password, self.accounts[address])
         return acc.privkey
 
@@ -228,7 +231,8 @@ class Account:
         if self.locked:
             self._privkey = decode_keyfile_json(self.keystore, password.encode('UTF-8'))
             self.locked = False
-            self.address  # get address such that it stays accessible after a subsequent lock
+            # get address such that it stays accessible after a subsequent lock
+            self._fill_address()
 
     def lock(self):
         """Relock an unlocked account.
@@ -240,15 +244,21 @@ class Account:
         self._privkey = None
         self.locked = True
 
+    def _fill_address(self):
+        if 'address' in self.keystore:
+            self._address = decode_hex(self.keystore['address'])
+        elif not self.locked:
+            self._address = privatekey_to_address(self.privkey)
+
     @property
-    def privkey(self):
+    def privkey(self) -> PrivateKey:
         """The account's private key or `None` if the account is locked"""
         if not self.locked:
             return self._privkey
         return None
 
     @property
-    def pubkey(self):
+    def pubkey(self) -> PublicKey:
         """The account's public key or `None` if the account is locked"""
         if not self.locked:
             return privatekey_to_publickey(self.privkey)
@@ -260,14 +270,9 @@ class Account:
         """The account's address or `None` if the address is not stored in the key file and cannot
         be reconstructed (because the account is locked)
         """
-        if self._address:
-            pass
-        elif 'address' in self.keystore:
-            self._address = decode_hex(self.keystore['address'])
-        elif not self.locked:
-            self._address = privatekey_to_address(self.privkey)
-        else:
-            return None
+        if not self._address:
+            self._fill_address()
+
         return self._address
 
     @property

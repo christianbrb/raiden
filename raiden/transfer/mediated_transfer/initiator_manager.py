@@ -26,13 +26,14 @@ from raiden.utils.typing import (
     List,
     Optional,
     SecretHash,
+    TokenNetworkID,
     cast,
 )
 
 
 def clear_if_finalized(
         iteration: TransitionResult,
-) -> TransitionResult[Optional[InitiatorPaymentState]]:
+) -> TransitionResult[InitiatorPaymentState]:
     """ Clear the initiator payment task if all transfers have been finalized
     or expired. """
     state = cast(InitiatorPaymentState, iteration.new_state)
@@ -79,7 +80,7 @@ def events_for_cancel_current_route(
 
 def cancel_current_route(
         payment_state: InitiatorPaymentState,
-        initiator_state: InitiatorPaymentState,
+        initiator_state: InitiatorTransferState,
 ) -> List[Event]:
     """ Cancel current route.
 
@@ -140,7 +141,7 @@ def subdispatch_to_initiatortransfer(
         state_change: StateChange,
         channelidentifiers_to_channels: ChannelMap,
         pseudo_random_generator: random.Random,
-) -> TransitionResult[InitiatorPaymentState]:
+) -> TransitionResult[InitiatorTransferState]:
     channel_identifier = initiator_state.channel_identifier
     channel_state = channelidentifiers_to_channels.get(channel_identifier)
     if not channel_state:
@@ -198,12 +199,12 @@ def handle_block(
 
 
 def handle_init(
-        payment_state: InitiatorPaymentState,
+        payment_state: Optional[InitiatorPaymentState],
         state_change: ActionInitInitiator,
         channelidentifiers_to_channels: ChannelMap,
         pseudo_random_generator: random.Random,
         block_number: BlockNumber,
-) -> TransitionResult[Optional[InitiatorPaymentState]]:
+) -> TransitionResult[InitiatorPaymentState]:
     events: List[Event]
     if payment_state is None:
         sub_iteration = initiator.try_new_route(
@@ -250,7 +251,7 @@ def handle_cancelpayment(
 
             cancel = EventPaymentSentFailed(
                 payment_network_identifier=channel_state.payment_network_identifier,
-                token_network_identifier=channel_state.token_network_identifier,
+                token_network_identifier=TokenNetworkID(channel_state.token_network_identifier),
                 identifier=transfer_description.payment_identifier,
                 target=transfer_description.target,
                 reason='user canceled payment',
@@ -309,13 +310,14 @@ def handle_transferrefundcancelroute(
 
     old_description = initiator_state.transfer_description
     transfer_description = TransferDescriptionWithSecretState(
-        old_description.payment_network_identifier,
-        old_description.payment_identifier,
-        old_description.amount,
-        old_description.token_network_identifier,
-        old_description.initiator,
-        old_description.target,
-        state_change.secret,
+        payment_network_identifier=old_description.payment_network_identifier,
+        payment_identifier=old_description.payment_identifier,
+        amount=old_description.amount,
+        token_network_identifier=old_description.token_network_identifier,
+        allocated_fee=old_description.allocated_fee,
+        initiator=old_description.initiator,
+        target=old_description.target,
+        secret=state_change.secret,
     )
 
     sub_iteration = maybe_try_new_route(
@@ -369,6 +371,7 @@ def handle_lock_expired(
         state_change=state_change,
         block_number=block_number,
     )
+    assert result.new_state, 'handle_receive_lock_expired should not delete the task'
 
     if not channel.get_lock(result.new_state.partner_state, secrethash):
         transfer = initiator_state.transfer
@@ -464,76 +467,85 @@ def handle_secretrequest(
 
 
 def state_transition(
-        payment_state: InitiatorPaymentState,
+        payment_state: Optional[InitiatorPaymentState],
         state_change: StateChange,
         channelidentifiers_to_channels: ChannelMap,
         pseudo_random_generator: random.Random,
         block_number: BlockNumber,
-) -> TransitionResult[Optional[InitiatorPaymentState]]:
+) -> TransitionResult[InitiatorPaymentState]:
     # pylint: disable=unidiomatic-typecheck
     if type(state_change) == Block:
         assert isinstance(state_change, Block), MYPY_ANNOTATION
+        assert payment_state, 'Block state changes should be accompanied by a valid payment state'
         iteration = handle_block(
-            payment_state,
-            state_change,
-            channelidentifiers_to_channels,
-            pseudo_random_generator,
+            payment_state=payment_state,
+            state_change=state_change,
+            channelidentifiers_to_channels=channelidentifiers_to_channels,
+            pseudo_random_generator=pseudo_random_generator,
         )
     elif type(state_change) == ActionInitInitiator:
         assert isinstance(state_change, ActionInitInitiator), MYPY_ANNOTATION
         iteration = handle_init(
-            payment_state,
-            state_change,
-            channelidentifiers_to_channels,
-            pseudo_random_generator,
-            block_number,
+            payment_state=payment_state,
+            state_change=state_change,
+            channelidentifiers_to_channels=channelidentifiers_to_channels,
+            pseudo_random_generator=pseudo_random_generator,
+            block_number=block_number,
         )
     elif type(state_change) == ReceiveSecretRequest:
         assert isinstance(state_change, ReceiveSecretRequest), MYPY_ANNOTATION
+        assert payment_state, 'ReceiveSecretRequest should be accompanied by a valid payment state'
         iteration = handle_secretrequest(
-            payment_state,
-            state_change,
-            channelidentifiers_to_channels,
-            pseudo_random_generator,
+            payment_state=payment_state,
+            state_change=state_change,
+            channelidentifiers_to_channels=channelidentifiers_to_channels,
+            pseudo_random_generator=pseudo_random_generator,
         )
     elif type(state_change) == ReceiveTransferRefundCancelRoute:
         assert isinstance(state_change, ReceiveTransferRefundCancelRoute), MYPY_ANNOTATION
+        msg = 'ReceiveTransferRefundCancelRoute should be accompanied by a valid payment state'
+        assert payment_state, msg
         iteration = handle_transferrefundcancelroute(
-            payment_state,
-            state_change,
-            channelidentifiers_to_channels,
-            pseudo_random_generator,
-            block_number,
+            payment_state=payment_state,
+            state_change=state_change,
+            channelidentifiers_to_channels=channelidentifiers_to_channels,
+            pseudo_random_generator=pseudo_random_generator,
+            block_number=block_number,
         )
     elif type(state_change) == ActionCancelPayment:
         assert isinstance(state_change, ActionCancelPayment), MYPY_ANNOTATION
+        assert payment_state, 'ActionCancelPayment should be accompanied by a valid payment state'
         iteration = handle_cancelpayment(
-            payment_state,
-            channelidentifiers_to_channels,
+            payment_state=payment_state,
+            channelidentifiers_to_channels=channelidentifiers_to_channels,
         )
     elif type(state_change) == ReceiveSecretReveal:
         assert isinstance(state_change, ReceiveSecretReveal), MYPY_ANNOTATION
+        assert payment_state, 'ReceiveSecretReveal should be accompanied by a valid payment state'
         iteration = handle_offchain_secretreveal(
-            payment_state,
-            state_change,
-            channelidentifiers_to_channels,
-            pseudo_random_generator,
+            payment_state=payment_state,
+            state_change=state_change,
+            channelidentifiers_to_channels=channelidentifiers_to_channels,
+            pseudo_random_generator=pseudo_random_generator,
         )
     elif type(state_change) == ReceiveLockExpired:
         assert isinstance(state_change, ReceiveLockExpired), MYPY_ANNOTATION
+        assert payment_state, 'ReceiveLockExpired should be accompanied by a valid payment state'
         iteration = handle_lock_expired(
-            payment_state,
-            state_change,
-            channelidentifiers_to_channels,
-            block_number,
+            payment_state=payment_state,
+            state_change=state_change,
+            channelidentifiers_to_channels=channelidentifiers_to_channels,
+            block_number=block_number,
         )
     elif type(state_change) == ContractReceiveSecretReveal:
         assert isinstance(state_change, ContractReceiveSecretReveal), MYPY_ANNOTATION
+        msg = 'ContractReceiveSecretReveal should be accompanied by a valid payment state'
+        assert payment_state, msg
         iteration = handle_onchain_secretreveal(
-            payment_state,
-            state_change,
-            channelidentifiers_to_channels,
-            pseudo_random_generator,
+            payment_state=payment_state,
+            state_change=state_change,
+            channelidentifiers_to_channels=channelidentifiers_to_channels,
+            pseudo_random_generator=pseudo_random_generator,
         )
     else:
         iteration = TransitionResult(payment_state, list())

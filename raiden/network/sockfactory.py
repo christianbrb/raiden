@@ -6,6 +6,7 @@ import structlog
 
 from raiden.exceptions import RaidenServicePortInUseError, STUNUnavailableException
 from raiden.network import stunsock, upnpsock
+from raiden.utils.typing import Host, Port
 
 log = structlog.get_logger(__name__)
 
@@ -38,7 +39,7 @@ class SocketFactory:
         'ext': ['ext'],
     }
 
-    def __init__(self, source_ip, source_port, strategy='auto', **kwargs):
+    def __init__(self, source_ip: Host, source_port: Port, strategy='auto', **kwargs):
         """
         Create a port mapped socket via selectable strategy.
         Args:
@@ -108,7 +109,7 @@ class SocketFactory:
     def map_upnp(self):
         upnp = upnpsock.connect()
         if upnp is None:
-            return
+            return None
 
         router, location = upnp
         try:
@@ -132,6 +133,8 @@ class SocketFactory:
                 router_location=location,
             )
 
+        return None
+
     def unmap_upnp(self):
         upnpsock.release_port(self.storage['router'], self.storage['external_port'])
 
@@ -147,6 +150,8 @@ class SocketFactory:
                 return PortMappedSocket(self.socket, 'STUN', external_ip, external_port, **nat)
         except STUNUnavailableException:
             pass
+
+        return None
 
     def unmap_stun(self):
         pass

@@ -6,7 +6,7 @@ from raiden.constants import RAIDEN_DB_VERSION, SQLITE_MIN_REQUIRED_VERSION
 from raiden.exceptions import InvalidDBData, InvalidNumberInput
 from raiden.storage.utils import DB_SCRIPT_CREATE_TABLES, TimestampedEvent
 from raiden.utils import get_system_spec
-from raiden.utils.typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
+from raiden.utils.typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple, Union
 
 from .serialize import SerializationBase
 
@@ -105,13 +105,12 @@ class SQLiteStorage(SerializationBase):
         self.conn = conn
         self.write_lock = threading.Lock()
         self.in_transaction = False
-        self.update_version()
 
     def update_version(self):
         cursor = self.conn.cursor()
         cursor.execute(
-            'INSERT OR REPLACE INTO settings(name, value) VALUES(?, ?)',
-            ('version', str(RAIDEN_DB_VERSION)),
+            'INSERT OR REPLACE INTO settings(name, value) VALUES("version", ?)',
+            (str(RAIDEN_DB_VERSION), ),
         )
         self.maybe_commit()
 
@@ -125,7 +124,7 @@ class SQLiteStorage(SerializationBase):
     def get_version(self) -> int:
         cursor = self.conn.cursor()
         query = cursor.execute(
-            'SELECT value FROM settings WHERE name=?;', ('version',),
+            'SELECT value FROM settings WHERE name="version";',
         )
         query = query.fetchall()
         # If setting is not set, it's the latest version
@@ -285,7 +284,7 @@ class SQLiteStorage(SerializationBase):
         limit, offset = _sanitize_limit_and_offset(limit, offset)
         cursor = self.conn.cursor()
         where_clauses = []
-        args = []
+        args: List[Union[str, int]] = []
         if filters:
             for field, value in filters:
                 where_clauses.append(f'json_extract(data, ?) LIKE ?')
@@ -310,7 +309,7 @@ class SQLiteStorage(SerializationBase):
 
     def get_latest_state_change_by_data_field(
             self,
-            filters: Dict[str, str],
+            filters: Dict[str, Any],
     ) -> StateChangeRecord:
         """ Return all state changes filtered by a named field and value."""
         cursor = self.conn.cursor()
@@ -573,7 +572,7 @@ class SQLiteStorage(SerializationBase):
             cursor.execute('BEGIN')
             yield
             cursor.execute('COMMIT')
-        except Exception:
+        except:  # noqa
             cursor.execute('ROLLBACK')
             raise
         finally:

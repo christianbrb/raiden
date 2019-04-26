@@ -3,26 +3,29 @@ import os
 import re
 import string
 import sys
+from enum import Enum
 from ipaddress import AddressValueError, IPv4Address
 from itertools import groupby
 from pathlib import Path
 from string import Template
-from typing import Any, Callable, Dict, List, Tuple, Union
+from typing import Any, Callable, Dict, List, Tuple, TypeVar, Union
 
 import click
 import requests
 from click import BadParameter
 from click._compat import term_len
 from click.formatting import iter_rows, measure_table, wrap_text
+from eth_utils import is_checksum_address
 from pytoml import TomlError, load
 from web3.gas_strategies.time_based import fast_gas_price_strategy, medium_gas_price_strategy
 
-from raiden.constants import Environment, RoutingMode
 from raiden.exceptions import InvalidAddress
 from raiden.utils import address_checksum_and_decode
 from raiden_contracts.constants import NETWORKNAME_TO_ID
 
 LOG_CONFIG_OPTION_NAME = 'log_config'
+
+T_Enum = TypeVar('T_Enum', bound=Enum)
 
 
 class HelpFormatter(click.HelpFormatter):
@@ -273,20 +276,16 @@ class NetworkChoiceType(click.Choice):
             return NETWORKNAME_TO_ID[network_name]
 
 
-class EnvironmentChoiceType(click.Choice):
+class EnumChoiceType(click.Choice):
+    def __init__(self, enum_type: T_Enum, case_sensitive=True):
+        self._enum_type = enum_type
+        super().__init__([choice.value for choice in enum_type], case_sensitive)
+
     def convert(self, value, param, ctx):
         try:
-            return Environment(value)
+            return self._enum_type(value)
         except ValueError:
-            self.fail(f"'{value}' is not a valid environment type", param, ctx)
-
-
-class RoutingModeChoiceType(click.Choice):
-    def convert(self, value, param, ctx):
-        try:
-            return RoutingMode(value)
-        except ValueError:
-            self.fail(f"'{value}' is not a valid routing mode type", param, ctx)
+            self.fail(f"'{value}' is not a valid {self._enum_type.__name__.lower()}", param, ctx)
 
 
 class GasPriceChoiceType(click.Choice):
@@ -451,6 +450,19 @@ def get_matrix_servers(url: str) -> List[str]:
     return available_servers
 
 
+def validate_pfs_options(options):
+    eth_address = options.get('pathfinding-eth-address')
+    if options.get('pathfinding-service-address') not in ('auto', None) and eth_address is None:
+        raise BadParameter(
+            '"--pathfinding-service-address" set manually '
+            'but no "--pathfinding-eth-address" given.',
+        )
+    if eth_address is not None and not is_checksum_address(eth_address):
+        raise BadParameter(
+            '"--pathfinding-eth-address" value is not a valid EIP55 address.',
+        )
+
+
 def validate_option_dependencies(
         command_function: Union[click.Command, click.Group],
         ctx,
@@ -483,6 +495,8 @@ def validate_option_dependencies(
                     ctx,
                     param,
                 )
+
+    validate_pfs_options(cli_params)
 
 
 ADDRESS_TYPE = AddressType()

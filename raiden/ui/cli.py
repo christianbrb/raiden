@@ -1,62 +1,57 @@
-import contextlib
 import json
 import os
 import sys
 import textwrap
 import traceback
-from copy import deepcopy
-from io import StringIO
 from tempfile import mktemp
-from typing import Any, Dict, List, Tuple
+from typing import Any, AnyStr, Dict, List, Optional, Tuple
 
 import click
 import structlog
 import urllib3
-from eth_utils import to_canonical_address, to_checksum_address
 from mirakuru import ProcessExitedWithError
 from urllib3.exceptions import InsecureRequestWarning
 
-from raiden.api.rest import APIServer, RestAPI
-from raiden.app import App
-from raiden.constants import Environment, RoutingMode
+from raiden.constants import Environment, EthClient, RoutingMode
 from raiden.exceptions import ReplacementTransactionUnderpriced, TransactionAlreadyPending
 from raiden.log_config import configure_logging
 from raiden.network.sockfactory import SocketFactory
 from raiden.network.utils import get_free_port
 from raiden.settings import (
-    DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
-    DEVELOPMENT_CONTRACT_VERSION,
+    DEFAULT_PATHFINDING_IOU_TIMEOUT,
+    DEFAULT_PATHFINDING_MAX_FEE,
+    DEFAULT_PATHFINDING_MAX_PATHS,
     INITIAL_PORT,
 )
-from raiden.tests.utils.transport import make_requests_insecure, matrix_server_starter
-from raiden.utils import get_system_spec, merge_dict, split_endpoint
+from raiden.ui.startup import environment_type_to_contracts_version
+from raiden.utils import get_system_spec
 from raiden.utils.cli import (
     ADDRESS_TYPE,
     LOG_LEVEL_CONFIG_TYPE,
-    EnvironmentChoiceType,
+    EnumChoiceType,
     GasPriceChoiceType,
     MatrixServerType,
     NATChoiceType,
     NetworkChoiceType,
     PathRelativePath,
-    RoutingModeChoiceType,
     apply_config_file,
     group,
     option,
     option_group,
     validate_option_dependencies,
 )
-from raiden.waiting import wait_for_block
-from raiden_contracts.constants import CONTRACT_ENDPOINT_REGISTRY, CONTRACT_TOKEN_NETWORK_REGISTRY
 
-from .app import run_app
 from .runners import EchoNodeRunner, MatrixRunner, UDPRunner
 
 log = structlog.get_logger(__name__)
 
 
 OPTION_DEPENDENCIES: Dict[str, List[Tuple[str, Any]]] = {
-    'pathfinding-service-address': [('transport', 'matrix')],
+    'pathfinding-service-address': [('transport', 'matrix'), ('routing-mode', RoutingMode.PFS)],
+    'pathfinding-eth-address': [('transport', 'matrix'), ('routing-mode', RoutingMode.PFS)],
+    'pathfinding-max-paths': [('transport', 'matrix'), ('routing-mode', RoutingMode.PFS)],
+    'pathfinding-max-fee': [('transport', 'matrix'), ('routing-mode', RoutingMode.PFS)],
+    'pathfinding-iou-timeout': [('transport', 'matrix'), ('routing-mode', RoutingMode.PFS)],
     'enable-monitoring': [('transport', 'matrix')],
     'matrix-server': [('transport', 'matrix')],
     'listen-address': [('transport', 'udp')],
@@ -161,7 +156,7 @@ def options(func):
         ),
         option(
             '--transport',
-            help='Transport system to use. Matrix is experimental.',
+            help='Transport system to use. UDP is not recommended',
             type=click.Choice(['udp', 'matrix']),
             default='matrix',
             show_default=True,
@@ -174,10 +169,18 @@ def options(func):
                 '"mainnet" - network id: 1\n'
                 '"ropsten" - network id: 3\n'
                 '"rinkeby" - network id: 4\n'
+                '"goerli" - network id: 5\n'
                 '"kovan" - network id: 42\n'
                 '"<NETWORK_ID>": use the given network id directly\n'
             ),
-            type=NetworkChoiceType(['mainnet', 'ropsten', 'rinkeby', 'kovan', '<NETWORK_ID>']),
+            type=NetworkChoiceType([
+                'mainnet',
+                'ropsten',
+                'rinkeby',
+                'goerli',
+                'kovan',
+                '<NETWORK_ID>',
+            ]),
             default='mainnet',
             show_default=True,
         ),
@@ -188,19 +191,8 @@ def options(func):
                 'The "production" setting adds some safety measures and is mainly intended '
                 'for running Raiden on the mainnet.\n'
             ),
-            type=EnvironmentChoiceType([e.value for e in Environment]),
+            type=EnumChoiceType(Environment),
             default=Environment.PRODUCTION.value,
-            show_default=True,
-        ),
-        option(
-            '--routing-mode',
-            help=(
-                'Specify the routing mode to be used.\n'
-                '"basic" - use local routing'
-                '"pfs" - use the pathfinding service"'
-            ),
-            type=RoutingModeChoiceType([e.value for e in RoutingMode]),
-            default=RoutingMode.BASIC.value,
             show_default=True,
         ),
         option(
@@ -249,6 +241,17 @@ def options(func):
         option_group(
             'Raiden Services Options',
             option(
+                '--routing-mode',
+                help=(
+                    'Specify the routing mode to be used.\n'
+                    '"basic": use local routing\n'
+                    '"pfs": use the path finding service\n'
+                ),
+                type=EnumChoiceType(RoutingMode),
+                default=RoutingMode.BASIC.value,
+                show_default=True,
+            ),
+            option(
                 '--pathfinding-service-address',
                 help=(
                     'URL to the Raiden path finding service to request paths from.\n'
@@ -261,9 +264,34 @@ def options(func):
                 show_default=True,
             ),
             option(
+                '--pathfinding-eth-address',
+                help=(
+                    'Ethereum address to which to pay the fees of the path finding service.\n'
+                    'If the path finding service is chosen from the service registry contract, '
+                    'this option will be ignored. If the path finding service is configured '
+                    'manually, i. e. "--pathfinding-service-address" set to a value other than '
+                    '"auto", this argument must be set to a valid EIP55 address.'
+                ),
+                type=str,
+            ),
+            option(
                 '--pathfinding-max-paths',
                 help='Set maximum number of paths to be requested from the path finding service.',
-                default=3,
+                default=DEFAULT_PATHFINDING_MAX_PATHS,
+                type=int,
+                show_default=True,
+            ),
+            option(
+                '--pathfinding-max-fee',
+                help='Set max fee per request paid to the path finding service.',
+                default=DEFAULT_PATHFINDING_MAX_FEE,
+                type=int,
+                show_default=True,
+            ),
+            option(
+                '--pathfinding-iou-timeout',
+                help='Number of blocks before a new IOU to the path finding service expires.',
+                default=DEFAULT_PATHFINDING_IOU_TIMEOUT,
                 type=int,
                 show_default=True,
             ),
@@ -525,16 +553,18 @@ def version(short):
     is_flag=True,
     help='Drop into pdb on errors.',
 )
+@option(
+    '--eth-client',
+    type=EnumChoiceType(EthClient),
+    default=EthClient.GETH.value,
+    show_default=True,
+    help='Which Ethereum client to run for the smoketests',
+)
 @click.pass_context
-def smoketest(ctx, debug):
+def smoketest(ctx, debug, eth_client):
     """ Test, that the raiden installation is sane. """
-    from raiden.api.python import RaidenAPI
-    from raiden.tests.utils.smoketest import (
-        TEST_PARTNER_ADDRESS,
-        TEST_DEPOSIT_AMOUNT,
-        run_smoketests,
-        setup_testchain_and_raiden,
-    )
+    from raiden.tests.utils.smoketest import setup_testchain_and_raiden, run_smoketest
+    from raiden.tests.utils.transport import make_requests_insecure, matrix_server_starter
 
     report_file = mktemp(suffix='.log')
     configure_logging(
@@ -542,12 +572,9 @@ def smoketest(ctx, debug):
         log_file=report_file,
         disable_debug_logfile=ctx.parent.params['disable_debug_logfile'],
     )
-    click.secho(
-        f'Report file: {report_file}',
-        fg='yellow',
-    )
+    click.secho(f'Report file: {report_file}', fg='yellow')
 
-    def append_report(subject, data):
+    def append_report(subject: str, data: Optional[AnyStr] = None):
         with open(report_file, 'a', encoding='UTF-8') as handler:
             handler.write(f'{f" {subject.upper()} ":=^80}{os.linesep}')
             if data is not None:
@@ -556,7 +583,7 @@ def smoketest(ctx, debug):
                 handler.writelines([data + os.linesep])
 
     append_report('Raiden version', json.dumps(get_system_spec()))
-    append_report('Raiden log', None)
+    append_report('Raiden log')
 
     step_count = 7
     if ctx.parent.params['transport'] == 'matrix':
@@ -565,7 +592,7 @@ def smoketest(ctx, debug):
 
     stdout = sys.stdout
 
-    def print_step(description, error=False):
+    def print_step(description: str, error: bool = False) -> None:
         nonlocal step
         step += 1
         click.echo(
@@ -577,137 +604,79 @@ def smoketest(ctx, debug):
         )
 
     print_step('Getting smoketest configuration')
-
-    result = setup_testchain_and_raiden(
-        ctx.parent.params['transport'],
-        ctx.parent.params['matrix_server'],
-        print_step,
-        # smoke test should work with pre-limits contract version
-        DEVELOPMENT_CONTRACT_VERSION,
+    contracts_version = environment_type_to_contracts_version(
+        ctx.parent.params['environment_type'],
     )
-    args = result['args']
-    contract_addresses = result['contract_addresses']
-    token = result['token']
-    ethereum = result['ethereum']
 
-    for option_ in run.params:
-        if option_.name in args.keys():
-            args[option_.name] = option_.process_value(ctx, args[option_.name])
-        else:
-            args[option_.name] = option_.default
+    with setup_testchain_and_raiden(
+            transport=ctx.parent.params['transport'],
+            eth_client=eth_client,
+            matrix_server=ctx.parent.params['matrix_server'],
+            contracts_version=contracts_version,
+            print_step=print_step,
+    ) as result:
+        args = result['args']
+        contract_addresses = result['contract_addresses']
+        token = result['token']
+        ethereum_nodes = result['ethereum_nodes']
+        # Also respect environment type
+        args['environment_type'] = ctx.parent.params['environment_type']
+        for option_ in run.params:
+            if option_.name in args.keys():
+                args[option_.name] = option_.process_value(ctx, args[option_.name])
+            else:
+                args[option_.name] = option_.default
 
-    port = next(get_free_port('127.0.0.1', 5001))
+        port = next(get_free_port(5001))
 
-    args['api_address'] = 'localhost:' + str(port)
+        args['api_address'] = 'localhost:' + str(port)
 
-    def _run_smoketest():
-        print_step('Starting Raiden')
-
-        config = deepcopy(App.DEFAULT_CONFIG)
-        if args.get('extra_config', dict()):
-            merge_dict(config, args['extra_config'])
-            del args['extra_config']
-        args['config'] = config
-        # Should use basic routing in the smoke test for now
-        # TODO: If we ever utilize a PFS in the smoke test we
-        # need to use the deployed service registry, register the
-        # PFS service there and then change this argument.
-        args['routing_mode'] = RoutingMode.BASIC
-
-        raiden_stdout = StringIO()
-        with contextlib.redirect_stdout(raiden_stdout):
-            app = run_app(**args)
-
-            try:
-                raiden_api = RaidenAPI(app.raiden)
-                rest_api = RestAPI(raiden_api)
-                (api_host, api_port) = split_endpoint(args['api_address'])
-                api_server = APIServer(rest_api, config={'host': api_host, 'port': api_port})
-                api_server.start()
-
-                block = app.raiden.get_block_number() + DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS
-                # Proxies now use the confirmed block hash to query the chain for
-                # prerequisite checks. Wait a bit here to make sure that the confirmed
-                # block hash contains the deployed token network or else things break
-                wait_for_block(
-                    raiden=app.raiden,
-                    block_number=block,
-                    retry_timeout=1.0,
-                )
-
-                raiden_api.channel_open(
-                    registry_address=contract_addresses[CONTRACT_TOKEN_NETWORK_REGISTRY],
-                    token_address=to_canonical_address(token.contract.address),
-                    partner_address=to_canonical_address(TEST_PARTNER_ADDRESS),
-                )
-                raiden_api.set_total_channel_deposit(
-                    contract_addresses[CONTRACT_TOKEN_NETWORK_REGISTRY],
-                    to_canonical_address(token.contract.address),
-                    to_canonical_address(TEST_PARTNER_ADDRESS),
-                    TEST_DEPOSIT_AMOUNT,
-                )
-                token_addresses = [to_checksum_address(token.contract.address)]
-
-                success = False
-                print_step('Running smoketest')
-                error = run_smoketests(
-                    app.raiden,
-                    args['transport'],
-                    token_addresses,
-                    contract_addresses[CONTRACT_ENDPOINT_REGISTRY],
+        if args['transport'] == 'udp':
+            with SocketFactory('127.0.0.1', port, strategy='none') as mapped_socket:
+                args['mapped_socket'] = mapped_socket
+                success = run_smoketest(
+                    print_step=print_step,
+                    append_report=append_report,
+                    args=args,
+                    contract_addresses=contract_addresses,
+                    token=token,
                     debug=debug,
-                    orig_stdout=stdout,
+                    ethereum_nodes=ethereum_nodes,
                 )
-                if error is not None:
-                    append_report('Smoketest assertion error', error)
-                else:
-                    success = True
-            finally:
-                app.stop()
-                app.raiden.get()
-                node = ethereum[0]
-                node.send_signal(2)
-                err, out = node.communicate()
-
-                append_report('Ethereum stdout', out)
-                append_report('Ethereum stderr', err)
-        append_report('Raiden Node stdout', raiden_stdout.getvalue())
-        if success:
-            print_step(f'Smoketest successful')
-        else:
-            print_step(f'Smoketest had errors', error=True)
-        return success
-
-    if args['transport'] == 'udp':
-        with SocketFactory('127.0.0.1', port, strategy='none') as mapped_socket:
-            args['mapped_socket'] = mapped_socket
-            success = _run_smoketest()
-    elif args['transport'] == 'matrix':
-        args['mapped_socket'] = None
-        print_step('Starting Matrix transport')
-        try:
-            with matrix_server_starter() as server_urls:
-                # Disable TLS verification so we can connect to the self signed certificate
-                make_requests_insecure()
-                urllib3.disable_warnings(InsecureRequestWarning)
-                args['extra_config'] = {
-                    'transport': {
-                        'matrix': {
-                            'available_servers': server_urls,
+        elif args['transport'] == 'matrix':
+            args['mapped_socket'] = None
+            print_step('Starting Matrix transport')
+            try:
+                with matrix_server_starter() as server_urls:
+                    # Disable TLS verification so we can connect to the self signed certificate
+                    make_requests_insecure()
+                    urllib3.disable_warnings(InsecureRequestWarning)
+                    args['extra_config'] = {
+                        'transport': {
+                            'matrix': {
+                                'available_servers': server_urls,
+                            },
                         },
-                    },
-                }
-                success = _run_smoketest()
-        except (PermissionError, ProcessExitedWithError, FileNotFoundError):
-            append_report('Matrix server start exception', traceback.format_exc())
-            print_step(
-                f'Error during smoketest setup, report was written to {report_file}',
-                error=True,
-            )
-            success = False
-    else:
-        # Shouldn't happen
-        raise RuntimeError(f"Invalid transport type '{args['transport']}'")
+                    }
+                    success = run_smoketest(
+                        print_step=print_step,
+                        append_report=append_report,
+                        args=args,
+                        contract_addresses=contract_addresses,
+                        token=token,
+                        debug=debug,
+                        ethereum_nodes=ethereum_nodes,
+                    )
+            except (PermissionError, ProcessExitedWithError, FileNotFoundError):
+                append_report('Matrix server start exception', traceback.format_exc())
+                print_step(
+                    f'Error during smoketest setup, report was written to {report_file}',
+                    error=True,
+                )
+                success = False
+        else:
+            # Shouldn't happen
+            raise RuntimeError(f"Invalid transport type '{args['transport']}'")
 
     if not success:
         sys.exit(1)

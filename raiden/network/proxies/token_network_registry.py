@@ -16,16 +16,21 @@ from raiden.constants import (
     GENESIS_BLOCK_NUMBER,
     NULL_ADDRESS,
 )
-from raiden.exceptions import InvalidAddress, RaidenRecoverableError, RaidenUnrecoverableError
+from raiden.exceptions import (
+    InvalidAddress,
+    InvalidToken,
+    RaidenRecoverableError,
+    RaidenUnrecoverableError,
+)
+from raiden.network.proxies.token import Token
 from raiden.network.proxies.utils import compare_contract_versions
 from raiden.network.rpc.client import StatelessFilter, check_address_has_code
 from raiden.network.rpc.transactions import check_transaction_threw
 from raiden.utils import pex, safe_gas_limit
 from raiden.utils.typing import (
     Address,
-    Any,
     BlockSpecification,
-    List,
+    Dict,
     PaymentNetworkID,
     T_TargetAddress,
     TokenAddress,
@@ -105,7 +110,10 @@ class TokenNetworkRegistry:
         """
         return self._add_token(
             token_address=token_address,
-            additional_arguments=[channel_participant_deposit_limit, token_network_deposit_limit],
+            additional_arguments={
+                '_channel_participant_deposit_limit': channel_participant_deposit_limit,
+                '_token_network_deposit_limit': token_network_deposit_limit,
+            },
         )
 
     def add_token_without_limits(
@@ -119,18 +127,27 @@ class TokenNetworkRegistry:
         """
         return self._add_token(
             token_address=token_address,
-            additional_arguments=list(),
+            additional_arguments=dict(),
         )
 
     def _add_token(
             self,
             token_address: TokenAddress,
-            additional_arguments: List[Any],
+            additional_arguments: Dict,
     ) -> Address:
-        # given_block_identifier is not really used in this function yet as there
-        # are no preconditions to check with the given block
         if not is_binary_address(token_address):
             raise InvalidAddress('Expected binary address format for token')
+
+        token_proxy = Token(
+            jsonrpc_client=self.client,
+            token_address=token_address,
+            contract_manager=self.contract_manager,
+        )
+
+        if token_proxy.total_supply() == '':
+            raise InvalidToken(
+                'Given token address does not follow the ERC20 standard (missing totalSupply()',
+            )
 
         log_details = {
             'node': pex(self.node_address),
@@ -142,11 +159,12 @@ class TokenNetworkRegistry:
         checking_block = self.client.get_checking_block()
         error_prefix = 'Call to createERC20TokenNetwork will fail'
 
-        arguments = [token_address] + additional_arguments
+        kwarguments = {'_token_address': token_address}
+        kwarguments.update(additional_arguments)
         gas_limit = self.proxy.estimate_gas(
             checking_block,
             'createERC20TokenNetwork',
-            *arguments,
+            **kwarguments,
         )
 
         if gas_limit:
@@ -154,7 +172,7 @@ class TokenNetworkRegistry:
             transaction_hash = self.proxy.transact(
                 'createERC20TokenNetwork',
                 safe_gas_limit(gas_limit, GAS_REQUIRED_FOR_CREATE_ERC20_TOKEN_NETWORK),
-                *arguments,
+                **kwarguments,
             )
 
             self.client.poll(transaction_hash)

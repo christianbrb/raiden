@@ -775,6 +775,7 @@ def test_invalid_timeouts():
             payment_network_identifier=payment_network_identifier,
             reveal_timeout=large_reveal_timeout,
             settle_timeout=small_settle_timeout,
+            mediation_fee=0,
             our_state=our_state,
             partner_state=partner_state,
             open_transaction=opened_transaction,
@@ -794,6 +795,7 @@ def test_invalid_timeouts():
                 payment_network_identifier=payment_network_identifier,
                 reveal_timeout=invalid_value,
                 settle_timeout=settle_timeout,
+                mediation_fee=0,
                 our_state=our_state,
                 partner_state=partner_state,
                 open_transaction=opened_transaction,
@@ -811,6 +813,7 @@ def test_invalid_timeouts():
                 payment_network_identifier=payment_network_identifier,
                 reveal_timeout=reveal_timeout,
                 settle_timeout=invalid_value,
+                mediation_fee=0,
                 our_state=our_state,
                 partner_state=partner_state,
                 open_transaction=opened_transaction,
@@ -1698,7 +1701,7 @@ def test_get_amount_locked():
 
 
 def test_valid_lock_expired_for_unlocked_lock():
-    """ This tests that locked and unlocked locks hehave the same when
+    """ This tests that locked and unlocked locks behave the same when
     they are checked with `is_valid_lock_expired`.
     This tests issue #2828
     """

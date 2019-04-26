@@ -10,6 +10,15 @@ from raiden.utils import safe_gas_limit
 from raiden.utils.solc import compile_files_cwd
 
 # pylint: disable=unused-argument,protected-access
+SSTORE_COST = 20000
+
+
+def get_test_contract(name):
+    here = os.path.dirname(os.path.relpath(__file__))
+    contract_path = os.path.join(here, name)
+    contracts = compile_files_cwd([contract_path])
+
+    return contract_path, contracts
 
 
 def make_fixed_gas_price_strategy(gas_price):
@@ -29,13 +38,10 @@ def make_decreasing_gas_price_strategy(gas_price):
     return increasing_gas_price_strategy
 
 
-def deploy_rpc_test_contract(deploy_client):
-    here = os.path.dirname(os.path.relpath(__file__))
-    contract_path = os.path.join(here, 'RpcTest.sol')
-    contracts = compile_files_cwd([contract_path])
-
+def deploy_rpc_test_contract(deploy_client, name):
+    contract_path, contracts = get_test_contract(f'{name}.sol')
     contract_proxy, _ = deploy_client.deploy_solidity_contract(
-        'RpcTest',
+        name,
         contracts,
         libraries=dict(),
         constructor_parameters=None,
@@ -57,11 +63,11 @@ def get_list_of_block_numbers(item):
     return list()
 
 
-def test_call_invalid_selector(deploy_client, skip_if_parity):
+def test_call_invalid_selector(deploy_client):
     """ A JSON RPC call to a valid address but with an invalid selector returns
     the empty string.
     """
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
     address = contract_proxy.contract_address
     assert len(deploy_client.web3.eth.getCode(to_checksum_address(address))) > 0
 
@@ -92,9 +98,29 @@ def test_call_inexisting_address(deploy_client):
     assert deploy_client.web3.eth.call(transaction) == b''
 
 
-def test_call_throws(deploy_client, skip_if_parity):
-    """ A JSON RPC call to a function that throws returns the empty string. """
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+def test_call_with_a_block_number_before_smart_contract_deployed(deploy_client):
+    """ A JSON RPC call using a block number where the smart contract was not
+    yet deployed should raise.
+    """
+    contract_path, contracts = get_test_contract('RpcTest.sol')
+    contract_proxy, receipt = deploy_client.deploy_solidity_contract(
+        'RpcTest',
+        contracts,
+        libraries=dict(),
+        constructor_parameters=None,
+        contract_path=contract_path,
+    )
+
+    deploy_block = receipt['blockNumber']
+    assert contract_proxy.contract.functions.ret().call(block_identifier=deploy_block) == 1
+
+    with pytest.raises(Exception):
+        contract_proxy.contract.functions.ret().call(block_identifier=deploy_block - 1)
+
+
+def test_call_throws(deploy_client):
+    """ A JSON RPC call to a function that throws/gets reverted returns the empty string. """
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
 
     address = contract_proxy.contract_address
     assert len(deploy_client.web3.eth.getCode(to_checksum_address(address))) > 0
@@ -102,9 +128,9 @@ def test_call_throws(deploy_client, skip_if_parity):
     assert call() == []
 
 
-def test_estimate_gas_fail(deploy_client, skip_if_parity):
+def test_estimate_gas_fail(deploy_client):
     """ A JSON RPC estimate gas call for a throwing transaction returns None"""
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
 
     address = contract_proxy.contract_address
     assert len(deploy_client.web3.eth.getCode(to_checksum_address(address))) > 0
@@ -113,12 +139,12 @@ def test_estimate_gas_fail(deploy_client, skip_if_parity):
     assert not contract_proxy.estimate_gas(check_block, 'fail')
 
 
-def test_duplicated_transaction_same_gas_price_raises(deploy_client, skip_if_parity):
+def test_duplicated_transaction_same_gas_price_raises(deploy_client):
     """ If the same transaction is sent twice a JSON RPC error is raised. """
     gas_price = 2000000000
     gas_price_strategy = make_fixed_gas_price_strategy(gas_price)
     deploy_client.web3.eth.setGasPriceStrategy(gas_price_strategy)
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
 
     address = contract_proxy.contract_address
     assert len(deploy_client.web3.eth.getCode(to_checksum_address(address))) > 0
@@ -134,18 +160,20 @@ def test_duplicated_transaction_same_gas_price_raises(deploy_client, skip_if_par
     )
 
     check_block = deploy_client.get_checking_block()
-    startgas = safe_gas_limit(contract_proxy.estimate_gas(check_block, 'ret'))
+    gas_estimate = contract_proxy.estimate_gas(check_block, 'ret')
+    assert gas_estimate, 'Gas estimation should not fail here'
+    startgas = safe_gas_limit(gas_estimate)
 
+    contract_proxy.transact('ret', startgas)
     with pytest.raises(TransactionAlreadyPending):
         second_proxy.transact('ret', startgas)
-        contract_proxy.transact('ret', startgas)
 
 
 def test_duplicated_transaction_different_gas_price_raises(deploy_client):
     """ If the same transaction is sent twice a JSON RPC error is raised. """
     gas_price = 2000000000
     deploy_client.web3.eth.setGasPriceStrategy(make_decreasing_gas_price_strategy(gas_price))
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
 
     address = contract_proxy.contract_address
     assert len(deploy_client.web3.eth.getCode(to_checksum_address(address))) > 0
@@ -170,7 +198,7 @@ def test_duplicated_transaction_different_gas_price_raises(deploy_client):
 
 def test_transact_opcode(deploy_client):
     """ The receipt status field of a transaction that did not throw is 0x1 """
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
 
     address = contract_proxy.contract_address
     assert len(deploy_client.web3.eth.getCode(to_checksum_address(address))) > 0
@@ -186,7 +214,7 @@ def test_transact_opcode(deploy_client):
 
 def test_transact_throws_opcode(deploy_client):
     """ The receipt status field of a transaction that threw is 0x0 """
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
 
     address = contract_proxy.contract_address
     assert len(deploy_client.web3.eth.getCode(to_checksum_address(address))) > 0
@@ -202,7 +230,7 @@ def test_transact_throws_opcode(deploy_client):
 
 def test_transact_opcode_oog(deploy_client):
     """ The receipt status field of a transaction that did NOT throw is 0x0. """
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
 
     address = contract_proxy.contract_address
     assert len(deploy_client.web3.eth.getCode(to_checksum_address(address))) > 0
@@ -219,7 +247,7 @@ def test_transact_opcode_oog(deploy_client):
 
 def test_filter_start_block_inclusive(deploy_client):
     """ A filter includes events from the block given in from_block """
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
 
     check_block = deploy_client.get_checking_block()
     # call the create event function twice and wait for confirmation each time
@@ -252,7 +280,7 @@ def test_filter_start_block_inclusive(deploy_client):
 def test_filter_end_block_inclusive(deploy_client):
     """ A filter includes events from the block given in from_block
     until and including end_block. """
-    contract_proxy = deploy_rpc_test_contract(deploy_client)
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcTest')
 
     check_block = deploy_client.get_checking_block()
     # call the create event function twice and wait for confirmation each time
@@ -280,3 +308,30 @@ def test_filter_end_block_inclusive(deploy_client):
         to_block=block_number_event_2,
     )
     assert get_list_of_block_numbers(result_3) == block_number_events
+
+
+def test_estimate_gas_fails_if_startgas_is_higher_than_blockgaslimit(
+        deploy_client,
+        skip_if_not_geth,  # pylint: disable=unused-argument
+):
+    """ Gas estimation fails if the transaction execution requires more gas
+    then the block's gas limit.
+    """
+    contract_proxy = deploy_rpc_test_contract(deploy_client, 'RpcWithStorageTest')
+
+    latest_block_hash = deploy_client.blockhash_from_blocknumber('latest')
+    current_gas_limit = deploy_client.get_block(latest_block_hash)['gasLimit']
+
+    # This number of iterations is an over estimation to accomodate for races,
+    # this cannot be significantly large because on parity it is a blocking
+    # call.
+    number_iterations = current_gas_limit // SSTORE_COST
+
+    # This race condition cannot be fixed because geth does not support
+    # block_identifier for eth_estimateGas. The test should not be flaky
+    # because number_iterations is order of magnitudes larger then it needs to
+    # be
+    block_identifier = None
+
+    startgas = contract_proxy.estimate_gas(block_identifier, 'waste_storage', number_iterations)
+    assert startgas is None, 'estimate_gas must return empty if sending the transaction would fail'

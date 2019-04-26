@@ -3,12 +3,28 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
-from eth_utils import to_checksum_address
+from eth_utils import (
+    encode_hex,
+    is_checksum_address,
+    is_hex,
+    is_hex_address,
+    to_checksum_address,
+    to_hex,
+)
 
-from raiden.exceptions import ServiceRequestFailed
-from raiden.network.pathfinding import get_pfs_info, get_pfs_iou, update_iou
+from raiden.exceptions import ServiceRequestFailed, ServiceRequestIOURejected
+from raiden.network.pathfinding import (
+    MAX_PATHS_QUERY_ATTEMPTS,
+    PFSError,
+    get_last_iou,
+    get_pfs_info,
+    make_iou,
+    query_paths,
+    update_iou,
+)
 from raiden.routing import get_best_routes
 from raiden.tests.utils import factories
+from raiden.tests.utils.mocks import patched_get_for_succesful_pfs_info
 from raiden.transfer import token_network
 from raiden.transfer.state import (
     NODE_NETWORK_REACHABLE,
@@ -17,7 +33,14 @@ from raiden.transfer.state import (
     TokenNetworkState,
 )
 from raiden.transfer.state_change import ContractReceiveChannelNew, ContractReceiveRouteNew
-from raiden.utils import typing
+from raiden.utils import privatekey_to_address, typing
+from raiden.utils.typing import Address, TokenNetworkAddress
+from raiden_contracts.utils.proofs import sign_one_to_n_iou
+
+
+def assert_checksum_address_in_url(url):
+    message = 'URL does not contain properly encoded address.'
+    assert any(is_checksum_address(token) for token in url.split('/')), message
 
 
 def create_square_network_topology(
@@ -145,7 +168,7 @@ def create_square_network_topology(
 CONFIG = {
     'services': {
         'pathfinding_service_address': 'my-pfs',
-        'pathfinding_eth_address': to_checksum_address(factories.make_address()),
+        'pathfinding_eth_address': factories.make_checksum_address(),
         'pathfinding_max_paths': 3,
         'pathfinding_iou_timeout': 10,
         'pathfinding_max_fee': 50,
@@ -163,12 +186,24 @@ def get_best_routes_with_iou_request_mocked(
         amount,
         iou_json_data=None,
 ):
-    iou_response = Mock()
-    iou_response.configure_mock(status_code=200)
-    iou_response.json = Mock(return_value=iou_json_data or {})
 
-    with patch.object(requests, 'get', return_value=iou_response):
-        return get_best_routes(
+    def iou_side_effect(*_, **kwargs):
+        assert 'params' in kwargs
+        body = kwargs['params']
+
+        assert is_hex_address(body['sender'])
+        assert is_hex_address(body['receiver'])
+        assert 'timestamp' in body
+        assert is_hex(body['signature'])
+        assert len(body['signature']) == 65 * 2 + 2  # 65 hex encoded bytes with 0x prefix
+
+        return Mock(
+            json=Mock(return_value=iou_json_data or {}),
+            status_code=200,
+        )
+
+    with patch.object(requests, 'get', side_effect=iou_side_effect) as patched:
+        best_routes = get_best_routes(
             chain_state=chain_state,
             token_network_id=token_network_state.address,
             from_address=from_address,
@@ -178,6 +213,8 @@ def get_best_routes_with_iou_request_mocked(
             config=CONFIG,
             privkey=PRIVKEY,
         )
+        assert_checksum_address_in_url(patched.call_args[0][0])
+        return best_routes
 
 
 def test_get_pfs_info_success():
@@ -196,7 +233,7 @@ def test_get_pfs_info_success():
     response.configure_mock(status_code=200)
     response.json = Mock(return_value=json_data)
 
-    with patch.object(requests, 'get', return_value=response):
+    with patched_get_for_succesful_pfs_info():
         pathfinding_service_info = get_pfs_info('url')
 
         req_registry_address = '0xB9633dd9a9a71F22C933bF121d7a22008f66B908'
@@ -274,21 +311,23 @@ def test_routing_mocked_pfs_happy_path(
             amount=50,
         )
 
+    assert_checksum_address_in_url(patched.call_args[0][0])
+
     assert routes[0].node_address == address2
     assert routes[0].channel_identifier == channel_state2.identifier
     assert routes[1].node_address == address1
     assert routes[1].channel_identifier == channel_state1.identifier
 
     # Check for iou arguments in request payload
-    payload = patched.call_args[1]['data']
+    iou = patched.call_args[1]['json']['iou']
     config = CONFIG['services']
     assert all(
-        k in payload
+        k in iou
         for k in ('amount', 'expiration_block', 'signature', 'sender', 'receiver')
     )
-    assert payload['amount'] <= config['pathfinding_max_fee']
+    assert iou['amount'] <= config['pathfinding_max_fee']
     latest_expected_expiration = config['pathfinding_iou_timeout'] + chain_state.block_number
-    assert payload['expiration_block'] <= latest_expected_expiration
+    assert iou['expiration_block'] <= latest_expected_expiration
 
 
 def test_routing_mocked_pfs_happy_path_with_updated_iou(
@@ -299,11 +338,15 @@ def test_routing_mocked_pfs_happy_path_with_updated_iou(
     address1, address2, _ = addresses
     channel_state1, channel_state2 = channel_states
 
-    iou = dict(
-        amount=13,
-        expiration_block=110,
-        sender=to_checksum_address(our_address),
-        receiver=to_checksum_address(factories.UNIT_TRANSFER_TARGET),
+    iou = make_iou(
+        config=dict(
+            pathfinding_eth_address=to_checksum_address(factories.UNIT_TRANSFER_TARGET),
+            pathfinding_iou_timeout=100,
+            pathfinding_max_fee=13,
+        ),
+        our_address=factories.UNIT_TRANSFER_SENDER,
+        privkey=PRIVKEY,
+        block_number=10,
     )
     last_iou = copy(iou)
 
@@ -317,21 +360,23 @@ def test_routing_mocked_pfs_happy_path_with_updated_iou(
             iou_json_data=dict(last_iou=iou),
         )
 
+    assert_checksum_address_in_url(patched.call_args[0][0])
+
     assert routes[0].node_address == address2
     assert routes[0].channel_identifier == channel_state2.identifier
     assert routes[1].node_address == address1
     assert routes[1].channel_identifier == channel_state1.identifier
 
     # Check for iou arguments in request payload
-    payload = patched.call_args[1]['data']
+    payload = patched.call_args[1]['json']
     config = CONFIG['services']
     old_amount = last_iou['amount']
-    assert old_amount < payload['amount'] <= config['pathfinding_max_fee'] + old_amount
+    assert old_amount < payload['iou']['amount'] <= config['pathfinding_max_fee'] + old_amount
     assert all(
-        payload[k] == last_iou[k]
+        payload['iou'][k] == last_iou[k]
         for k in ('expiration_block', 'sender', 'receiver')
     )
-    assert 'signature' in payload
+    assert 'signature' in payload['iou']
 
 
 def test_routing_mocked_pfs_request_error(
@@ -550,10 +595,17 @@ def test_routing_mocked_pfs_unavailable_peer(
 
 def test_get_and_update_iou():
 
+    request_args = dict(
+        url='url',
+        token_network_address=factories.UNIT_TOKEN_NETWORK_ADDRESS,
+        sender=factories.make_checksum_address(),
+        receiver=factories.make_checksum_address(),
+        privkey=PRIVKEY,
+    )
     # RequestExceptions should be reraised as ServiceRequestFailed
     with pytest.raises(ServiceRequestFailed):
         with patch.object(requests, 'get', side_effect=requests.RequestException):
-            get_pfs_iou('url', factories.UNIT_TOKEN_NETWORK_ADDRESS)
+            get_last_iou(**request_args)
 
     # invalid JSON should raise a ServiceRequestFailed
     response = Mock()
@@ -561,34 +613,290 @@ def test_get_and_update_iou():
     response.json = Mock(side_effect=ValueError)
     with pytest.raises(ServiceRequestFailed):
         with patch.object(requests, 'get', return_value=response):
-            get_pfs_iou('url', factories.UNIT_TOKEN_NETWORK_ADDRESS)
+            get_last_iou(**request_args)
 
     response = Mock()
     response.configure_mock(status_code=200)
     response.json = Mock(return_value={'other_key': 'other_value'})
     with patch.object(requests, 'get', return_value=response):
-        iou = get_pfs_iou('url', factories.UNIT_TOKEN_NETWORK_ADDRESS)
+        iou = get_last_iou(**request_args)
     assert iou is None, 'get_pfs_iou should return None if pfs returns no iou.'
 
     response = Mock()
     response.configure_mock(status_code=200)
-    last_iou = dict(
-        amount=7,
-        sender=to_checksum_address(factories.UNIT_TRANSFER_INITIATOR),
-        receiver=to_checksum_address(factories.UNIT_TRANSFER_TARGET),
-        expiration_block=42,
+    last_iou = make_iou(
+        config=dict(
+            pathfinding_eth_address=to_checksum_address(factories.UNIT_TRANSFER_TARGET),
+            pathfinding_iou_timeout=500,
+            pathfinding_max_fee=100,
+        ),
+        our_address=factories.UNIT_TRANSFER_INITIATOR,
+        privkey=PRIVKEY,
+        block_number=10,
     )
     response.json = Mock(return_value=dict(last_iou=last_iou))
     with patch.object(requests, 'get', return_value=response):
-        iou = get_pfs_iou('url', factories.UNIT_TOKEN_NETWORK_ADDRESS)
+        iou = get_last_iou(**request_args)
     assert iou == last_iou
 
-    new_iou_1 = update_iou(iou, PRIVKEY, added_amount=10)
-    assert new_iou_1['amount'] == 17
+    new_iou_1 = update_iou(iou.copy(), PRIVKEY, added_amount=10)
+    assert new_iou_1['amount'] == last_iou['amount'] + 10
     assert all(new_iou_1[k] == iou[k] for k in ('expiration_block', 'sender', 'receiver'))
     assert 'signature' in new_iou_1
+    assert is_hex(new_iou_1['signature'])
 
     new_iou_2 = update_iou(iou, PRIVKEY, expiration_block=45)
     assert new_iou_2['expiration_block'] == 45
     assert all(new_iou_2[k] == iou[k] for k in ('amount', 'sender', 'receiver'))
     assert 'signature' in new_iou_2
+    assert is_hex(new_iou_2['signature'])
+
+
+def test_get_pfs_iou():
+    token_network_address = TokenNetworkAddress(bytes([1] * 20))
+    privkey = bytes([2] * 32)
+    sender = to_checksum_address(privatekey_to_address(privkey))
+    receiver = factories.make_checksum_address()
+    with patch('raiden.network.pathfinding.requests.get') as get_mock:
+        # No previous IOU
+        get_mock.return_value.json.return_value = {'last_iou': None}
+        assert get_last_iou(
+            'http://example.com', token_network_address, sender, receiver, PRIVKEY,
+        ) is None
+
+        # Previous IOU
+        iou = dict(sender=sender, receiver=receiver, amount=10, expiration_block=1000)
+        iou['signature'] = sign_one_to_n_iou(
+            privatekey=encode_hex(privkey),
+            sender=sender,
+            receiver=receiver,
+            amount=iou['amount'],
+            expiration=iou['expiration_block'],
+        )
+        get_mock.return_value.json.return_value = {'last_iou': iou}
+        assert get_last_iou(
+            'http://example.com', token_network_address, sender, receiver, PRIVKEY,
+        ) == iou
+
+
+def test_make_iou():
+    privkey = bytes([2] * 32)
+    sender = Address(privatekey_to_address(privkey))
+    receiver = Address(bytes([1] * 20))
+    config = {
+        'pathfinding_eth_address': encode_hex(receiver),
+        'pathfinding_iou_timeout': 10000,
+        'pathfinding_max_fee': 100,
+    }
+
+    iou = make_iou(config, our_address=sender, privkey=privkey, block_number=10)
+
+    assert iou['sender'] == to_checksum_address(sender)
+    assert iou['receiver'] == encode_hex(receiver)
+    assert 0 < iou['amount'] <= config['pathfinding_max_fee']
+
+
+def test_update_iou():
+    privkey = bytes([2] * 32)
+    sender = Address(privatekey_to_address(privkey))
+    receiver = Address(bytes([1] * 20))
+
+    # prepare iou
+    iou = {
+        'sender': encode_hex(sender),
+        'receiver': encode_hex(receiver),
+        'amount': 10,
+        'expiration_block': 1000,
+    }
+    iou['signature'] = encode_hex(sign_one_to_n_iou(
+        privatekey=encode_hex(privkey),
+        sender=iou['sender'],
+        receiver=iou['receiver'],
+        amount=iou['amount'],
+        expiration=iou['expiration_block'],
+    ))
+
+    # update and compare
+    added_amount = 10
+    new_iou = update_iou(iou=iou.copy(), privkey=privkey, added_amount=added_amount)
+    assert new_iou['amount'] == iou['amount'] + added_amount
+    assert new_iou['sender'] == iou['sender']
+    assert new_iou['receiver'] == iou['receiver']
+    assert new_iou['signature'] != iou['signature']
+
+    # Previous IOU with increased amount by evil PFS
+    tampered_iou = new_iou.copy()
+    tampered_iou['amount'] += 10
+    with pytest.raises(ServiceRequestFailed):
+        update_iou(iou=tampered_iou, privkey=privkey, added_amount=added_amount)
+
+
+def request_mock(response=None, status_code=200):
+    mock = Mock()
+    mock.configure_mock(status_code=status_code)
+    mock.json = Mock(return_value=response or {})
+    return mock
+
+
+def assert_failed_pfs_request(
+        paths_args: typing.Dict[str, typing.Any],
+        responses: typing.List[typing.Dict],
+        status_codes: typing.List[int] = (400, 400),
+        expected_requests: int = MAX_PATHS_QUERY_ATTEMPTS,
+        expected_get_iou_requests: int = None,
+        expected_success: bool = False,
+        exception_type: typing.Type = None,
+):
+    while len(responses) < MAX_PATHS_QUERY_ATTEMPTS:
+        responses.append(responses[0])
+    for response in responses:
+        if 'error_code' in response:
+            response['errors'] = 'broken iou'
+
+    path_mocks = [request_mock(*data) for data in zip(responses, status_codes)]
+
+    with patch.object(requests, 'get', return_value=request_mock()) as get_iou:
+        with patch.object(requests, 'post', side_effect=path_mocks) as post_paths:
+            if expected_success:
+                query_paths(**paths_args)
+            else:
+                with pytest.raises(exception_type or ServiceRequestFailed) as raised_exception:
+                    query_paths(**paths_args)
+                    assert 'broken iou' in str(raised_exception)
+            assert get_iou.call_count == expected_get_iou_requests or expected_requests
+            assert post_paths.call_count == expected_requests
+
+
+@pytest.fixture
+def pfs_max_fee():
+    return 1000
+
+
+@pytest.fixture
+def query_paths_args(token_network_state, our_address, pfs_max_fee):
+    service_config = dict(
+        pathfinding_service_address='mock.pathservice',
+        pathfinding_eth_address='0x22222222222222222222',
+        pathfinding_max_fee=pfs_max_fee,
+        pathfinding_max_paths=3,
+        pathfinding_iou_timeout=500,
+    )
+    return dict(
+        service_config=service_config,
+        our_address=to_hex(our_address),
+        privkey=PRIVKEY,
+        current_block_number=10,
+        token_network_address=token_network_state.address,
+        route_from=our_address,
+        route_to=factories.make_address(),
+        value=50,
+    )
+
+
+@pytest.fixture
+def valid_response_json():
+    return dict(result='some result')
+
+
+def test_query_paths_with_second_try(query_paths_args, valid_response_json):
+    " IOU rejection errors that are expected to result in an unaltered second attempt "
+    for try_again in (PFSError.BAD_IOU, PFSError.MISSING_IOU, PFSError.USE_THIS_IOU):
+        response = [dict(error_code=try_again.value)] * 2
+        assert_failed_pfs_request(
+            query_paths_args,
+            response,
+            expected_requests=2,
+            exception_type=ServiceRequestIOURejected,
+        )
+
+        response[1] = valid_response_json
+        assert_failed_pfs_request(query_paths_args, response, [400, 200], expected_success=True)
+
+
+def test_query_paths_with_scrapped_iou(query_paths_args, valid_response_json):
+    " Errors that will result in reattempting with a new iou "
+    for scrap_iou in (PFSError.IOU_ALREADY_CLAIMED, PFSError.IOU_EXPIRED_TOO_EARLY):
+        response = [dict(error_code=scrap_iou.value)] * 2
+        assert_failed_pfs_request(
+            query_paths_args,
+            response,
+            expected_requests=2,
+            expected_get_iou_requests=1,
+            exception_type=ServiceRequestIOURejected,
+        )
+
+        response[1] = valid_response_json
+        assert_failed_pfs_request(query_paths_args, response, [400, 200], expected_success=True)
+
+
+def test_query_paths_with_unrecoverable_pfs_error(query_paths_args):
+    " No retries after unrecoverable errors. "
+    for unrecoverable in (
+            PFSError.INVALID_REQUEST,
+            PFSError.INVALID_SIGNATURE,
+            PFSError.REQUEST_OUTDATED,
+    ):
+        response = [dict(error_code=unrecoverable.value)] * 2
+        assert_failed_pfs_request(query_paths_args, response, expected_requests=1)
+
+    for unrecoverable in (PFSError.WRONG_IOU_RECIPIENT, PFSError.DEPOSIT_TOO_LOW):
+        response = [dict(error_code=unrecoverable.value)] * 2
+        assert_failed_pfs_request(
+            query_paths_args,
+            response,
+            expected_requests=1,
+            exception_type=ServiceRequestIOURejected,
+        )
+
+
+def test_query_paths_with_insufficient_payment(
+        query_paths_args,
+        valid_response_json,
+        pfs_max_fee,
+):
+    " After an insufficient payment response, we retry only if we are below our maximum fee. "
+    insufficient_payment = [dict(error_code=PFSError.INSUFFICIENT_SERVICE_PAYMENT.value)] * 2
+    assert_failed_pfs_request(
+        query_paths_args,
+        insufficient_payment,
+        expected_requests=1,
+        exception_type=ServiceRequestIOURejected,
+    )
+
+    query_paths_args['service_config']['pathfinding_fee'] = pfs_max_fee
+    assert_failed_pfs_request(
+        query_paths_args,
+        insufficient_payment,
+        expected_requests=1,
+        exception_type=ServiceRequestIOURejected,
+    )
+
+    query_paths_args['service_config']['pathfinding_fee'] = int(pfs_max_fee / 2)
+    assert_failed_pfs_request(
+        query_paths_args,
+        insufficient_payment,
+        expected_requests=2,
+        exception_type=ServiceRequestIOURejected,
+    )
+
+    # second attempt not rejected
+    insufficient_payment[1] = valid_response_json
+    assert_failed_pfs_request(
+        query_paths_args,
+        insufficient_payment,
+        [400, 200],
+        expected_success=True,
+    )
+
+
+def test_query_paths_with_multiple_errors(query_paths_args):
+    " Max. number of attempts is not exceeded also if there is a new recoverable issue. "
+    different_recoverable_errors = [
+        dict(error_code=PFSError.BAD_IOU.value),
+        dict(error_code=PFSError.IOU_ALREADY_CLAIMED.value),
+    ]
+    assert_failed_pfs_request(
+        query_paths_args,
+        different_recoverable_errors,
+        exception_type=ServiceRequestIOURejected,
+    )

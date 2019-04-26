@@ -13,7 +13,7 @@ from raiden.exceptions import (
     RaidenRecoverableError,
     RaidenUnrecoverableError,
 )
-from raiden.network.proxies import Token
+from raiden.network.proxies.token import Token
 from raiden.network.rpc.client import JSONRPCClient, check_address_has_code
 from raiden.network.rpc.transactions import check_transaction_threw
 from raiden.utils import pex, safe_gas_limit
@@ -190,19 +190,10 @@ class UserDeposit:
             'previous_total_deposit': previous_total_deposit,
         }
 
-        if total_deposit < previous_total_deposit:
+        if total_deposit <= previous_total_deposit:
             msg = (
                 f'Current total deposit {previous_total_deposit} is already larger '
                 f'than the requested total deposit amount {total_deposit}'
-            )
-            log.info('deposit failed', reason=msg, **log_details)
-            raise DepositMismatch(msg)
-
-        if amount_to_deposit <= 0:
-            msg = (
-                f'new_total_deposit - previous_total_deposit must be greater than 0. '
-                f'new_total_deposit={total_deposit} '
-                f'previous_total_deposit={previous_total_deposit}'
             )
             log.info('deposit failed', reason=msg, **log_details)
             raise DepositMismatch(msg)

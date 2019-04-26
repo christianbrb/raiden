@@ -139,6 +139,10 @@ class ChainStateStateMachine(RuleBasedStateMachine):
             self.payment_network_id
         ] = self.payment_network_state
 
+        self.chain_state.tokennetworkaddresses_to_paymentnetworkaddresses[
+            self.token_network_id
+        ] = self.payment_network_id
+
         return self.new_channel_with_transaction()
 
     def event(self, description):
@@ -267,6 +271,7 @@ class InitiatorMixin:
             payment_network_identifier=self.payment_network_id,
             payment_identifier=payment_id,
             amount=amount,
+            allocated_fee=0,
             token_network_identifier=self.token_network_id,
             initiator=self.address,
             target=target,

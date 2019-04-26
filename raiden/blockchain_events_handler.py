@@ -22,7 +22,13 @@ from raiden.transfer.state_change import (
     ContractReceiveSecretReveal,
     ContractReceiveUpdateTransfer,
 )
-from raiden.utils import CHANNEL_ID_UNSPECIFIED, CanonicalIdentifier, pex, typing
+from raiden.utils import (
+    CHAIN_ID_UNSPECIFIED,
+    CHANNEL_ID_UNSPECIFIED,
+    CanonicalIdentifier,
+    pex,
+    typing,
+)
 from raiden_contracts.constants import (
     EVENT_SECRET_REVEALED,
     EVENT_TOKEN_NETWORK_CREATED,
@@ -30,6 +36,7 @@ from raiden_contracts.constants import (
 )
 
 if TYPE_CHECKING:
+    # pylint: disable=unused-import
     from raiden.raiden_service import RaidenService  # noqa: F401
 
 
@@ -285,6 +292,14 @@ def handle_channel_settled(raiden: 'RaidenService', event: Event):
         ),
     )
 
+    # This may happen for two reasons:
+    # - This node is not a participant for the given channel (normal operation,
+    #   the event should be ignored).
+    # - Something went wrong in our code and the channel state was cleared
+    #   before settle (a bug, this should raise an exception on development
+    #   mode).
+    # Because we cannot distinguish the two cases, assume the channel is not of
+    # interest and ignore the event.
     if not channel_state:
         return
 
@@ -318,10 +333,14 @@ def handle_channel_settled(raiden: 'RaidenService', event: Event):
     to calculate the gain and potentially perform unlocks in case
     there is value to be gained.
     """
-    our_locksroot, partner_locksroot = get_onchain_locksroots(
-        raiden=raiden,
+    canonical_identifier = CanonicalIdentifier(
+        chain_identifier=CHAIN_ID_UNSPECIFIED,
         token_network_address=token_network_identifier,
         channel_identifier=channel_identifier,
+    )
+    our_locksroot, partner_locksroot = get_onchain_locksroots(
+        chain=raiden.chain,
+        canonical_identifier=canonical_identifier,
         participant1=channel_state.our_state.address,
         participant2=channel_state.partner_state.address,
         block_identifier=block_hash,

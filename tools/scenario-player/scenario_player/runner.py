@@ -57,6 +57,7 @@ class ScenarioRunner:
         self.auth = auth
         self.release_keeper = RaidenReleaseKeeper(data_path.joinpath('raiden_releases'))
         self.task_cache = {}
+        # Storage for arbitrary data tasks might need to persist
         self.task_storage = defaultdict(dict)
 
         self.scenario = Scenario(pathlib.Path(scenario_file.name))
@@ -417,7 +418,7 @@ class ScenarioRunner:
                 resp = self.session.get(url)
             except RequestException:
                 log.error("Error fetching node address", url=url, node=node)
-                return
+                return None
             try:
                 return to_checksum_address(resp.json().get('our_address', ''))
             except ValueError:
@@ -427,6 +428,7 @@ class ScenarioRunner:
                     code=resp.status_code,
                     url=url,
                 )
+            return None
         ret = self._spawn_and_wait(nodes, cb)
         return ret
 

@@ -1,5 +1,5 @@
 from raiden.transfer import channel
-from raiden.transfer.architecture import ContractSendEvent, State
+from raiden.transfer.architecture import ContractSendEvent
 from raiden.transfer.state import (
     CHANNEL_STATE_CLOSED,
     CHANNEL_STATE_CLOSING,
@@ -9,6 +9,7 @@ from raiden.transfer.state import (
     CHANNEL_STATE_UNUSABLE,
     NODE_NETWORK_UNKNOWN,
     BalanceProofSignedState,
+    BalanceProofUnsignedState,
     ChainState,
     InitiatorTask,
     MediatorTask,
@@ -21,6 +22,7 @@ from raiden.transfer.state import (
 )
 from raiden.utils import CanonicalIdentifier
 from raiden.utils.typing import (
+    MYPY_ANNOTATION,
     Address,
     BlockNumber,
     Callable,
@@ -33,10 +35,11 @@ from raiden.utils.typing import (
     Set,
     TokenAddress,
     TokenNetworkID,
+    Union,
 )
 
 # TODO: Either enforce immutability or make a copy of the values returned by
-# the view functions
+#     the view functions
 
 
 def all_neighbour_nodes(chain_state: ChainState) -> Set[Address]:
@@ -238,13 +241,12 @@ def get_token_network_by_token_address(
 ) -> Optional[TokenNetworkState]:
 
     payment_network = chain_state.identifiers_to_paymentnetworks.get(payment_network_id)
-    token_network_id = None
 
     if payment_network is not None:
         token_network_id = payment_network.tokenaddresses_to_tokenidentifiers.get(token_address)
 
-    if token_network_id:
-        return payment_network.tokenidentifiers_to_tokennetworks.get(token_network_id)
+        if token_network_id:
+            return payment_network.tokenidentifiers_to_tokennetworks.get(token_network_id)
 
     return None
 
@@ -354,10 +356,14 @@ def get_channelstate_filter(
         token_address,
     )
 
-    result = []
+    result: List[NettingChannelState] = []
+    if not token_network:
+        return result
+
     for channel_state in token_network.channelidentifiers_to_channels.values():
         if filter_fn(channel_state):
             result.append(channel_state)
+
     return result
 
 
@@ -431,8 +437,8 @@ def get_channelstate_settled(
     )
 
 
-def role_from_transfer_task(transfer_task: TransferTask) -> Optional[str]:
-    """Return the role fo the transfer, None on error."""
+def role_from_transfer_task(transfer_task: TransferTask) -> str:
+    """Return the role for the transfer. Throws an exception on error"""
     if isinstance(transfer_task, InitiatorTask):
         return 'initiator'
     if isinstance(transfer_task, MediatorTask):
@@ -440,13 +446,19 @@ def role_from_transfer_task(transfer_task: TransferTask) -> Optional[str]:
     if isinstance(transfer_task, TargetTask):
         return 'target'
 
-    return None
+    raise ValueError('Argument to role_from_transfer_task is not a TransferTask')
 
 
-def get_transfer_role(chain_state: ChainState, secrethash: SecretHash) -> str:
-    return role_from_transfer_task(
-        chain_state.payment_mapping.secrethashes_to_task.get(secrethash),
-    )
+def get_transfer_role(chain_state: ChainState, secrethash: SecretHash) -> Optional[str]:
+    """
+    Returns 'initiator', 'mediator' or 'target' to signify the role the node has
+    in a transfer. If a transfer task is not found for the secrethash then the
+    function returns None
+    """
+    task = chain_state.payment_mapping.secrethashes_to_task.get(secrethash)
+    if not task:
+        return None
+    return role_from_transfer_task(task)
 
 
 def get_transfer_task(chain_state: ChainState, secrethash: SecretHash):
@@ -478,7 +490,7 @@ def list_channelstate_for_tokennetwork(
 
 
 def list_all_channelstate(chain_state: ChainState) -> List[NettingChannelState]:
-    result = []
+    result: List[NettingChannelState] = []
     for payment_network in chain_state.identifiers_to_paymentnetworks.values():
         for token_network in payment_network.tokenidentifiers_to_tokennetworks.values():
             # TODO: Either enforce immutability or make a copy
@@ -500,7 +512,10 @@ def filter_channels_by_partneraddress(
         token_address,
     )
 
-    result = []
+    result: List[NettingChannelState] = []
+    if not token_network:
+        return result
+
     for partner in partner_addresses:
         channels = [
             token_network.channelidentifiers_to_channels[channel_id]
@@ -536,9 +551,9 @@ def filter_channels_by_status(
 
 
 def detect_balance_proof_change(
-        old_state: State,
-        current_state: State,
-) -> Iterator[BalanceProofSignedState]:
+        old_state: ChainState,
+        current_state: ChainState,
+) -> Iterator[Union[BalanceProofSignedState, BalanceProofUnsignedState]]:
     """ Compare two states for any received balance_proofs that are not in `old_state`. """
     if old_state == current_state:
         return
@@ -549,6 +564,7 @@ def detect_balance_proof_change(
             )
         except AttributeError:
             old_payment_network = None
+
         current_payment_network = current_state.identifiers_to_paymentnetworks[
             payment_network_identifier
         ]
@@ -556,12 +572,13 @@ def detect_balance_proof_change(
             continue
 
         for token_network_identifier in current_payment_network.tokenidentifiers_to_tokennetworks:
-            try:
+            if old_payment_network:
                 old_token_network = old_payment_network.tokenidentifiers_to_tokennetworks.get(
                     token_network_identifier,
                 )
-            except AttributeError:
+            else:
                 old_token_network = None
+
             current_token_network = current_payment_network.tokenidentifiers_to_tokennetworks[
                 token_network_identifier
             ]
@@ -569,24 +586,42 @@ def detect_balance_proof_change(
                 continue
 
             for channel_identifier in current_token_network.channelidentifiers_to_channels:
-                try:
+                if old_token_network:
                     old_channel = old_token_network.channelidentifiers_to_channels.get(
                         channel_identifier,
                     )
-                except AttributeError:
+                else:
                     old_channel = None
+
                 current_channel = current_token_network.channelidentifiers_to_channels[
                     channel_identifier
                 ]
                 if current_channel == old_channel:
                     continue
 
-                elif (
+                else:
+                    partner_state_updated = (
                         current_channel.partner_state.balance_proof is not None and
                         (
                             old_channel is None or
                             old_channel.partner_state.balance_proof !=
                             current_channel.partner_state.balance_proof
                         )
-                ):
-                    yield current_channel.partner_state.balance_proof
+                    )
+
+                    if partner_state_updated:
+                        assert current_channel.partner_state.balance_proof, MYPY_ANNOTATION
+                        yield current_channel.partner_state.balance_proof
+
+                    our_state_updated = (
+                        current_channel.our_state.balance_proof is not None and
+                        (
+                            old_channel is None or
+                            old_channel.our_state.balance_proof !=
+                            current_channel.our_state.balance_proof
+                        )
+                    )
+
+                    if our_state_updated:
+                        assert current_channel.our_state.balance_proof, MYPY_ANNOTATION
+                        yield current_channel.our_state.balance_proof

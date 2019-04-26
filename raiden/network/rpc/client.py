@@ -1,6 +1,8 @@
 import copy
+import json
 import os
 import warnings
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gevent
@@ -14,6 +16,7 @@ from eth_utils import (
     to_checksum_address,
 )
 from gevent.lock import Semaphore
+from hexbytes import HexBytes
 from requests import ConnectTimeout
 from web3 import Web3
 from web3.contract import ContractFunction
@@ -37,7 +40,8 @@ from raiden.network.rpc.middleware import (
     http_retry_with_backoff_middleware,
 )
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
-from raiden.utils import is_supported_client, pex, privatekey_to_address
+from raiden.utils import pex, privatekey_to_address
+from raiden.utils.ethereum_clients import is_supported_client
 from raiden.utils.filters import StatelessFilter
 from raiden.utils.solc import (
     solidity_library_symbol,
@@ -144,7 +148,7 @@ def parity_discover_next_available_nonce(
 ) -> Nonce:
     """Returns the next available nonce for `address`."""
     next_nonce_encoded = web3.manager.request_blocking('parity_nextNonce', [address])
-    return int(next_nonce_encoded, 16)
+    return Nonce(int(next_nonce_encoded, 16))
 
 
 def geth_discover_next_available_nonce(
@@ -195,10 +199,12 @@ def check_address_has_code(
         else:
             formated_contract_name = ''
 
-        raise AddressWithoutCode('{}Address {} does not contain code'.format(
-            formated_contract_name,
-            to_checksum_address(address),
-        ))
+        raise AddressWithoutCode(
+            '{}Address {} does not contain code'.format(
+                formated_contract_name,
+                to_checksum_address(address),
+            ),
+        )
 
 
 def deploy_dependencies_symbols(all_contract):
@@ -256,6 +262,39 @@ def dependencies_order_of_build(target_contract, dependencies_map):
     return order
 
 
+class ParityCallType(Enum):
+    ESTIMATE_GAS = 1
+    CALL = 2
+
+
+def check_value_error_for_parity(value_error: ValueError, call_type: ParityCallType) -> bool:
+    """
+    For parity failing calls and functions do not return None if the transaction
+    will fail but instead throw a ValueError exception.
+
+    This function checks the thrown exception to see if it's the correct one and
+    if yes returns True, if not returns False
+    """
+    try:
+        error_data = json.loads(str(value_error).replace("'", '"'))
+    except json.JSONDecodeError:
+        return False
+
+    if call_type == ParityCallType.ESTIMATE_GAS:
+        code_checks_out = error_data['code'] == -32016
+        message_checks_out = 'The execution failed due to an exception' in error_data['message']
+    elif call_type == ParityCallType.CALL:
+        code_checks_out = error_data['code'] == -32015
+        message_checks_out = 'VM execution error' in error_data['message']
+    else:
+        raise ValueError('Called check_value_error_for_parity() with illegal call type')
+
+    if code_checks_out and message_checks_out:
+        return True
+
+    return False
+
+
 def patched_web3_eth_estimate_gas(self, transaction, block_identifier=None):
     """ Temporary workaround until next web3.py release (5.X.X)
 
@@ -270,10 +309,41 @@ def patched_web3_eth_estimate_gas(self, transaction, block_identifier=None):
     else:
         params = [transaction, block_identifier]
 
-    return self.web3.manager.request_blocking(
-        'eth_estimateGas',
-        params,
-    )
+    try:
+        result = self.web3.manager.request_blocking(
+            'eth_estimateGas',
+            params,
+        )
+    except ValueError as e:
+        if check_value_error_for_parity(e, ParityCallType.ESTIMATE_GAS):
+            result = None
+        else:
+            # else the error is not denoting estimate gas failure and is something else
+            raise e
+
+    return result
+
+
+def patched_web3_eth_call(self, transaction, block_identifier=None):
+    if 'from' not in transaction and is_checksum_address(self.defaultAccount):
+        transaction = assoc(transaction, 'from', self.defaultAccount)
+
+    if block_identifier is None:
+        block_identifier = self.defaultBlock
+
+    try:
+        result = self.web3.manager.request_blocking(
+            "eth_call",
+            [transaction, block_identifier],
+        )
+    except ValueError as e:
+        if check_value_error_for_parity(e, ParityCallType.CALL):
+            result = ''
+        else:
+            # else the error is not denoting a revert, something is wrong
+            raise e
+
+    return HexBytes(result)
 
 
 def estimate_gas_for_function(
@@ -299,7 +369,15 @@ def estimate_gas_for_function(
         fn_kwargs=kwargs,
     )
 
-    gas_estimate = web3.eth.estimateGas(estimate_transaction, block_identifier)
+    try:
+        gas_estimate = web3.eth.estimateGas(estimate_transaction, block_identifier)
+    except ValueError as e:
+        if check_value_error_for_parity(e, ParityCallType.ESTIMATE_GAS):
+            gas_estimate = None
+        else:
+            # else the error is not denoting estimate gas failure and is something else
+            raise e
+
     return gas_estimate
 
 
@@ -374,6 +452,12 @@ def monkey_patch_web3(web3, gas_price_strategy):
     ContractFunction.estimateGas = patched_contractfunction_estimateGas
     Eth.estimateGas = patched_web3_eth_estimate_gas
 
+    # Patch call() to achieve same behaviour between parity and geth
+    # At the moment geth returns '' for reverted/thrown transactions.
+    # Parity raises a value error. Raiden assumes the return of an empty
+    # string so we have to make parity behave like geth
+    Eth.call = patched_web3_eth_call
+
 
 class JSONRPCClient:
     """ Ethereum JSON RPC client.
@@ -427,14 +511,14 @@ class JSONRPCClient:
             # available nonce
             available_nonce = web3.eth.getTransactionCount(address_checksumed, 'pending')
 
-        elif eth_node == constants.EthClient.PARITY:
+        elif eth_node is constants.EthClient.PARITY:
             parity_assert_rpc_interfaces(web3)
             available_nonce = parity_discover_next_available_nonce(
                 web3,
                 address_checksumed,
             )
 
-        elif eth_node == constants.EthClient.GETH:
+        elif eth_node is constants.EthClient.GETH:
             geth_assert_rpc_interfaces(web3)
             available_nonce = geth_discover_next_available_nonce(
                 web3,
@@ -468,9 +552,22 @@ class JSONRPCClient:
         """ Return the most recent block. """
         return self.web3.eth.blockNumber
 
+    def get_block(self, block_identifier: BlockSpecification) -> Dict:
+        """Given a block number, query the chain to get its corresponding block hash"""
+        return self.web3.eth.getBlock(block_identifier)
+
+    def get_confirmed_blockhash(self):
+        """ Gets the block CONFIRMATION_BLOCKS in the past and returns its block hash """
+        confirmed_block_number = self.web3.eth.blockNumber - self.default_block_num_confirmations
+        if confirmed_block_number < 0:
+            confirmed_block_number = 0
+
+        return self.blockhash_from_blocknumber(confirmed_block_number)
+
     def blockhash_from_blocknumber(self, block_number: BlockSpecification) -> BlockHash:
         """Given a block number, query the chain to get its corresponding block hash"""
-        return bytes(self.web3.eth.getBlock(block_number)['hash'])
+        block = self.get_block(block_number)
+        return bytes(block['hash'])
 
     def can_query_state_for_block(self, block_identifier: BlockSpecification) -> bool:
         """
@@ -499,7 +596,7 @@ class JSONRPCClient:
         Checks the local tx pool for a transaction from a particular address and for
         a given nonce. If it exists it returns the transaction hash.
         """
-        assert self.eth_node == constants.EthClient.PARITY
+        assert self.eth_node is constants.EthClient.PARITY
         # https://wiki.parity.io/JSONRPC-parity-module.html?q=traceTransaction#parity_alltransactions
         transactions = self.web3.manager.request_blocking('parity_allTransactions', [])
         log.debug('RETURNED TRANSACTIONS', transactions=transactions)
@@ -520,6 +617,10 @@ class JSONRPCClient:
             # As per https://github.com/raiden-network/raiden/issues/3201
             # we can sporadically get an AtttributeError here. If that happens
             # use latest gas price
+            price = int(self.web3.eth.gasPrice)
+        except IndexError:  # work around for a web3.py exception when
+            # the blockchain is somewhat empty.
+            # https://github.com/ethereum/web3.py/issues/1149
             price = int(self.web3.eth.gasPrice)
 
         return price
@@ -844,6 +945,6 @@ class JSONRPCClient:
         and use the latest block for checking.
         """
         checking_block = 'pending'
-        if self.eth_node == constants.EthClient.PARITY:
+        if self.eth_node is constants.EthClient.PARITY:
             checking_block = 'latest'
         return checking_block

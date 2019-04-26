@@ -10,6 +10,7 @@ from raiden.network.pathfinding import query_paths
 from raiden.transfer import channel, views
 from raiden.transfer.state import CHANNEL_STATE_OPENED, ChainState, RouteState
 from raiden.utils import pex, typing
+from raiden.utils.typing import PaymentAmount, TokenAmount
 
 log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -19,7 +20,7 @@ def get_best_routes(
         token_network_id: typing.TokenNetworkID,
         from_address: typing.InitiatorAddress,
         to_address: typing.TargetAddress,
-        amount: int,
+        amount: PaymentAmount,
         previous_address: typing.Optional[typing.Address],
         config: Dict[str, Any],
         privkey: bytes,
@@ -84,6 +85,9 @@ def get_best_routes_internal(
         token_network_id,
     )
 
+    if not token_network:
+        return list()
+
     neighbors_heap = list()
     try:
         all_neighbors = networkx.all_neighbors(token_network.network_graph.network, from_address)
@@ -102,6 +106,9 @@ def get_best_routes_internal(
             token_network_id,
             partner_address,
         )
+
+        if not channel_state:
+            continue
 
         if channel.get_status(channel_state) != CHANNEL_STATE_OPENED:
             log.info(
@@ -150,7 +157,7 @@ def get_best_routes_pfs(
         token_network_id: typing.TokenNetworkID,
         from_address: typing.InitiatorAddress,
         to_address: typing.TargetAddress,
-        amount: int,
+        amount: TokenAmount,
         previous_address: typing.Optional[typing.Address],
         config: Dict[str, Any],
         privkey: bytes,
@@ -191,6 +198,9 @@ def get_best_routes_pfs(
             partner_address=partner_address,
         )
 
+        if not channel_state:
+            continue
+
         # check channel state
         if channel.get_status(channel_state) != CHANNEL_STATE_OPENED:
             log.info(
@@ -201,9 +211,11 @@ def get_best_routes_pfs(
             )
             continue
 
-        paths.append(RouteState(
-            node_address=partner_address,
-            channel_identifier=channel_state.identifier,
-        ))
+        paths.append(
+            RouteState(
+                node_address=partner_address,
+                channel_identifier=channel_state.identifier,
+            ),
+        )
 
     return True, paths

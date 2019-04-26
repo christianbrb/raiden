@@ -1,6 +1,17 @@
 from typing import *  # NOQA pylint:disable=wildcard-import,unused-wildcard-import
 from typing import TYPE_CHECKING, Dict, List, NewType, Optional, Tuple, Union
 
+if TYPE_CHECKING:
+    # pylint: disable=unused-import
+    from raiden.transfer.state import (  # noqa: F401
+        HashTimeLockState,
+        NettingChannelState,
+        UnlockPartialProofState,
+    )
+    from raiden.transfer.mediated_transfer.state import InitiatorTransferState  # noqa: F401
+    from raiden.messages import SignedBlindedBalanceProof  # noqa: F401
+    from raiden.messages import RequestMonitoring  # noqa: F401
+
 MYPY_ANNOTATION = (
     'This assert is used to tell mypy what is the type of the variable'
 )
@@ -61,7 +72,10 @@ MerkleTreeLeaves = NewType('MerkleTreeLeaves', T_MerkleTreeLeaves)
 T_MessageID = int
 MessageID = NewType('MessageID', T_MessageID)
 
-UDPMessageID = Tuple[str, int, Address]
+UDPMessageID = Union[
+    Tuple[str, int, Address],
+    MessageID,
+]
 
 T_Nonce = int
 Nonce = NewType('Nonce', T_Nonce)
@@ -78,6 +92,21 @@ PaymentID = NewType('PaymentID', T_PaymentID)
 # PaymentAmount is for amounts of tokens paid end-to-end
 T_PaymentAmount = int
 PaymentAmount = NewType('PaymentAmount', T_PaymentAmount)
+
+T_PrivateKey = bytes
+PrivateKey = NewType('PrivateKey', T_PrivateKey)
+
+T_PublicKey = bytes
+PublicKey = NewType('PublicKey', T_PublicKey)
+
+T_FeeAmount = int
+FeeAmount = NewType('FeeAmount', T_FeeAmount)
+
+T_LockedAmount = int
+LockedAmount = NewType('LockedAmount', T_LockedAmount)
+
+T_PaymentWithFeeAmount = int
+PaymentWithFeeAmount = NewType('PaymentWithFeeAmount', T_FeeAmount)
 
 T_PaymentNetworkID = bytes
 PaymentNetworkID = NewType('PaymentNetworkID', T_PaymentNetworkID)
@@ -135,12 +164,8 @@ InitiatorTransfersMap = Dict[SecretHash, 'InitiatorTransferState']
 
 NodeNetworkStateMap = Dict[Address, str]
 
-if TYPE_CHECKING:
-    from raiden.transfer.state import (  # noqa: F401
-        HashTimeLockState,
-        NettingChannelState,
-        UnlockPartialProofState,
-    )
-    from raiden.transfer.mediated_transfer.state import InitiatorTransferState  # noqa: F401
-    from raiden.messages import SignedBlindedBalanceProof  # noqa: F401
-    from raiden.messages import RequestMonitoring  # noqa: F401
+Host = NewType('Host', str)
+Port = NewType('Port', int)
+HostPort = Tuple[Host, Optional[Port]]
+
+LockType = Union['HashTimeLockState', 'UnlockPartialProofState']

@@ -4,6 +4,8 @@ import string
 from functools import singledispatch
 from typing import NamedTuple
 
+from eth_utils import to_checksum_address
+
 from raiden.constants import EMPTY_MERKLE_ROOT, UINT64_MAX, UINT256_MAX
 from raiden.messages import Lock, LockedTransfer
 from raiden.transfer import balance_proof, channel
@@ -74,6 +76,10 @@ def make_20bytes() -> bytes:
 
 def make_address() -> typing.Address:
     return typing.Address(make_20bytes())
+
+
+def make_checksum_address() -> str:
+    return to_checksum_address(make_address())
 
 
 def make_32bytes() -> bytes:
@@ -191,6 +197,7 @@ def make_channel_state(
         payment_network_identifier=payment_network_identifier,
         reveal_timeout=reveal_timeout,
         settle_timeout=settle_timeout,
+        mediation_fee=0,
         our_state=our_state,
         partner_state=partner_state,
         open_transaction=open_transaction,
@@ -207,6 +214,7 @@ def make_transfer_description(
         initiator: typing.InitiatorAddress = EMPTY,
         target: typing.TargetAddress = EMPTY,
         secret: typing.Secret = EMPTY,
+        allocated_fee: typing.FeeAmount = EMPTY,
 ) -> TransferDescriptionWithSecretState:
     payment_network_identifier = if_empty(
         payment_network_identifier,
@@ -218,11 +226,13 @@ def make_transfer_description(
     initiator = if_empty(initiator, UNIT_TRANSFER_INITIATOR)
     target = if_empty(target, UNIT_TRANSFER_TARGET)
     secret = if_empty(secret, random_secret())
+    allocated_fee = if_empty(allocated_fee, 0)
 
     return TransferDescriptionWithSecretState(
         payment_network_identifier=payment_network_identifier,
         payment_identifier=payment_identifier,
         amount=amount,
+        allocated_fee=allocated_fee,
         token_network_identifier=token_network,
         initiator=initiator,
         target=target,
@@ -473,6 +483,7 @@ make_privkey_address = make_privatekey_address
 UNIT_SETTLE_TIMEOUT = 50
 UNIT_REVEAL_TIMEOUT = 5
 UNIT_TRANSFER_AMOUNT = 10
+UNIT_TRANSFER_FEE = 5
 UNIT_SECRET = b'secretsecretsecretsecretsecretse'
 UNIT_SECRETHASH = sha3(UNIT_SECRET)
 UNIT_REGISTRY_IDENTIFIER = b'registryregistryregi'
@@ -629,6 +640,7 @@ class NettingChannelStateProperties(NamedTuple):
 
     reveal_timeout: typing.BlockTimeout = EMPTY
     settle_timeout: typing.BlockTimeout = EMPTY
+    mediation_fee: typing.FeeAmount = EMPTY
 
     our_state: NettingChannelEndStateProperties = EMPTY
     partner_state: NettingChannelEndStateProperties = EMPTY
@@ -644,6 +656,7 @@ NETTING_CHANNEL_STATE_DEFAULTS = NettingChannelStateProperties(
     payment_network_identifier=UNIT_PAYMENT_NETWORK_IDENTIFIER,
     reveal_timeout=UNIT_REVEAL_TIMEOUT,
     settle_timeout=UNIT_SETTLE_TIMEOUT,
+    mediation_fee=0,
     our_state=NETTING_CHANNEL_END_STATE_DEFAULTS,
     partner_state=NETTING_CHANNEL_END_STATE_DEFAULTS,
     open_transaction=TRANSACTION_EXECUTION_STATUS_DEFAULTS,

@@ -27,6 +27,7 @@ from raiden.utils.typing import (
     BlockNumber,
     List,
     Optional,
+    TokenAmount,
     TokenNetworkID,
 )
 
@@ -40,13 +41,13 @@ def sanity_check(
     is_running = new_state is not None
     is_cleared = was_running and not is_running
 
-    if is_cleared:
+    if old_state and is_cleared:
         lock = channel.get_lock(
             end_state=channel_state.partner_state,
             secrethash=old_state.transfer.lock.secrethash,
         )
         assert lock is None, 'The lock must be cleared once the task exists'
-    elif is_running:
+    elif new_state and is_running:
         # old_state can be None if the task is starting
         lock = channel.get_lock(
             end_state=channel_state.partner_state,
@@ -86,6 +87,7 @@ def events_for_onchain_secretreveal(
             channel_state.partner_state,
             transfer.lock.secrethash,
         )
+        assert secret, 'secret should be known at this point'
         return secret_registry.events_for_onchain_secretreveal(
             channel_state=channel_state,
             secret=secret,
@@ -101,7 +103,7 @@ def handle_inittarget(
         channel_state: NettingChannelState,
         pseudo_random_generator: random.Random,
         block_number: BlockNumber,
-) -> TransitionResult[Optional[TargetTransferState]]:
+) -> TransitionResult[TargetTransferState]:
     """ Handles an ActionInitTarget state change. """
     transfer = state_change.transfer
     route = state_change.route
@@ -240,7 +242,7 @@ def handle_unlock(
         target_state: TargetTransferState,
         state_change: ReceiveUnlock,
         channel_state: NettingChannelState,
-) -> TransitionResult[Optional[TargetTransferState]]:
+) -> TransitionResult[TargetTransferState]:
     """ Handles a ReceiveUnlock state change. """
     balance_proof_sender = state_change.balance_proof.sender
 
@@ -248,6 +250,7 @@ def handle_unlock(
         channel_state,
         state_change,
     )
+    next_target_state: Optional[TargetTransferState] = target_state
 
     if is_valid:
         transfer = target_state.transfer
@@ -255,7 +258,7 @@ def handle_unlock(
             payment_network_identifier=channel_state.payment_network_identifier,
             token_network_identifier=TokenNetworkID(channel_state.token_network_identifier),
             identifier=transfer.payment_identifier,
-            amount=transfer.lock.amount,
+            amount=TokenAmount(transfer.lock.amount),
             initiator=transfer.initiator,
         )
 
@@ -271,9 +274,9 @@ def handle_unlock(
         )
 
         events.extend([payment_received_success, unlock_success, send_processed])
-        target_state = None
+        next_target_state = None
 
-    return TransitionResult(target_state, events)
+    return TransitionResult(next_target_state, events)
 
 
 def handle_block(
@@ -286,7 +289,7 @@ def handle_block(
     handle expiration of the hash time lock.
     """
     transfer = target_state.transfer
-    events = list()
+    events: List[Event] = list()
     lock = transfer.lock
 
     secret_known = channel.is_secret_known(
@@ -324,13 +327,14 @@ def handle_lock_expired(
         state_change: ReceiveLockExpired,
         channel_state: NettingChannelState,
         block_number: BlockNumber,
-) -> TransitionResult[Optional[TargetTransferState]]:
+) -> TransitionResult[TargetTransferState]:
     """Remove expired locks from channel states."""
     result = channel.handle_receive_lock_expired(
         channel_state=channel_state,
         state_change=state_change,
         block_number=block_number,
     )
+    assert result.new_state, 'handle_receive_lock_expired should not delete the task'
 
     if not channel.get_lock(result.new_state.partner_state, target_state.transfer.lock.secrethash):
         transfer = target_state.transfer
@@ -346,12 +350,12 @@ def handle_lock_expired(
 
 
 def state_transition(
-        target_state: TargetTransferState,
+        target_state: Optional[TargetTransferState],
         state_change: StateChange,
         channel_state: NettingChannelState,
         pseudo_random_generator: random.Random,
         block_number: BlockNumber,
-) -> TransitionResult[Optional[TargetTransferState]]:
+) -> TransitionResult[TargetTransferState]:
     """ State machine for the target node of a mediated transfer. """
     # pylint: disable=too-many-branches,unidiomatic-typecheck
 
@@ -368,6 +372,7 @@ def state_transition(
     elif type(state_change) == Block:
         assert isinstance(state_change, Block), MYPY_ANNOTATION
         assert state_change.block_number == block_number
+        assert target_state, 'Block state changes should be accompanied by a valid target state'
 
         iteration = handle_block(
             target_state=target_state,
@@ -377,6 +382,7 @@ def state_transition(
         )
     elif type(state_change) == ReceiveSecretReveal:
         assert isinstance(state_change, ReceiveSecretReveal), MYPY_ANNOTATION
+        assert target_state, 'ReceiveSecretReveal should be accompanied by a valid target state'
         iteration = handle_offchain_secretreveal(
             target_state=target_state,
             state_change=state_change,
@@ -386,6 +392,8 @@ def state_transition(
         )
     elif type(state_change) == ContractReceiveSecretReveal:
         assert isinstance(state_change, ContractReceiveSecretReveal), MYPY_ANNOTATION
+        msg = 'ContractReceiveSecretReveal should be accompanied by a valid target state'
+        assert target_state, msg
         iteration = handle_onchain_secretreveal(
             target_state,
             state_change,
@@ -393,18 +401,20 @@ def state_transition(
         )
     elif type(state_change) == ReceiveUnlock:
         assert isinstance(state_change, ReceiveUnlock), MYPY_ANNOTATION
+        assert target_state, 'ReceiveUnlock should be accompanied by a valid target state'
         iteration = handle_unlock(
-            target_state,
-            state_change,
-            channel_state,
+            target_state=target_state,
+            state_change=state_change,
+            channel_state=channel_state,
         )
     elif type(state_change) == ReceiveLockExpired:
         assert isinstance(state_change, ReceiveLockExpired), MYPY_ANNOTATION
+        assert target_state, 'ReceiveLockExpired should be accompanied by a valid target state'
         iteration = handle_lock_expired(
-            target_state,
-            state_change,
-            channel_state,
-            block_number,
+            target_state=target_state,
+            state_change=state_change,
+            channel_state=channel_state,
+            block_number=block_number,
         )
 
     sanity_check(

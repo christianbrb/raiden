@@ -20,7 +20,7 @@ from raiden.constants import (
     SECURITY_EXPRESSION,
 )
 from raiden.exceptions import EthNodeCommunicationError
-from raiden.network.proxies import UserDeposit
+from raiden.network.proxies.user_deposit import UserDeposit
 from raiden.settings import MIN_REI_THRESHOLD
 from raiden.utils import gas_reserve, pex, to_rdn
 from raiden.utils.runnable import Runnable
@@ -109,7 +109,7 @@ def check_rdn_deposits(raiden, user_deposit_proxy: UserDeposit):
                     f'WARNING\n'
                     f'Your account\'s RDN balance of {rdn_balance} is below the '
                     f'minimum threshold. Provided that you have either a monitoring '
-                    f'service or a path finding service activated, your node is not going'
+                    f'service or a path finding service activated, your node is not going '
                     f'to be able to pay those services which may lead to denial of service or '
                     f'loss of funds.'
                 ),
@@ -143,6 +143,7 @@ class AlarmTask(Runnable):
         self.chain = chain
         self.chain_id = None
         self.known_block_number = None
+        self._stop_event = None
 
         # TODO: Start with a larger sleep_time and decrease it as the
         # probability of a new block increases.

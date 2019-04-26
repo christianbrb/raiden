@@ -223,9 +223,14 @@ def deploy_key(privatekey_seed):
     return sha3(privatekey_seed.format('deploykey').encode())
 
 
-@pytest.fixture
+@pytest.fixture(scope='session')
 def blockchain_type(request):
     return request.config.option.blockchain_type
+
+
+@pytest.fixture
+def blockchain_extra_config():
+    return {}
 
 
 @pytest.fixture
@@ -261,7 +266,7 @@ def blockchain_private_keys(blockchain_number_of_nodes, blockchain_key_seed):
 @pytest.fixture(scope='session')
 def port_generator():
     """ count generator used to get a unique port number. """
-    return get_free_port('127.0.0.1')
+    return get_free_port()
 
 
 @pytest.fixture
@@ -363,3 +368,17 @@ def skip_if_parity(blockchain_type):
     """Skip the test if it is run with a Parity node"""
     if blockchain_type == 'parity':
         pytest.skip('This test does not work with parity.')
+
+
+@pytest.fixture
+def skip_if_not_parity(blockchain_type):
+    """Skip the test if it is not run with a Parity node"""
+    if blockchain_type != 'parity':
+        pytest.skip('This test works only with parity.')
+
+
+@pytest.fixture
+def skip_if_not_geth(blockchain_type):
+    """Skip the test if it is run with a Geth node"""
+    if blockchain_type != 'geth':
+        pytest.skip('This test works only with geth.')

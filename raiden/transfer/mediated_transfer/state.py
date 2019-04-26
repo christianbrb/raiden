@@ -11,13 +11,20 @@ from raiden.transfer.state import (
     HashTimeLockState,
     balanceproof_from_envelope,
 )
-from raiden.utils import pex, serialization, sha3
-from raiden.utils.serialization import map_dict
+from raiden.utils import pex, sha3
+from raiden.utils.serialization import (
+    deserialize_secret,
+    deserialize_secret_hash,
+    identity,
+    map_dict,
+    serialize_bytes,
+)
 from raiden.utils.typing import (
     Address,
     Any,
     ChannelID,
     Dict,
+    FeeAmount,
     InitiatorAddress,
     InitiatorTransfersMap,
     List,
@@ -77,7 +84,7 @@ class InitiatorPaymentState(State):
 
     def __init__(self, initiator_transfers: InitiatorTransfersMap) -> None:
         self.initiator_transfers = initiator_transfers
-        self.cancelled_channels = list()
+        self.cancelled_channels: List[ChannelID] = list()
 
     def __repr__(self):
         return '<InitiatorPaymentState transfers:{}>'.format(
@@ -97,8 +104,8 @@ class InitiatorPaymentState(State):
     def to_dict(self) -> Dict[str, Any]:
         return {
             'initiator_transfers': map_dict(
-                serialization.serialize_bytes,
-                serialization.identity,
+                serialize_bytes,
+                identity,
                 self.initiator_transfers,
             ),
             'cancelled_channels': self.cancelled_channels,
@@ -108,8 +115,8 @@ class InitiatorPaymentState(State):
     def from_dict(cls, data: Dict[str, Any]) -> 'InitiatorPaymentState':
         restored = cls(
             initiator_transfers=map_dict(
-                serialization.deserialize_bytes,
-                serialization.identity,
+                deserialize_secret_hash,
+                identity,
                 data['initiator_transfers'],
             ),
         )
@@ -269,9 +276,9 @@ class MediatorTransferState(State):
             routes: List['RouteState'],
     ) -> None:
         self.secrethash = secrethash
-        self.secret: Secret = None
+        self.secret: Optional[Secret] = None
         self.transfers_pair: List[MediationPairState] = list()
-        self.waiting_transfer: WaitingTransferState = None
+        self.waiting_transfer: Optional[WaitingTransferState] = None
         self.routes = routes
 
     def __repr__(self):
@@ -295,21 +302,21 @@ class MediatorTransferState(State):
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
-            'secrethash': serialization.serialize_bytes(self.secrethash),
+            'secrethash': serialize_bytes(self.secrethash),
             'transfers_pair': self.transfers_pair,
             'waiting_transfer': self.waiting_transfer,
             'routes': self.routes,
         }
 
         if self.secret is not None:
-            result['secret'] = serialization.serialize_bytes(self.secret)
+            result['secret'] = serialize_bytes(self.secret)
 
         return result
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'MediatorTransferState':
         restored = cls(
-            secrethash=serialization.deserialize_bytes(data['secrethash']),
+            secrethash=deserialize_secret_hash(data['secrethash']),
             routes=data['routes'],
         )
         restored.transfers_pair = data['transfers_pair']
@@ -317,7 +324,7 @@ class MediatorTransferState(State):
 
         secret = data.get('secret')
         if secret is not None:
-            restored.secret = serialization.deserialize_bytes(secret)
+            restored.secret = deserialize_secret(secret)
 
         return restored
 
@@ -384,7 +391,7 @@ class TargetTransferState(State):
         }
 
         if self.secret is not None:
-            result['secret'] = serialization.serialize_bytes(self.secret)
+            result['secret'] = serialize_bytes(self.secret)
 
         return result
 
@@ -398,7 +405,7 @@ class TargetTransferState(State):
 
         secret = data.get('secret')
         if secret is not None:
-            restored.secret = serialization.deserialize_bytes(secret)
+            restored.secret = deserialize_secret(secret)
 
         return restored
 
@@ -489,7 +496,7 @@ class LockedTransferUnsignedState(LockedTransferState):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'LockedTransferUnsignedState':
         restored = cls(
-            payment_identifier=int(data['payment_identifier']),
+            payment_identifier=PaymentID(int(data['payment_identifier'])),
             token=to_canonical_address(data['token']),
             balance_proof=data['balance_proof'],
             lock=data['lock'],
@@ -591,8 +598,8 @@ class LockedTransferSignedState(LockedTransferState):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'LockedTransferSignedState':
         restored = cls(
-            message_identifier=int(data['message_identifier']),
-            payment_identifier=int(data['payment_identifier']),
+            message_identifier=MessageID(int(data['message_identifier'])),
+            payment_identifier=PaymentID(int(data['payment_identifier'])),
             token=to_canonical_address(data['token']),
             balance_proof=data['balance_proof'],
             lock=data['lock'],
@@ -612,6 +619,7 @@ class TransferDescriptionWithSecretState(State):
         'payment_network_identifier',
         'payment_identifier',
         'amount',
+        'allocated_fee',
         'token_network_identifier',
         'initiator',
         'target',
@@ -624,6 +632,7 @@ class TransferDescriptionWithSecretState(State):
             payment_network_identifier: PaymentNetworkID,
             payment_identifier: PaymentID,
             amount: PaymentAmount,
+            allocated_fee: FeeAmount,
             token_network_identifier: TokenNetworkID,
             initiator: InitiatorAddress,
             target: TargetAddress,
@@ -634,6 +643,7 @@ class TransferDescriptionWithSecretState(State):
         self.payment_network_identifier = payment_network_identifier
         self.payment_identifier = payment_identifier
         self.amount = amount
+        self.allocated_fee = allocated_fee
         self.token_network_identifier = token_network_identifier
         self.initiator = initiator
         self.target = target
@@ -642,14 +652,14 @@ class TransferDescriptionWithSecretState(State):
 
     def __repr__(self):
         return (
-            '<'
-            'TransferDescriptionWithSecretState token_network:{} amount:{} target:{} secrethash:{}'
-            '>'
-        ).format(
-            pex(self.token_network_identifier),
-            self.amount,
-            pex(self.target),
-            pex(self.secrethash),
+            f'<'
+            f'TransferDescriptionWithSecretState '
+            f'token_network:{pex(self.token_network_identifier)} '
+            f'amount:{self.amount} '
+            f'allocated_fee:{self.allocated_fee} '
+            f'target:{pex(self.target)} '
+            f'secrethash:{pex(self.secrethash)}'
+            f'>'
         )
 
     def __eq__(self, other: Any) -> bool:
@@ -658,6 +668,7 @@ class TransferDescriptionWithSecretState(State):
             self.payment_network_identifier == other.payment_network_identifier and
             self.payment_identifier == other.payment_identifier and
             self.amount == other.amount and
+            self.allocated_fee == other.allocated_fee and
             self.token_network_identifier == other.token_network_identifier and
             self.initiator == other.initiator and
             self.target == other.target and
@@ -673,22 +684,24 @@ class TransferDescriptionWithSecretState(State):
             'payment_network_identifier': to_checksum_address(self.payment_network_identifier),
             'payment_identifier': str(self.payment_identifier),
             'amount': str(self.amount),
+            'allocated_fee': str(self.allocated_fee),
             'token_network_identifier': to_checksum_address(self.token_network_identifier),
             'initiator': to_checksum_address(self.initiator),
             'target': to_checksum_address(self.target),
-            'secret': serialization.serialize_bytes(self.secret),
+            'secret': serialize_bytes(self.secret),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'TransferDescriptionWithSecretState':
         restored = cls(
             payment_network_identifier=to_canonical_address(data['payment_network_identifier']),
-            payment_identifier=int(data['payment_identifier']),
-            amount=int(data['amount']),
+            payment_identifier=PaymentID(int(data['payment_identifier'])),
+            amount=PaymentAmount(int(data['amount'])),
+            allocated_fee=FeeAmount(int(data['allocated_fee'])),
             token_network_identifier=to_canonical_address(data['token_network_identifier']),
             initiator=to_canonical_address(data['initiator']),
             target=to_canonical_address(data['target']),
-            secret=serialization.deserialize_bytes(data['secret']),
+            secret=deserialize_secret(data['secret']),
         )
 
         return restored

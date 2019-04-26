@@ -1,6 +1,7 @@
+from typing import List, cast
+
 import gevent
 import structlog
-from web3 import Web3
 
 from raiden.transfer import channel, views
 from raiden.transfer.events import EventPaymentReceivedSuccess
@@ -24,15 +25,6 @@ def wait_for_block(
 ) -> None:
     while raiden.get_block_number() < block_number:
         gevent.sleep(retry_timeout)
-
-
-def wait_for_block_using_web3(
-        web3: Web3,
-        block_number: typing.BlockNumber,
-        retry_timout: float,
-) -> None:
-    while web3.eth.blockNumber < block_number:
-        gevent.sleep(retry_timout)
 
 
 def wait_for_newchannel(
@@ -157,27 +149,43 @@ def wait_for_channel_in_states(
 ) -> None:
     """Wait until all channels are in `target_states`.
 
+    Raises:
+        ValueError: If the token_address is not registered in the
+            payment_network.
+
     Note:
         This does not time out, use gevent.Timeout.
     """
-    channel_ids = list(channel_ids)
+    chain_state = views.state_from_raiden(raiden)
+    token_network = views.get_token_network_by_token_address(
+        chain_state=chain_state,
+        payment_network_id=payment_network_id,
+        token_address=token_address,
+    )
 
-    while channel_ids:
-        last_id = channel_ids[-1]
+    if token_network is None:
+        raise ValueError(
+            f'The token {token_address} is not registered on the network {payment_network_id}.',
+        )
+
+    token_network_address = token_network.address
+
+    list_cannonical_ids = [
+        CanonicalIdentifier(
+            chain_identifier=chain_state.chain_id,
+            token_network_address=token_network_address,
+            channel_identifier=channel_identifier,
+        )
+        for channel_identifier in channel_ids
+    ]
+
+    while list_cannonical_ids:
+        canonical_id = list_cannonical_ids[-1]
         chain_state = views.state_from_raiden(raiden)
-        token_network_address = views.get_token_network_by_token_address(
-            chain_state=chain_state,
-            payment_network_id=payment_network_id,
-            token_address=token_address,
-        ).address
-        assert token_network_address
+
         channel_state = views.get_channelstate_by_canonical_identifier(
             chain_state=chain_state,
-            canonical_identifier=CanonicalIdentifier(
-                chain_identifier=chain_state.chain_id,
-                token_network_address=token_network_address,
-                channel_identifier=last_id,
-            ),
+            canonical_identifier=canonical_id,
         )
 
         channel_is_settled = (
@@ -186,7 +194,7 @@ def wait_for_channel_in_states(
         )
 
         if channel_is_settled:
-            channel_ids.pop()
+            list_cannonical_ids.pop()
         else:
             gevent.sleep(retry_timeout)
 
@@ -271,14 +279,16 @@ def wait_for_settle_all_channels(
 
         id_tokennetworkstate = payment_network_state.tokenidentifiers_to_tokennetworks.items()
         for token_network_id, token_network_state in id_tokennetworkstate:
-            channel_ids = token_network_state.channelidentifiers_to_channels.keys()
+            channel_ids = cast(
+                List[typing.ChannelID], token_network_state.channelidentifiers_to_channels.keys(),
+            )
 
             wait_for_settle(
-                raiden,
-                payment_network_id,
-                token_network_id,
-                channel_ids,
-                retry_timeout,
+                raiden=raiden,
+                payment_network_id=payment_network_id,
+                token_address=typing.TokenAddress(token_network_id),
+                channel_ids=channel_ids,
+                retry_timeout=retry_timeout,
             )
 
 

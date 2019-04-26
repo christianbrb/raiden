@@ -6,12 +6,17 @@ from click.testing import CliRunner
 
 from raiden.constants import EthClient
 from raiden.ui.cli import OPTION_DEPENDENCIES, run
-from raiden.utils import is_minified_address, is_supported_client
+from raiden.utils import is_minified_address
+from raiden.utils.ethereum_clients import is_supported_client
 
 # Values to be used to test the option dependencies, need to be distinct form the default values
 # The tuples define the inverse values for the depended-on options
 _OPTION_DEPENDENCY_TEST_VALUES = {
     'pathfinding-service-address': 'https://example.com',
+    'pathfinding-eth-address': '0x22222222222222222222',
+    'pathfinding-max-paths': 5,
+    'pathfinding-max-fee': 1,
+    'pathfinding-iou-timeout': 200,
     'enable-monitoring': None,
     'matrix-server': 'https://example.com',
     'listen-address': '0.0.0.0:5001',
@@ -86,7 +91,7 @@ def test_check_json_rpc_geth():
     g4, _ = is_supported_client('Geth/v2.0.3-unstable-e9295163/linux-amd64/go1.9.1')
     g5, _ = is_supported_client('Geth/v11.55.86-unstable-e9295163/linux-amd64/go1.9.1')
     g6, _ = is_supported_client('Geth/v999.999.999-unstable-e9295163/linux-amd64/go1.9.1')
-    assert client == EthClient.GETH
+    assert client is EthClient.GETH
     assert all([g1, g2, g3, g4, g5, g6])
 
     b1, client = is_supported_client('Geth/v1.7.1-unstable-e9295163/linux-amd64/go1.9.1')
@@ -116,7 +121,7 @@ def test_check_json_rpc_parity():
     g6, _ = is_supported_client(
         'Parity//v99.994.975-stable-19535333c-20171013/x86_64-linux-gnu/rustc1.20.0',
     )
-    assert client == EthClient.PARITY
+    assert client is EthClient.PARITY
     assert all([g1, g2, g3, g4, g5, g6])
 
     b1, client = is_supported_client(

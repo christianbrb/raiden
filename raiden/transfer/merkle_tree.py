@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from raiden.transfer.state import MerkleTreeState
 
 
-def hash_pair(first: Optional[Keccak256], second: Optional[Keccak256]) -> Optional[Keccak256]:
+def hash_pair(first: Keccak256, second: Optional[Keccak256]) -> Keccak256:
     """ Computes the keccak hash of the elements ordered topologically.
 
     Since a merkle proof will not include all the elements, but only the path
@@ -22,9 +22,7 @@ def hash_pair(first: Optional[Keccak256], second: Optional[Keccak256]) -> Option
     deterministic way of ordering the elements making sure the smart contract
     verification and the python code are compatible.
     """
-
-    if first is None:
-        return second
+    assert first is not None
 
     if second is None:
         return first

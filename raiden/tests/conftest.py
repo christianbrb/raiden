@@ -14,17 +14,26 @@ import pytest
 from _pytest.pathlib import LOCK_TIMEOUT, ensure_reset_dir, make_numbered_dir_with_cleanup
 from _pytest.tmpdir import get_user
 
+from raiden.constants import EthClient
 from raiden.log_config import configure_logging
-from raiden.settings import SUPPORTED_ETH_CLIENTS
 from raiden.tests.fixtures.variables import *  # noqa: F401,F403
 from raiden.tests.utils.transport import make_requests_insecure
 from raiden.utils.cli import LogLevelConfigType
+
+pytest.register_assert_rewrite('raiden.tests.utils.eth_node')
+pytest.register_assert_rewrite('raiden.tests.utils.factories')
+pytest.register_assert_rewrite('raiden.tests.utils.messages')
+pytest.register_assert_rewrite('raiden.tests.utils.network')
+pytest.register_assert_rewrite('raiden.tests.utils.protocol')
+pytest.register_assert_rewrite('raiden.tests.utils.smartcontracts')
+pytest.register_assert_rewrite('raiden.tests.utils.smoketest')
+pytest.register_assert_rewrite('raiden.tests.utils.transfer')
 
 
 def pytest_addoption(parser):
     parser.addoption(
         '--blockchain-type',
-        choices=SUPPORTED_ETH_CLIENTS,
+        choices=[client.value for client in EthClient],
         default='geth',
     )
 
@@ -47,6 +56,14 @@ def pytest_addoption(parser):
         choices=('none', 'udp', 'matrix', 'all'),
         default='matrix',
         help='Run integration tests with udp, with matrix, with both or not at all.',
+    )
+
+    parser.addoption(
+        '--synapse-base-port',
+        action='store',
+        default=8500,
+        type='int',
+        help='Base port number to use for synapse servers being started during Matrix tests.',
     )
 
 

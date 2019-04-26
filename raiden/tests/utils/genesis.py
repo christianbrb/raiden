@@ -4,12 +4,15 @@ from raiden.settings import GAS_LIMIT_HEX
 
 GENESIS_STUB = {
     'config': {
+        'ChainID': 0,
         'homesteadBlock': 0,
         'eip150Block': 0,
         'eip150Hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
         'eip155Block': 0,
         'eip158Block': 0,
         'ByzantiumBlock': 0,
+        'ConstantinopleBlock': 0,
+        'PetersburgBlock': 0,
     },
     'nonce': '0x0',
     'mixhash': '0x0000000000000000000000000000000000000000000000000000000000000000',
@@ -35,13 +38,18 @@ PARITY_CHAIN_SPEC_STUB = {
         "gasLimitBoundDivisor": "0x0400",
         "maximumExtraDataSize": "0x20",
         "minGasLimit": "0x1388",
-        "networkID": 337,
+        "networkID": 0,
         "eip155Transition": "0x0",
         "eip98Transition": "0x7fffffffffffff",
         "eip140Transition": "0x0",
+        "eip160Transition": "0x0",
+        "eip210Transition": "0x0",
         "eip211Transition": "0x0",
         "eip214Transition": "0x0",
         "eip658Transition": "0x0",
+        "eip145Transition": "0x0",
+        "eip1014Transition": "0x0",
+        "eip1052Transition": "0x0",
     },
     "genesis": {
         "seal": {

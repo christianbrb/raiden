@@ -1,11 +1,15 @@
 import json
 from functools import partial
 
+from eth_utils import to_canonical_address
 from gevent.pool import Pool
 
+from raiden.constants import EMPTY_MERKLE_ROOT
 from raiden.exceptions import RaidenUnrecoverableError
 from raiden.network.proxies.utils import get_onchain_locksroots
 from raiden.storage.sqlite import SQLiteStorage, StateChangeRecord
+from raiden.utils import CHAIN_ID_UNSPECIFIED, CanonicalIdentifier
+from raiden.utils.serialization import serialize_bytes
 from raiden.utils.typing import Any, Dict, Locksroot, Tuple
 
 RaidenService = 'RaidenService'
@@ -19,7 +23,7 @@ def _find_channel_new_state_change(
         token_network_address: str,
         channel_identifier: str,
 ) -> StateChangeRecord:
-    return storage.get_latest_event_by_data_field({
+    return storage.get_latest_state_change_by_data_field({
         '_type': 'raiden.transfer.state_change.ContractReceiveChannelNew',
         'token_network_identifier': token_network_address,
         'channel_state.identifier': channel_identifier,
@@ -44,15 +48,56 @@ def _get_onchain_locksroots(
             f'token network address: {token_network["address"]} being created. ',
         )
 
+    canonical_identifier = CanonicalIdentifier(
+        chain_identifier=CHAIN_ID_UNSPECIFIED,
+        token_network_address=to_canonical_address(token_network['address']),
+        channel_identifier=int(channel['identifier']),
+    )
+
     our_locksroot, partner_locksroot = get_onchain_locksroots(
-        raiden=raiden,
-        token_network_address=token_network['address'],
-        channel_identifier=channel['identifier'],
-        participant1=channel['our_state']['address'],
-        participant2=channel['partner_state']['address'],
+        chain=raiden.chain,
+        canonical_identifier=canonical_identifier,
+        participant1=to_canonical_address(channel['our_state']['address']),
+        participant2=to_canonical_address(channel['partner_state']['address']),
         block_identifier='latest',
     )
     return our_locksroot, partner_locksroot
+
+
+def _add_onchain_locksroot_to_channel_new_state_changes(
+        storage: SQLiteStorage,
+) -> None:
+    """ Adds `onchain_locksroot` to our_state/partner_state in
+    ContractReceiveChannelNew's channel_state object. """
+    batch_size = 50
+    batch_query = storage.batch_query_state_changes(
+        batch_size=batch_size,
+        filters=[
+            ('_type', 'raiden.transfer.state_change.ContractReceiveChannelNew'),
+        ],
+    )
+    for state_changes_batch in batch_query:
+        updated_state_changes = list()
+        for state_change in state_changes_batch:
+            state_change_data = json.loads(state_change.data)
+
+            channel_state = state_change_data['channel_state']
+            msg = 'v18 state changes cant contain onchain_locksroot'
+            assert 'onchain_locksroot' not in channel_state['our_state'], msg
+
+            msg = 'v18 state changes cant contain onchain_locksroot'
+            assert 'onchain_locksroot' not in channel_state['partner_state'], msg
+
+            channel_state['our_state']['onchain_locksroot'] = serialize_bytes(EMPTY_MERKLE_ROOT)
+            channel_state['partner_state']['onchain_locksroot'] = serialize_bytes(
+                EMPTY_MERKLE_ROOT,
+            )
+
+            updated_state_changes.append((
+                json.dumps(state_change_data),
+                state_change.state_change_identifier,
+            ))
+        storage.update_state_changes(updated_state_changes)
 
 
 def _add_onchain_locksroot_to_channel_settled_state_changes(
@@ -71,14 +116,13 @@ def _add_onchain_locksroot_to_channel_settled_state_changes(
     for state_changes_batch in batch_query:
         updated_state_changes = list()
         for state_change in state_changes_batch:
-            data = json.loads(state_change.data)
+            state_change_data = json.loads(state_change.data)
             msg = 'v18 state changes cant contain our_onchain_locksroot'
-            assert 'our_onchain_locksroot' not in data, msg
+            assert 'our_onchain_locksroot' not in state_change_data, msg
 
             msg = 'v18 state changes cant contain partner_onchain_locksroot'
-            assert 'partner_onchain_locksroot' not in data, msg
+            assert 'partner_onchain_locksroot' not in state_change_data, msg
 
-            state_change_data = json.loads(state_change.data)
             token_network_identifier = state_change_data['token_network_identifier']
             channel_identifier = state_change_data['channel_identifier']
 
@@ -96,20 +140,29 @@ def _add_onchain_locksroot_to_channel_settled_state_changes(
 
             channel_state_data = json.loads(channel_new_state_change.data)
             new_channel_state = channel_state_data['channel_state']
+
+            canonical_identifier = CanonicalIdentifier(
+                chain_identifier=CHAIN_ID_UNSPECIFIED,
+                token_network_address=to_canonical_address(token_network_identifier),
+                channel_identifier=int(channel_identifier),
+            )
             our_locksroot, partner_locksroot = get_onchain_locksroots(
-                raiden=raiden,
-                token_network_address=token_network_identifier,
-                channel_identifier=channel_identifier,
-                participant1=new_channel_state['our_state']['address'],
-                participant2=new_channel_state['partner_state']['address'],
+                chain=raiden.chain,
+                canonical_identifier=canonical_identifier,
+                participant1=to_canonical_address(new_channel_state['our_state']['address']),
+                participant2=to_canonical_address(new_channel_state['partner_state']['address']),
                 block_identifier='latest',
             )
 
-            data['our_onchain_locksroot'] = our_locksroot
-            data['partner_onchain_locksroot'] = partner_locksroot
+            state_change_data['our_onchain_locksroot'] = serialize_bytes(
+                our_locksroot,
+            )
+            state_change_data['partner_onchain_locksroot'] = serialize_bytes(
+                partner_locksroot,
+            )
 
             updated_state_changes.append((
-                json.dumps(data),
+                json.dumps(state_change_data),
                 state_change.state_change_identifier,
             ))
         storage.update_state_changes(updated_state_changes)
@@ -138,8 +191,8 @@ def _add_onchain_locksroot_to_snapshot(
                     token_network=token_network,
                     channel=channel,
                 )
-                channel['our_state']['onchain_locksroot'] = our_locksroot
-                channel['partner_state']['onchain_locksroot'] = partner_locksroot
+                channel['our_state']['onchain_locksroot'] = serialize_bytes(our_locksroot)
+                channel['partner_state']['onchain_locksroot'] = serialize_bytes(partner_locksroot)
 
     return json.dumps(snapshot, indent=4), snapshot_record.identifier
 
@@ -168,14 +221,15 @@ def _add_onchain_locksroot_to_snapshots(
     storage.update_snapshots(updated_snapshots_data)
 
 
-def upgrade_v19_to_v20(
+def upgrade_v19_to_v20(  # pylint: disable=unused-argument
         storage: SQLiteStorage,
         old_version: int,
-        current_version: int,
+        current_version: int,  # pylint: disable=unused-argument
         raiden: 'RaidenService',
-        **kwargs,
+        **kwargs,  # pylint: disable=unused-argument
 ) -> int:
     if old_version == SOURCE_VERSION:
+        _add_onchain_locksroot_to_channel_new_state_changes(storage)
         _add_onchain_locksroot_to_channel_settled_state_changes(raiden, storage)
         _add_onchain_locksroot_to_snapshots(raiden, storage)
 

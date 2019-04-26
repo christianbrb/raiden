@@ -22,22 +22,6 @@ def setup_storage(db_path):
             log_time=datetime.utcnow().isoformat(timespec='milliseconds'),
         )
 
-    # Add the v19 events to the DB
-    events_file = Path(__file__).parent / 'data/v19_events.json'
-    events_data = json.loads(events_file.read_text())
-    event_tuples = []
-    for event in events_data:
-        state_change_identifier = event[1]
-        event_data = json.dumps(event[2])
-        log_time = datetime.utcnow().isoformat(timespec='milliseconds')
-        event_tuples.append((
-            None,
-            state_change_identifier,
-            log_time,
-            event_data,
-        ))
-    storage.write_events(event_tuples)
-
     chain_state_data = Path(__file__).parent / 'data/v19_chainstate.json'
     chain_state = chain_state_data.read_text()
     cursor = storage.conn.cursor()
@@ -53,8 +37,8 @@ def setup_storage(db_path):
 
 def test_upgrade_v19_to_v20(tmp_path):
     old_db_filename = tmp_path / Path('v19_log.db')
-    with patch('raiden.utils.upgrades.older_db_file') as older_db_file:
-        older_db_file.return_value = str(old_db_filename)
+    with patch('raiden.utils.upgrades.latest_db_file') as latest_db_file:
+        latest_db_file.return_value = str(old_db_filename)
         storage = setup_storage(str(old_db_filename))
         with patch('raiden.storage.sqlite.RAIDEN_DB_VERSION', new=19):
             storage.update_version()
@@ -62,8 +46,8 @@ def test_upgrade_v19_to_v20(tmp_path):
 
     raiden_service_mock = MockRaidenService()
 
-    our_onchain_locksroot = serialize_bytes(make_32bytes())
-    partner_onchain_locksroot = serialize_bytes(make_32bytes())
+    our_onchain_locksroot = make_32bytes()
+    partner_onchain_locksroot = make_32bytes()
 
     details = Mock()
     details.our_details.address = make_address()
@@ -92,14 +76,26 @@ def test_upgrade_v19_to_v20(tmp_path):
     batch_query = storage.batch_query_state_changes(
         batch_size=500,
         filters=[
+            ('_type', 'raiden.transfer.state_change.ContractReceiveChannelNew'),
+        ],
+    )
+    for state_changes_batch in batch_query:
+        for state_change_record in state_changes_batch:
+            data = json.loads(state_change_record.data)
+            assert 'onchain_locksroot' in data['channel_state']['our_state']
+            assert 'onchain_locksroot' in data['channel_state']['partner_state']
+
+    batch_query = storage.batch_query_state_changes(
+        batch_size=500,
+        filters=[
             ('_type', 'raiden.transfer.state_change.ContractReceiveChannelSettled'),
         ],
     )
     for state_changes_batch in batch_query:
         for state_change_record in state_changes_batch:
             data = json.loads(state_change_record.data)
-            assert data['our_onchain_locksroot'] is not None
-            assert data['partner_onchain_locksroot'] is not None
+            assert data['our_onchain_locksroot'] == serialize_bytes(our_onchain_locksroot)
+            assert data['partner_onchain_locksroot'] == serialize_bytes(partner_onchain_locksroot)
 
     batch_query = storage.batch_query_event_records(
         batch_size=500,
@@ -120,5 +116,5 @@ def test_upgrade_v19_to_v20(tmp_path):
             for channel in token_network['channelidentifiers_to_channels'].values():
                 channel_our_locksroot = channel['our_state']['onchain_locksroot']
                 channel_partner_locksroot = channel['partner_state']['onchain_locksroot']
-                assert channel_our_locksroot == our_onchain_locksroot
-                assert channel_partner_locksroot == partner_onchain_locksroot
+                assert channel_our_locksroot == serialize_bytes(our_onchain_locksroot)
+                assert channel_partner_locksroot == serialize_bytes(partner_onchain_locksroot)

@@ -63,7 +63,9 @@ MANAGED_CONFIG_OPTIONS_OVERRIDABLE = {
     'endpoint-registry-contract-address',
     'tokennetwork-registry-contract-address',
     'secret-registry-contract-address',
+    'service-registry-contract-address',
     'pathfinding-service-address',
+    'pathfinding-eth-address',
 }
 
 
@@ -407,6 +409,8 @@ class NodeRunner:
             return local_pfs
         if global_pfs:
             return global_pfs
+
+        return None
 
     def _validate_options(self, options: Dict[str, Any]):
         for option_name, option_value in options.items():

@@ -19,7 +19,9 @@ from raiden.utils.typing import (
     ChannelID,
     Dict,
     InitiatorAddress,
+    MessageID,
     Optional,
+    PaymentAmount,
     PaymentID,
     PaymentNetworkID,
     Secret,
@@ -228,7 +230,7 @@ class ContractSendChannelUpdateTransfer(ContractSendExpirableEvent):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ContractSendChannelUpdateTransfer':
         restored = cls(
-            expiration=int(data['expiration']),
+            expiration=BlockExpiration(int(data['expiration'])),
             balance_proof=data['balance_proof'],
             triggered_by_block_hash=BlockHash(deserialize_bytes(data['triggered_by_block_hash'])),
         )
@@ -384,7 +386,7 @@ class EventPaymentSentSuccess(Event):
             payment_network_identifier: PaymentNetworkID,
             token_network_identifier: TokenNetworkID,
             identifier: PaymentID,
-            amount: TokenAmount,
+            amount: PaymentAmount,
             target: TargetAddress,
     ) -> None:
         self.payment_network_identifier = payment_network_identifier
@@ -438,8 +440,8 @@ class EventPaymentSentSuccess(Event):
         restored = cls(
             payment_network_identifier=to_canonical_address(data['payment_network_identifier']),
             token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            identifier=int(data['identifier']),
-            amount=int(data['amount']),
+            identifier=PaymentID(int(data['identifier'])),
+            amount=PaymentAmount(int(data['amount'])),
             target=to_canonical_address(data['target']),
         )
 
@@ -512,7 +514,7 @@ class EventPaymentSentFailed(Event):
         restored = cls(
             payment_network_identifier=to_canonical_address(data['payment_network_identifier']),
             token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            identifier=int(data['identifier']),
+            identifier=PaymentID(int(data['identifier'])),
             target=to_canonical_address(data['target']),
             reason=data['reason'],
         )
@@ -594,8 +596,8 @@ class EventPaymentReceivedSuccess(Event):
         restored = cls(
             payment_network_identifier=to_canonical_address(data['payment_network_identifier']),
             token_network_identifier=to_canonical_address(data['token_network_identifier']),
-            identifier=int(data['identifier']),
-            amount=int(data['amount']),
+            identifier=PaymentID(int(data['identifier'])),
+            amount=TokenAmount(int(data['amount'])),
             initiator=to_canonical_address(data['initiator']),
         )
 
@@ -642,7 +644,7 @@ class EventInvalidReceivedTransferRefund(Event):
             data: Dict[str, Any],
     ) -> 'EventInvalidReceivedTransferRefund':
         restored = cls(
-            payment_identifier=int(data['payment_identifier']),
+            payment_identifier=PaymentID(int(data['payment_identifier'])),
             reason=data['reason'],
         )
 
@@ -689,7 +691,7 @@ class EventInvalidReceivedLockExpired(Event):
             data: Dict[str, Any],
     ) -> 'EventInvalidReceivedLockExpired':
         restored = cls(
-            secrethash=serialization.deserialize_bytes(data['secrethash']),
+            secrethash=serialization.deserialize_secret_hash(data['secrethash']),
             reason=data['reason'],
         )
 
@@ -736,7 +738,7 @@ class EventInvalidReceivedLockedTransfer(Event):
             data: Dict[str, Any],
     ) -> 'EventInvalidReceivedLockedTransfer':
         restored = cls(
-            payment_identifier=int(data['payment_identifier']),
+            payment_identifier=PaymentID(int(data['payment_identifier'])),
             reason=data['reason'],
         )
 
@@ -783,7 +785,7 @@ class EventInvalidReceivedUnlock(Event):
             data: Dict[str, Any],
     ) -> 'EventInvalidReceivedUnlock':
         restored = cls(
-            secrethash=serialization.deserialize_bytes(data['secrethash']),
+            secrethash=serialization.deserialize_secret_hash(data['secrethash']),
             reason=data['reason'],
         )
 
@@ -822,7 +824,7 @@ class SendProcessed(SendMessageEvent):
         restored = cls(
             recipient=to_canonical_address(data['recipient']),
             channel_identifier=ChannelID(int(data['channel_identifier'])),
-            message_identifier=int(data['message_identifier']),
+            message_identifier=MessageID(int(data['message_identifier'])),
         )
 
         return restored
