@@ -39,40 +39,32 @@ clean-test:
 	rm -f .coverage
 	rm -fr htmlcov/
 
-LINT_PATHS = raiden/ tools/scenario-player/
+LINT_PATHS = raiden/ tools/
 ISORT_PARAMS = --ignore-whitespace --settings-path ./ --skip-glob '*/node_modules/*' --recursive $(LINT_PATHS)
+BLACK_PATHS = raiden/ tools/
 
-lint:
+lint: mypy mypy-all
 	flake8 raiden/ tools/
-	autopep8 --diff --exit-code --recursive $(LINT_PATHS)
 	isort $(ISORT_PARAMS) --diff --check-only
+	black --check $(BLACK_PATHS)
 	pylint --load-plugins=tools.pylint.gevent_checker --rcfile .pylint.rc $(LINT_PATHS)
 	python setup.py check --restructuredtext --strict
 
-	mypy raiden/transfer raiden/messages.py raiden/encoding --ignore-missing-imports
-
-	# We are starting small with a few files and directories here,
-	# but mypy should run on the whole codebase soon.
-	mypy raiden/api raiden/blockchain raiden/storage raiden/network \
-	--ignore-missing-imports | grep error > mypy-out.txt || true
-	# Expecting status code 1 from `grep`, which indicates no match.
-	# Again, we are starting small, detecting only errors related to
-	# 'BlockNumber', 'Address', 'ChannelID' etc, but all mypy errors should be
-	# detected soon.
-	grep BlockNumber mypy-out.txt; [ $$? -eq 1 ]
-	grep Address mypy-out.txt; [ $$? -eq 1 ]
-	grep 'Item "None" of' mypy-out.txt; [ $$? -eq 1 ]
-	grep ChannelID mypy-out.txt; [ $$? -eq 1 ]
-	grep BalanceProof mypy-out.txt; [ $$? -eq 1 ]
-	grep SendSecret mypy-out.txt; [ $$? -eq 1 ]
-	grep NetworkTimeout mypy-out.txt; [ $$? -eq 1 ]
-	grep Nonce mypy-out.txt; [ $$? -eq 1 ]
-	grep Locksroot mypy-out.txt; [ $$? -eq 1 ]
-	grep TransactionHash mypy-out.txt; [ $$? -eq 1 ]
-	grep TokenNetwork mypy-out.txt; [ $$? -eq 1 ]
-
 isort:
 	isort $(ISORT_PARAMS)
+
+mypy:
+	mypy raiden
+
+mypy-all:
+	# Be aware, that we currently ignore all mypy errors in `raiden.tests.*` through `setup.cfg`.
+	# Remaining errors in tests:
+	mypy --config-file /dev/null raiden --ignore-missing-imports | grep error | wc -l
+
+black:
+	black $(BLACK_PATHS)
+
+format: isort black
 
 test:
 	python setup.py test

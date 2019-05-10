@@ -1,5 +1,7 @@
 import copy
 
+import pytest
+
 from raiden.constants import EMPTY_MERKLE_ROOT
 from raiden.routing import get_best_routes
 from raiden.tests.utils import factories
@@ -24,7 +26,20 @@ from raiden.transfer.state_change import (
 from raiden.utils import sha3
 
 
-def test_contract_receive_channelnew_must_be_idempotent():
+@pytest.fixture
+def channel_properties(our_address, token_network_state):
+    partner_privkey, address = factories.make_privkey_address()
+    properties = factories.NettingChannelStateProperties(
+        our_state=factories.NettingChannelEndStateProperties(balance=80, address=our_address),
+        partner_state=factories.NettingChannelEndStateProperties(balance=80, address=address),
+        canonical_identifier=factories.make_canonical_identifier(
+            token_network_address=token_network_state.address
+        ),
+    )
+    return properties, partner_privkey
+
+
+def test_contract_receive_channelnew_must_be_idempotent(channel_properties):
     block_number = 10
     block_hash = factories.make_block_hash()
 
@@ -32,9 +47,8 @@ def test_contract_receive_channelnew_must_be_idempotent():
     token_id = factories.make_address()
     token_network_state = TokenNetworkState(token_network_id, token_id)
 
-    amount = 30
-    our_balance = amount + 50
-    channel_state1 = factories.make_channel(our_balance=our_balance)
+    properties, _ = channel_properties
+    channel_state1 = factories.create(properties)
     channel_state2 = copy.deepcopy(channel_state1)
 
     state_change1 = ContractReceiveChannelNew(
@@ -66,7 +80,7 @@ def test_contract_receive_channelnew_must_be_idempotent():
         block_hash=block_hash,
     )
 
-    msg = 'the channel must not have been overwritten'
+    msg = "the channel must not have been overwritten"
     channelmap_by_id = iteration.new_state.channelidentifiers_to_channels
     assert channelmap_by_id[channel_state1.identifier] == channel_state1, msg
 
@@ -75,7 +89,7 @@ def test_contract_receive_channelnew_must_be_idempotent():
     assert channel_state1.identifier in partner_channels_ids, msg
 
 
-def test_channel_settle_must_properly_cleanup():
+def test_channel_settle_must_properly_cleanup(channel_properties):
     open_block_number = 10
     open_block_hash = factories.make_block_hash()
 
@@ -83,9 +97,8 @@ def test_channel_settle_must_properly_cleanup():
     token_id = factories.make_address()
     token_network_state = TokenNetworkState(token_network_id, token_id)
 
-    amount = 30
-    our_balance = amount + 50
-    channel_state = factories.make_channel(our_balance=our_balance)
+    properties, _ = channel_properties
+    channel_state = factories.create(properties)
 
     channel_new_state_change = ContractReceiveChannelNew(
         transaction_hash=factories.make_transaction_hash(),
@@ -141,23 +154,14 @@ def test_channel_settle_must_properly_cleanup():
 
 
 def test_channel_data_removed_after_unlock(
-        chain_state,
-        token_network_state,
-        our_address,
+    chain_state, token_network_state, our_address, channel_properties
 ):
     open_block_number = 10
     open_block_hash = factories.make_block_hash()
-    pkey, address = factories.make_privkey_address()
 
-    amount = 30
-    our_balance = amount + 50
-    channel_state = factories.make_channel(
-        our_balance=our_balance,
-        our_address=our_address,
-        partner_balance=our_balance,
-        partner_address=address,
-        token_network_identifier=token_network_state.address,
-    )
+    properties, pkey = channel_properties
+    address = properties.partner_state.address
+    channel_state = factories.create(properties)
 
     channel_new_state_change = ContractReceiveChannelNew(
         transaction_hash=factories.make_transaction_hash(),
@@ -175,27 +179,16 @@ def test_channel_data_removed_after_unlock(
 
     lock_amount = 30
     lock_expiration = 20
-    lock_secret = sha3(b'test_end_state')
+    lock_secret = sha3(b"test_end_state")
     lock_secrethash = sha3(lock_secret)
-    lock = HashTimeLockState(
-        lock_amount,
-        lock_expiration,
-        lock_secrethash,
-    )
+    lock = HashTimeLockState(lock_amount, lock_expiration, lock_secrethash)
 
     mediated_transfer = make_receive_transfer_mediated(
-        channel_state=channel_state,
-        privkey=pkey,
-        nonce=1,
-        transferred_amount=0,
-        lock=lock,
+        channel_state=channel_state, privkey=pkey, nonce=1, transferred_amount=0, lock=lock
     )
 
-    from_route = factories.route_from_channel(channel_state)
-    init_target = ActionInitTarget(
-        from_route,
-        mediated_transfer,
-    )
+    from_route = factories.make_route_from_channel(channel_state)
+    init_target = ActionInitTarget(from_route, mediated_transfer)
 
     node.state_transition(chain_state, init_target)
 
@@ -263,9 +256,7 @@ def test_channel_data_removed_after_unlock(
 
 
 def test_mediator_clear_pairs_after_batch_unlock(
-        chain_state,
-        token_network_state,
-        our_address,
+    chain_state, token_network_state, our_address, channel_properties
 ):
     """ Regression test for https://github.com/raiden-network/raiden/issues/2932
     The mediator must also clear the transfer pairs once a ReceiveBatchUnlock where
@@ -273,17 +264,10 @@ def test_mediator_clear_pairs_after_batch_unlock(
     """
     open_block_number = 10
     open_block_hash = factories.make_block_hash()
-    pkey, address = factories.make_privkey_address()
 
-    amount = 30
-    our_balance = amount + 50
-    channel_state = factories.make_channel(
-        our_balance=our_balance,
-        our_address=our_address,
-        partner_balance=our_balance,
-        partner_address=address,
-        token_network_identifier=token_network_state.address,
-    )
+    properties, pkey = channel_properties
+    address = properties.partner_state.address
+    channel_state = factories.create(properties)
 
     channel_new_state_change = ContractReceiveChannelNew(
         transaction_hash=factories.make_transaction_hash(),
@@ -301,27 +285,17 @@ def test_mediator_clear_pairs_after_batch_unlock(
 
     lock_amount = 30
     lock_expiration = 20
-    lock_secret = sha3(b'test_end_state')
+    lock_secret = sha3(b"test_end_state")
     lock_secrethash = sha3(lock_secret)
-    lock = HashTimeLockState(
-        lock_amount,
-        lock_expiration,
-        lock_secrethash,
-    )
+    lock = HashTimeLockState(lock_amount, lock_expiration, lock_secrethash)
 
     mediated_transfer = make_receive_transfer_mediated(
-        channel_state=channel_state,
-        privkey=pkey,
-        nonce=1,
-        transferred_amount=0,
-        lock=lock,
+        channel_state=channel_state, privkey=pkey, nonce=1, transferred_amount=0, lock=lock
     )
 
-    from_route = factories.route_from_channel(channel_state)
+    from_route = factories.make_route_from_channel(channel_state)
     init_mediator = ActionInitMediator(
-        routes=[from_route],
-        from_route=from_route,
-        from_transfer=mediated_transfer,
+        routes=[from_route], from_route=from_route, from_transfer=mediated_transfer
     )
 
     node.state_transition(chain_state, init_mediator)
@@ -378,27 +352,20 @@ def test_mediator_clear_pairs_after_batch_unlock(
         block_hash=factories.make_block_hash(),
     )
     channel_unlock_iteration = node.state_transition(
-        chain_state=chain_state,
-        state_change=channel_batch_unlock_state_change,
+        chain_state=chain_state, state_change=channel_batch_unlock_state_change
     )
     chain_state = channel_unlock_iteration.new_state
     token_network_state = views.get_token_network_by_identifier(
-        chain_state=chain_state,
-        token_network_id=token_network_state.address,
+        chain_state=chain_state, token_network_id=token_network_state.address
     )
     ids_to_channels = token_network_state.channelidentifiers_to_channels
     assert len(ids_to_channels) == 0
 
     # Make sure that all is fine in the next block
     block = Block(
-        block_number=block_number + 1,
-        gas_limit=1,
-        block_hash=factories.make_transaction_hash(),
+        block_number=block_number + 1, gas_limit=1, block_hash=factories.make_transaction_hash()
     )
-    iteration = node.state_transition(
-        chain_state=chain_state,
-        state_change=block,
-    )
+    iteration = node.state_transition(chain_state=chain_state, state_change=block)
     assert iteration.new_state
 
     # Make sure that mediator task was cleared during the next block processing
@@ -407,24 +374,12 @@ def test_mediator_clear_pairs_after_batch_unlock(
     assert not mediator_task
 
 
-def test_multiple_channel_states(
-        chain_state,
-        token_network_state,
-        our_address,
-):
+def test_multiple_channel_states(chain_state, token_network_state, channel_properties):
     open_block_number = 10
     open_block_hash = factories.make_block_hash()
-    pkey, address = factories.make_privkey_address()
 
-    amount = 30
-    our_balance = amount + 50
-    channel_state = factories.make_channel(
-        our_balance=our_balance,
-        our_address=our_address,
-        partner_balance=our_balance,
-        partner_address=address,
-        token_network_identifier=token_network_state.address,
-    )
+    properties, pkey = channel_properties
+    channel_state = factories.create(properties)
 
     channel_new_state_change = ContractReceiveChannelNew(
         transaction_hash=factories.make_transaction_hash(),
@@ -442,27 +397,16 @@ def test_multiple_channel_states(
 
     lock_amount = 30
     lock_expiration = 20
-    lock_secret = sha3(b'test_end_state')
+    lock_secret = sha3(b"test_end_state")
     lock_secrethash = sha3(lock_secret)
-    lock = HashTimeLockState(
-        lock_amount,
-        lock_expiration,
-        lock_secrethash,
-    )
+    lock = HashTimeLockState(lock_amount, lock_expiration, lock_secrethash)
 
     mediated_transfer = make_receive_transfer_mediated(
-        channel_state=channel_state,
-        privkey=pkey,
-        nonce=1,
-        transferred_amount=0,
-        lock=lock,
+        channel_state=channel_state, privkey=pkey, nonce=1, transferred_amount=0, lock=lock
     )
 
-    from_route = factories.route_from_channel(channel_state)
-    init_target = ActionInitTarget(
-        from_route,
-        mediated_transfer,
-    )
+    from_route = factories.make_route_from_channel(channel_state)
+    init_target = ActionInitTarget(from_route, mediated_transfer)
 
     node.state_transition(chain_state, init_target)
 
@@ -506,11 +450,14 @@ def test_multiple_channel_states(
     assert channel_state.identifier in ids_to_channels
 
     # Create new channel while the previous one is pending unlock
-    new_channel_state = factories.make_channel(
-        our_balance=our_balance,
-        partner_balance=our_balance,
-        partner_address=address,
+    new_channel_properties = factories.create_properties(
+        factories.NettingChannelStateProperties(
+            canonical_identifier=factories.make_canonical_identifier()
+        ),
+        defaults=properties,
     )
+    new_channel_state = factories.create(new_channel_properties)
+
     channel_new_state_change = ContractReceiveChannelNew(
         transaction_hash=factories.make_transaction_hash(),
         channel_state=new_channel_state,
@@ -532,23 +479,14 @@ def test_multiple_channel_states(
     assert channel_state.identifier in ids_to_channels
 
 
-def test_routing_updates(
-        token_network_state,
-        our_address,
-):
+def test_routing_updates(token_network_state, our_address, channel_properties):
     open_block_number = 10
-    address1 = factories.make_address()
+    properties, _ = channel_properties
+    address1 = properties.partner_state.address
     address2 = factories.make_address()
     address3 = factories.make_address()
 
-    amount = 30
-    our_balance = amount + 50
-    channel_state = factories.make_channel(
-        our_balance=our_balance,
-        our_address=our_address,
-        partner_balance=our_balance,
-        partner_address=address1,
-    )
+    channel_state = factories.create(properties)
 
     open_block_hash = factories.make_block_hash()
     # create a new channel as participant, check graph update
@@ -690,11 +628,7 @@ def test_routing_updates(
     assert len(graph_state.network.edges()) == 0
 
 
-def test_routing_issue2663(
-        chain_state,
-        token_network_state,
-        our_address,
-):
+def test_routing_issue2663(chain_state, token_network_state, our_address):
     open_block_number = 10
     open_block_number_hash = factories.make_block_hash()
     address1 = factories.make_address()
@@ -711,17 +645,17 @@ def test_routing_issue2663(
     #  v                    |
     # (2)  ----- 100 --->  (3)
 
-    channel_state1 = factories.make_channel(
-        our_balance=50,
-        our_address=our_address,
-        partner_balance=0,
-        partner_address=address1,
+    channel_state1 = factories.create(
+        factories.NettingChannelStateProperties(
+            our_state=factories.NettingChannelEndStateProperties(balance=50, address=our_address),
+            partner_state=factories.NettingChannelEndStateProperties(balance=0, address=address1),
+        )
     )
-    channel_state2 = factories.make_channel(
-        our_balance=100,
-        our_address=our_address,
-        partner_balance=0,
-        partner_address=address2,
+    channel_state2 = factories.create(
+        factories.NettingChannelStateProperties(
+            our_state=factories.NettingChannelEndStateProperties(balance=100, address=our_address),
+            partner_state=factories.NettingChannelEndStateProperties(balance=0, address=address2),
+        )
     )
 
     # create new channels as participant
@@ -760,8 +694,7 @@ def test_routing_issue2663(
     channel_new_state_change3 = ContractReceiveRouteNew(
         transaction_hash=factories.make_transaction_hash(),
         canonical_identifier=factories.make_canonical_identifier(
-            token_network_address=token_network_state.address,
-            channel_identifier=3,
+            token_network_address=token_network_state.address, channel_identifier=3
         ),
         participant1=address2,
         participant2=address3,
@@ -783,8 +716,7 @@ def test_routing_issue2663(
     channel_new_state_change4 = ContractReceiveRouteNew(
         transaction_hash=factories.make_transaction_hash(),
         canonical_identifier=factories.make_canonical_identifier(
-            token_network_address=token_network_state.address,
-            channel_identifier=4,
+            token_network_address=token_network_state.address, channel_identifier=4
         ),
         participant1=address3,
         participant2=address1,
@@ -817,7 +749,7 @@ def test_routing_issue2663(
         amount=50,
         previous_address=None,
         config={},
-        privkey=b'',  # not used if pfs is not configured
+        privkey=b"",  # not used if pfs is not configured
     )
     assert routes1[0].node_address == address1
     assert routes1[1].node_address == address2
@@ -830,7 +762,7 @@ def test_routing_issue2663(
         amount=51,
         previous_address=None,
         config={},
-        privkey=b'',
+        privkey=b"",
     )
     assert routes2[0].node_address == address1
 
@@ -849,7 +781,7 @@ def test_routing_issue2663(
         amount=50,
         previous_address=None,
         config={},
-        privkey=b'',
+        privkey=b"",
     )
     assert routes1[0].node_address == address1
 
@@ -861,7 +793,7 @@ def test_routing_issue2663(
         amount=51,
         previous_address=None,
         config={},
-        privkey=b'',
+        privkey=b"",
     )
     assert routes2[0].node_address == address1
 
@@ -881,7 +813,7 @@ def test_routing_issue2663(
         amount=50,
         previous_address=None,
         config={},
-        privkey=b'',
+        privkey=b"",
     )
     assert routes1[0].node_address == address1
     assert routes1[1].node_address == address2
@@ -894,7 +826,7 @@ def test_routing_issue2663(
         amount=51,
         previous_address=None,
         config={},
-        privkey=b'',
+        privkey=b"",
     )
     assert routes2[0].node_address == address1
 
@@ -913,7 +845,7 @@ def test_routing_issue2663(
         amount=50,
         previous_address=None,
         config={},
-        privkey=b'',
+        privkey=b"",
     )
     # right now the channel to 1 gets filtered out as it is offline
     assert routes1[0].node_address == address1
@@ -926,16 +858,12 @@ def test_routing_issue2663(
         amount=51,
         previous_address=None,
         config={},
-        privkey=b'',
+        privkey=b"",
     )
     assert routes2[0].node_address == address1
 
 
-def test_routing_priority(
-        chain_state,
-        token_network_state,
-        our_address,
-):
+def test_routing_priority(chain_state, token_network_state, our_address):
     open_block_number = 10
     open_block_number_hash = factories.make_block_hash()
     address1 = factories.make_address()
@@ -959,17 +887,17 @@ def test_routing_priority(
     #  v                    v
     # (4)                  (4)
 
-    channel_state1 = factories.make_channel(
-        our_balance=1,
-        our_address=our_address,
-        partner_balance=1,
-        partner_address=address1,
+    channel_state1 = factories.create(
+        factories.NettingChannelStateProperties(
+            our_state=factories.NettingChannelEndStateProperties(balance=1, address=our_address),
+            partner_state=factories.NettingChannelEndStateProperties(balance=1, address=address1),
+        )
     )
-    channel_state2 = factories.make_channel(
-        our_balance=2,
-        our_address=our_address,
-        partner_balance=0,
-        partner_address=address2,
+    channel_state2 = factories.create(
+        factories.NettingChannelStateProperties(
+            our_state=factories.NettingChannelEndStateProperties(balance=2, address=our_address),
+            partner_state=factories.NettingChannelEndStateProperties(balance=0, address=address2),
+        )
     )
 
     # create new channels as participant
@@ -1004,8 +932,7 @@ def test_routing_priority(
     channel_new_state_change3 = ContractReceiveRouteNew(
         transaction_hash=factories.make_transaction_hash(),
         canonical_identifier=factories.make_canonical_identifier(
-            token_network_address=token_network_state.address,
-            channel_identifier=3,
+            token_network_address=token_network_state.address, channel_identifier=3
         ),
         participant1=address2,
         participant2=address3,
@@ -1023,8 +950,7 @@ def test_routing_priority(
     channel_new_state_change4 = ContractReceiveRouteNew(
         transaction_hash=factories.make_transaction_hash(),
         canonical_identifier=factories.make_canonical_identifier(
-            token_network_address=token_network_state.address,
-            channel_identifier=4,
+            token_network_address=token_network_state.address, channel_identifier=4
         ),
         participant1=address3,
         participant2=address1,
@@ -1042,8 +968,7 @@ def test_routing_priority(
     channel_new_state_change5 = ContractReceiveRouteNew(
         transaction_hash=factories.make_transaction_hash(),
         canonical_identifier=factories.make_canonical_identifier(
-            token_network_address=token_network_state.address,
-            channel_identifier=4,
+            token_network_address=token_network_state.address, channel_identifier=4
         ),
         participant1=address3,
         participant2=address4,
@@ -1061,8 +986,7 @@ def test_routing_priority(
     channel_new_state_change6 = ContractReceiveRouteNew(
         transaction_hash=factories.make_transaction_hash(),
         canonical_identifier=factories.make_canonical_identifier(
-            token_network_address=token_network_state.address,
-            channel_identifier=4,
+            token_network_address=token_network_state.address, channel_identifier=4
         ),
         participant1=address2,
         participant2=address4,
@@ -1092,7 +1016,7 @@ def test_routing_priority(
         amount=1,
         previous_address=None,
         config={},
-        privkey=b'',
+        privkey=b"",
     )
     assert routes[0].node_address == address1
     assert routes[1].node_address == address2
@@ -1113,7 +1037,7 @@ def test_routing_priority(
         amount=1,
         previous_address=None,
         config={},
-        privkey=b'',
+        privkey=b"",
     )
     assert routes[0].node_address == address2
     assert routes[1].node_address == address1

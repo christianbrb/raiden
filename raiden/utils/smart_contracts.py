@@ -1,19 +1,17 @@
 from eth_utils import to_canonical_address
 
 from raiden.network.rpc.client import JSONRPCClient
-from raiden.utils.typing import Address, Any, Tuple
+from raiden.utils.typing import ABI, Address, Any, Tuple
 from raiden_contracts.contract_manager import ContractManager
 
 
 def deploy_contract_web3(
-        contract_name: str,
-        deploy_client: JSONRPCClient,
-        contract_manager: ContractManager,
-        constructor_arguments: Tuple[Any, ...] = (),
+    contract_name: str,
+    deploy_client: JSONRPCClient,
+    contract_manager: ContractManager,
+    constructor_arguments: Tuple[Any] = None,
 ) -> Address:
-    compiled = {
-        contract_name: contract_manager.get_contract(contract_name),
-    }
+    compiled = {contract_name: ABI(contract_manager.get_contract(contract_name))}
     contract_proxy, _ = deploy_client.deploy_solidity_contract(
         contract_name=contract_name,
         all_contracts=compiled,

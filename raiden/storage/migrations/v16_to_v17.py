@@ -24,18 +24,18 @@ def _transform_snapshot(raw_snapshot):
     - `InitiatorTransferState` has a new attribute `transfer_state`
     """
     snapshot = json.loads(raw_snapshot)
-    secrethash_to_task = snapshot['payment_mapping']['secrethashes_to_task']
+    secrethash_to_task = snapshot["payment_mapping"]["secrethashes_to_task"]
     for secrethash, task in secrethash_to_task.items():
-        if task['_type'] != 'raiden.transfer.state.InitiatorTask':
+        if task["_type"] != "raiden.transfer.state.InitiatorTask":
             continue
 
         # The transfer is pending as long as the initiator task still exists
-        transfer_secrethash = task['manager_state']['initiator']['transfer']['lock']['secrethash']
-        task['manager_state']['initiator']['transfer_state'] = 'transfer_pending'
-        task['manager_state']['initiator_transfers'] = {
-            transfer_secrethash: task['manager_state']['initiator'],
+        transfer_secrethash = task["manager_state"]["initiator"]["transfer"]["lock"]["secrethash"]
+        task["manager_state"]["initiator"]["transfer_state"] = "transfer_pending"
+        task["manager_state"]["initiator_transfers"] = {
+            transfer_secrethash: task["manager_state"]["initiator"]
         }
-        del task['manager_state']['initiator']
+        del task["manager_state"]["initiator"]
         secrethash_to_task[secrethash] = task
     return json.dumps(snapshot, indent=4)
 
@@ -49,7 +49,9 @@ def _transform_snapshots(storage: SQLiteStorage):
     storage.update_snapshots(updated_snapshots_data)
 
 
-def upgrade_v16_to_v17(storage: SQLiteStorage, old_version: int, current_version: int, **kwargs):
+def upgrade_v16_to_v17(
+    storage: SQLiteStorage, old_version: int, current_version: int, **kwargs
+):  # pylint: disable=unused-argument
     """ InitiatorPaymentState was changed so that the "initiator"
     attribute is renamed to "initiator_transfers" and converted to a list.
     """

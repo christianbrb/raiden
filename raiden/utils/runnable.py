@@ -12,18 +12,17 @@ class Runnable:
     Allows subtasks to crash self, and bubble up the exception in the greenlet
     In the future, when proper restart is implemented, may be replaced by actual greenlet
     """
+
     greenlet: Greenlet = None
     args: Sequence = tuple()  # args for _run()
     kwargs: dict = dict()  # kwargs for _run()
 
-    def __init__(self, run=None, *args, **kwargs):
-        if run is not None:
-            self._run = run
+    def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
 
         self.greenlet = Greenlet(self._run, *self.args, **self.kwargs)
-        self.greenlet.name = f'{self.__class__.__name__}|{self.greenlet.name}'
+        self.greenlet.name = f"{self.__class__.__name__}|{self.greenlet.name}"
 
     def start(self):
         """ Synchronously start task
@@ -32,15 +31,15 @@ class Runnable:
         Start-time exceptions may be raised
         """
         if self.greenlet:
-            raise RuntimeError(f'Greenlet {self.greenlet!r} already started')
+            raise RuntimeError(f"Greenlet {self.greenlet!r} already started")
         pristine = (
-            not self.greenlet.dead and
-            tuple(self.greenlet.args) == tuple(self.args) and
-            self.greenlet.kwargs == self.kwargs
+            not self.greenlet.dead
+            and tuple(self.greenlet.args) == tuple(self.args)
+            and self.greenlet.kwargs == self.kwargs
         )
         if not pristine:
             self.greenlet = Greenlet(self._run, *self.args, **self.kwargs)
-            self.greenlet.name = f'{self.__class__.__name__}|{self.greenlet.name}'
+            self.greenlet.name = f"{self.__class__.__name__}|{self.greenlet.name}"
         self.greenlet.start()
 
     def _run(self, *args, **kwargs):
@@ -63,7 +62,7 @@ class Runnable:
 
         Default callback re-raises the exception inside _run() """
         log.error(
-            'Runnable subtask died!',
+            "Runnable subtask died!",
             this=self,
             running=bool(self),
             subtask=subtask,
@@ -75,14 +74,8 @@ class Runnable:
 
     # redirect missing members to underlying greenlet for compatibility
     # but better use greenlet directly for now, to make use of the c extension optimizations
-    def __getattribute__(self, name):
-        try:
-            return super().__getattribute__(name)
-        except AttributeError as ex:
-            try:
-                return getattr(self.greenlet, name)
-            except AttributeError:
-                raise ex from None
+    def __getattr__(self, item):
+        return getattr(self.greenlet, item)
 
     def __bool__(self):
         return bool(self.greenlet)
