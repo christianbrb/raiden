@@ -1,5 +1,5 @@
 import json
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Tuple, TypeVar
 
 from eth_utils import to_checksum_address
 
@@ -16,15 +16,15 @@ T = TypeVar("T")
 
 BATCH_UNLOCK = "raiden.transfer.state_change.ContractReceiveChannelBatchUnlock"
 
-SPELLING_VARS_TOKEN_NETWORK = (
+SPELLING_VARS_TOKEN_NETWORK = [
     "token_network_address",
     "token_network_id",
     "token_network_identifier",
-)
+]
 
-SPELLING_VARS_CHANNEL = ("channel_identifier", "channel_id", "identifier")
+SPELLING_VARS_CHANNEL = ["channel_identifier", "channel_id", "identifier"]
 
-SPELLING_VARS_CHAIN = ("chain_id", "chain_identifier")
+SPELLING_VARS_CHAIN = ["chain_id", "chain_identifier"]
 
 
 # these are missing the chain-id
@@ -158,7 +158,7 @@ def constraint_removed_duplicated_values(obj: Dict[str, Any]) -> None:
             assert key not in obj
 
 
-def contraint_has_canonical_identifier(obj: Dict[str, Any]) -> None:
+def constraint_has_canonical_identifier(obj: Dict[str, Any]) -> None:
     _type = obj.get("_type")
     if _type in ALL_MIGRATING and _type not in ALL_REMOVE_MIGRATIONS:
         canonical_identifier = obj.get("canonical_identifier")
@@ -170,7 +170,7 @@ def contraint_has_canonical_identifier(obj: Dict[str, Any]) -> None:
 
 def constraint_has_canonical_identifier_or_values_removed(obj: Dict[str, Any]) -> None:
     constraint_removed_duplicated_values(obj)
-    contraint_has_canonical_identifier(obj)
+    constraint_has_canonical_identifier(obj)
 
 
 def walk_dicts(obj: Union[List, Dict], callback: Callable) -> None:
@@ -224,8 +224,8 @@ def _add_canonical_identifier_to_statechanges(
     our_address = str(to_checksum_address(raiden.address)).lower()
 
     for state_change_batch in storage.batch_query_state_changes(batch_size=500):
-        updated_state_changes = list()
-        delete_state_changes = list()
+        updated_state_changes: List[Tuple[str, int]] = list()
+        delete_state_changes: List[Tuple[int]] = list()
 
         for state_change_record in state_change_batch:
             state_change_obj = json.loads(state_change_record.data)
@@ -236,22 +236,22 @@ def _add_canonical_identifier_to_statechanges(
             )
 
             if should_delete:
-                delete_state_changes.append(state_change_record.identifier)
+                delete_state_changes.append((state_change_record.state_change_identifier,))
             else:
-                channel_id = None
+                channel_id: Optional[int] = None
                 if is_unlock:
                     channel_id = resolve_channel_id_for_unlock(
                         storage, state_change_obj, our_address
                     )
                 walk_dicts(
                     state_change_obj,
-                    lambda obj, channel_id=channel_id: upgrade_object(obj, chain_id, channel_id),
+                    lambda obj, channel_id_=channel_id: upgrade_object(obj, chain_id, channel_id_),
                 )
 
-            walk_dicts(state_change_obj, constraint_has_canonical_identifier_or_values_removed)
-            updated_state_changes.append(
-                (json.dumps(state_change_obj), state_change_record.state_change_identifier)
-            )
+                walk_dicts(state_change_obj, constraint_has_canonical_identifier_or_values_removed)
+                updated_state_changes.append(
+                    (json.dumps(state_change_obj), state_change_record.state_change_identifier)
+                )
 
         storage.update_state_changes(updated_state_changes)
         storage.delete_state_changes(delete_state_changes)

@@ -4,7 +4,11 @@ from raiden.transfer import channel
 from raiden.transfer.architecture import Event, StateChange, TransitionResult
 from raiden.transfer.events import EventPaymentSentFailed
 from raiden.transfer.mediated_transfer import initiator
-from raiden.transfer.mediated_transfer.events import EventUnlockClaimFailed, EventUnlockFailed
+from raiden.transfer.mediated_transfer.events import (
+    EventRouteFailed,
+    EventUnlockClaimFailed,
+    EventUnlockFailed,
+)
 from raiden.transfer.mediated_transfer.state import (
     InitiatorPaymentState,
     InitiatorTransferState,
@@ -121,9 +125,7 @@ def maybe_try_new_route(
         new_transfer = sub_iteration.new_state.transfer
         payment_state.initiator_transfers[new_transfer.lock.secrethash] = sub_iteration.new_state
 
-    iteration = TransitionResult(payment_state, events)
-
-    return iteration
+    return TransitionResult(payment_state, events)
 
 
 def subdispatch_to_initiatortransfer(
@@ -196,7 +198,7 @@ def handle_init(
     pseudo_random_generator: random.Random,
     block_number: BlockNumber,
 ) -> TransitionResult[InitiatorPaymentState]:
-    events: List[Event]
+    events: List[Event] = list()
     if payment_state is None:
         sub_iteration = initiator.try_new_route(
             channelidentifiers_to_channels=channelidentifiers_to_channels,
@@ -213,11 +215,8 @@ def handle_init(
                     sub_iteration.new_state.transfer.lock.secrethash: sub_iteration.new_state
                 }
             )
-    else:
-        events = list()
 
-    iteration = TransitionResult(payment_state, events)
-    return iteration
+    return TransitionResult(payment_state, events)
 
 
 def handle_cancelpayment(
@@ -279,7 +278,7 @@ def handle_transferrefundcancelroute(
         and refund_transfer.lock.expiration == original_transfer.lock.expiration
     )
 
-    is_valid_refund = channel.refund_transfer_matches_received(refund_transfer, original_transfer)
+    is_valid_refund = channel.refund_transfer_matches_transfer(refund_transfer, original_transfer)
 
     events = list()
     if not is_valid_lock or not is_valid_refund:
@@ -293,6 +292,9 @@ def handle_transferrefundcancelroute(
 
     if not is_valid:
         return TransitionResult(payment_state, list())
+
+    route_failed_event = EventRouteFailed(secrethash=original_transfer.lock.secrethash)
+    events.append(route_failed_event)
 
     old_description = initiator_state.transfer_description
     transfer_description = TransferDescriptionWithSecretState(
@@ -318,9 +320,7 @@ def handle_transferrefundcancelroute(
 
     events.extend(sub_iteration.events)
 
-    iteration = TransitionResult(payment_state, events)
-
-    return iteration
+    return TransitionResult(payment_state, events)
 
 
 def handle_lock_expired(

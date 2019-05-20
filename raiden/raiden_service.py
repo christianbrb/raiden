@@ -18,12 +18,15 @@ from raiden.connection_manager import ConnectionManager
 from raiden.constants import (
     EMPTY_SECRET,
     GENESIS_BLOCK_NUMBER,
+    SECRET_LENGTH,
     SNAPSHOT_STATE_CHANGES_COUNT,
     Environment,
 )
 from raiden.exceptions import (
     InvalidAddress,
     InvalidDBData,
+    InvalidSecret,
+    InvalidSecretHash,
     PaymentConflict,
     RaidenRecoverableError,
     RaidenUnrecoverableError,
@@ -123,7 +126,7 @@ def initiator_init(
     transfer_fee: FeeAmount,
     token_network_identifier: TokenNetworkID,
     target_address: TargetAddress,
-):
+) -> ActionInitInitiator:
     assert transfer_secret != constants.EMPTY_HASH, f"Empty secret node:{raiden!r}"
 
     transfer_state = TransferDescriptionWithSecretState(
@@ -138,9 +141,10 @@ def initiator_init(
         secrethash=transfer_secrethash,
     )
     previous_address = None
-    routes = routing.get_best_routes(
+    routes, _ = routing.get_best_routes(
         chain_state=views.state_from_raiden(raiden),
         token_network_id=token_network_identifier,
+        one_to_n_address=raiden.default_one_to_n_address,
         from_address=InitiatorAddress(raiden.address),
         to_address=target_address,
         amount=transfer_amount,
@@ -148,15 +152,16 @@ def initiator_init(
         config=raiden.config,
         privkey=raiden.privkey,
     )
-    init_initiator_statechange = ActionInitInitiator(transfer_state, routes)
-    return init_initiator_statechange
+    return ActionInitInitiator(transfer_state, routes)
 
 
-def mediator_init(raiden, transfer: LockedTransfer):
+def mediator_init(raiden, transfer: LockedTransfer) -> ActionInitMediator:
     from_transfer = lockedtransfersigned_from_message(transfer)
-    routes = routing.get_best_routes(
+    # Feedback token not used here, will be removed with source routing
+    routes, _ = routing.get_best_routes(
         chain_state=views.state_from_raiden(raiden),
         token_network_id=TokenNetworkID(from_transfer.balance_proof.token_network_identifier),
+        one_to_n_address=raiden.default_one_to_n_address,
         from_address=raiden.address,
         to_address=from_transfer.target,
         amount=PaymentAmount(from_transfer.lock.amount),  # FIXME: mypy; deprecated through #3863
@@ -165,15 +170,13 @@ def mediator_init(raiden, transfer: LockedTransfer):
         privkey=raiden.privkey,
     )
     from_route = RouteState(transfer.sender, from_transfer.balance_proof.channel_identifier)
-    init_mediator_statechange = ActionInitMediator(routes, from_route, from_transfer)
-    return init_mediator_statechange
+    return ActionInitMediator(routes, from_route, from_transfer)
 
 
-def target_init(transfer: LockedTransfer):
+def target_init(transfer: LockedTransfer) -> ActionInitTarget:
     from_transfer = lockedtransfersigned_from_message(transfer)
     from_route = RouteState(transfer.sender, from_transfer.balance_proof.channel_identifier)
-    init_target_statechange = ActionInitTarget(from_route, from_transfer)
-    return init_target_statechange
+    return ActionInitTarget(from_route, from_transfer)
 
 
 class PaymentStatus(NamedTuple):
@@ -293,6 +296,7 @@ class RaidenService(Runnable):
         default_registry: TokenNetworkRegistry,
         default_secret_registry: SecretRegistry,
         default_service_registry: Optional[ServiceRegistry],
+        default_one_to_n_address: Optional[Address],
         transport,
         raiden_event_handler,
         message_handler,
@@ -307,6 +311,7 @@ class RaidenService(Runnable):
         self.chain: BlockChainService = chain
         self.default_registry = default_registry
         self.query_start_block = query_start_block
+        self.default_one_to_n_address = default_one_to_n_address
         self.default_secret_registry = default_secret_registry
         self.default_service_registry = default_service_registry
         self.config = config
@@ -1060,6 +1065,11 @@ class RaidenService(Runnable):
 
         if secrethash is None:
             secrethash = sha3(secret)
+        elif secrethash != sha3(secret):
+            raise InvalidSecretHash("provided secret and secret_hash do not match.")
+
+        if len(secret) != SECRET_LENGTH:
+            raise InvalidSecret("secret of invalid length.")
 
         # We must check if the secret was registered against the latest block,
         # even if the block is forked away and the transaction that registers

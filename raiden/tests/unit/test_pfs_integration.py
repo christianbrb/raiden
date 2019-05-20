@@ -1,5 +1,6 @@
 from copy import copy
 from unittest.mock import Mock, patch
+from uuid import UUID
 
 import pytest
 import requests
@@ -25,8 +26,10 @@ from raiden.transfer.state import (
     TokenNetworkState,
 )
 from raiden.utils import privatekey_to_address, typing
-from raiden.utils.typing import Address, TokenNetworkAddress
+from raiden.utils.typing import Address, BlockNumber, PaymentAmount, TokenNetworkAddress
 from raiden_contracts.utils.proofs import sign_one_to_n_iou
+
+DEFAULT_FEEDBACK_TOKEN = UUID("381e4a005a4d4687ac200fa1acd15c6f")
 
 
 def assert_checksum_address_in_url(url):
@@ -42,22 +45,26 @@ def create_square_network_topology(
     address1 = factories.make_address()
     address2 = factories.make_address()
     address3 = factories.make_address()
+    address4 = factories.make_address()
 
     # Create a network with the following topology
     #
-    # our  ----- 50 ---->  (1)
-    #  |                    ^
-    #  |                    |
-    # 100                  100
-    #  |                    |
-    #  v                    |
-    # (2)  ----- 100 --->  (3)
+    # our  ----- 50 ---->  (1) <------50------
+    #  |                                    |
+    #  |                                    |
+    # 100                                  (4)
+    #  |                                    ^
+    #  v                                    |
+    # (2)  ----- 100 --->  (3) <-------100---
 
     routes = [
         factories.RouteProperties(address1=our_address, address2=address1, capacity1to2=50),
         factories.RouteProperties(address1=our_address, address2=address2, capacity1to2=100),
+        factories.RouteProperties(address1=address4, address2=address1, capacity1to2=50),
         factories.RouteProperties(address1=address2, address2=address3, capacity1to2=100),
-        factories.RouteProperties(address1=address3, address2=address1, capacity1to2=100),
+        factories.RouteProperties(
+            address1=address3, address2=address4, capacity1to2=100, capacity2to1=100
+        ),
     ]
 
     new_state, channels = factories.create_network(
@@ -67,7 +74,7 @@ def create_square_network_topology(
         block_number=10,
     )
 
-    return (new_state, [address1, address2, address3], channels)
+    return new_state, [address1, address2, address3, address4], channels
 
 
 CONFIG = {
@@ -84,7 +91,13 @@ PRIVKEY = b"privkeyprivkeyprivkeyprivkeypriv"
 
 
 def get_best_routes_with_iou_request_mocked(
-    chain_state, token_network_state, from_address, to_address, amount, iou_json_data=None
+    chain_state,
+    token_network_state,
+    one_to_n_address,
+    from_address,
+    to_address,
+    amount,
+    iou_json_data=None,
 ):
     def iou_side_effect(*_, **kwargs):
         assert "params" in kwargs
@@ -99,9 +112,10 @@ def get_best_routes_with_iou_request_mocked(
         return Mock(json=Mock(return_value=iou_json_data or {}), status_code=200)
 
     with patch.object(requests, "get", side_effect=iou_side_effect) as patched:
-        best_routes = get_best_routes(
+        best_routes, feedback_token = get_best_routes(
             chain_state=chain_state,
             token_network_id=token_network_state.address,
+            one_to_n_address=one_to_n_address,
             from_address=from_address,
             to_address=to_address,
             amount=amount,
@@ -110,7 +124,7 @@ def get_best_routes_with_iou_request_mocked(
             privkey=PRIVKEY,
         )
         assert_checksum_address_in_url(patched.call_args[0][0])
-        return best_routes
+        return best_routes, feedback_token
 
 
 def test_get_pfs_info_success():
@@ -156,20 +170,28 @@ def happy_path_fixture(chain_state, token_network_state, our_address):
     token_network_state, addresses, channel_states = create_square_network_topology(
         token_network_state=token_network_state, our_address=our_address
     )
-    address1, address2, address3 = addresses
+    address1, address2, address3, address4 = addresses
 
     chain_state.nodeaddresses_to_networkstates = {
         address1: NODE_NETWORK_REACHABLE,
         address2: NODE_NETWORK_REACHABLE,
         address3: NODE_NETWORK_REACHABLE,
+        address4: NODE_NETWORK_REACHABLE,
     }
 
-    # channel 1 and 2 are flipped here, to see when the PFS gets called
     json_data = {
         "result": [
-            {"path": [to_checksum_address(our_address), to_checksum_address(address2)], "fees": 0},
-            {"path": [to_checksum_address(our_address), to_checksum_address(address1)], "fees": 0},
-        ]
+            {
+                "path": [
+                    to_checksum_address(our_address),
+                    to_checksum_address(address2),
+                    to_checksum_address(address3),
+                    to_checksum_address(address4),
+                ],
+                "fees": 0,
+            }
+        ],
+        "feedback_token": DEFAULT_FEEDBACK_TOKEN.hex,
     }
 
     response = Mock()
@@ -179,17 +201,18 @@ def happy_path_fixture(chain_state, token_network_state, our_address):
     return addresses, chain_state, channel_states, response, token_network_state
 
 
-def test_routing_mocked_pfs_happy_path(happy_path_fixture, our_address):
+def test_routing_mocked_pfs_happy_path(happy_path_fixture, one_to_n_address, our_address):
     addresses, chain_state, channel_states, response, token_network_state = happy_path_fixture
-    address1, address2, _ = addresses
-    channel_state1, channel_state2 = channel_states
+    _, address2, _, address4 = addresses
+    _, channel_state2 = channel_states
 
     with patch.object(requests, "post", return_value=response) as patched:
-        routes = get_best_routes_with_iou_request_mocked(
+        routes, feedback_token = get_best_routes_with_iou_request_mocked(
             chain_state=chain_state,
             token_network_state=token_network_state,
+            one_to_n_address=one_to_n_address,
             from_address=our_address,
-            to_address=address1,
+            to_address=address4,
             amount=50,
         )
 
@@ -197,8 +220,7 @@ def test_routing_mocked_pfs_happy_path(happy_path_fixture, our_address):
 
     assert routes[0].node_address == address2
     assert routes[0].channel_identifier == channel_state2.identifier
-    assert routes[1].node_address == address1
-    assert routes[1].channel_identifier == channel_state1.identifier
+    assert feedback_token == DEFAULT_FEEDBACK_TOKEN
 
     # Check for iou arguments in request payload
     iou = patched.call_args[1]["json"]["iou"]
@@ -210,10 +232,12 @@ def test_routing_mocked_pfs_happy_path(happy_path_fixture, our_address):
     assert iou["expiration_block"] <= latest_expected_expiration
 
 
-def test_routing_mocked_pfs_happy_path_with_updated_iou(happy_path_fixture, our_address):
+def test_routing_mocked_pfs_happy_path_with_updated_iou(
+    happy_path_fixture, one_to_n_address, our_address
+):
     addresses, chain_state, channel_states, response, token_network_state = happy_path_fixture
-    address1, address2, _ = addresses
-    channel_state1, channel_state2 = channel_states
+    _, address2, _, address4 = addresses
+    _, channel_state2 = channel_states
 
     iou = make_iou(
         config=dict(
@@ -222,17 +246,20 @@ def test_routing_mocked_pfs_happy_path_with_updated_iou(happy_path_fixture, our_
             pathfinding_max_fee=13,
         ),
         our_address=factories.UNIT_TRANSFER_SENDER,
+        one_to_n_address=one_to_n_address,
         privkey=PRIVKEY,
-        block_number=10,
+        block_number=BlockNumber(10),
+        chain_id=5,
     )
     last_iou = copy(iou)
 
     with patch.object(requests, "post", return_value=response) as patched:
-        routes = get_best_routes_with_iou_request_mocked(
+        routes, feedback_token = get_best_routes_with_iou_request_mocked(
             chain_state=chain_state,
             token_network_state=token_network_state,
+            one_to_n_address=one_to_n_address,
             from_address=our_address,
-            to_address=address1,
+            to_address=address4,
             amount=50,
             iou_json_data=dict(last_iou=iou),
         )
@@ -241,8 +268,7 @@ def test_routing_mocked_pfs_happy_path_with_updated_iou(happy_path_fixture, our_
 
     assert routes[0].node_address == address2
     assert routes[0].channel_identifier == channel_state2.identifier
-    assert routes[1].node_address == address1
-    assert routes[1].channel_identifier == channel_state1.identifier
+    assert feedback_token == DEFAULT_FEEDBACK_TOKEN
 
     # Check for iou arguments in request payload
     payload = patched.call_args[1]["json"]
@@ -254,11 +280,13 @@ def test_routing_mocked_pfs_happy_path_with_updated_iou(happy_path_fixture, our_
     assert "signature" in payload["iou"]
 
 
-def test_routing_mocked_pfs_request_error(chain_state, token_network_state, our_address):
+def test_routing_mocked_pfs_request_error(
+    chain_state, token_network_state, one_to_n_address, our_address
+):
     token_network_state, addresses, channel_states = create_square_network_topology(
         token_network_state=token_network_state, our_address=our_address
     )
-    address1, address2, address3 = addresses
+    address1, address2, address3, address4 = addresses
     channel_state1, channel_state2 = channel_states
 
     # test routing with all nodes available
@@ -269,24 +297,31 @@ def test_routing_mocked_pfs_request_error(chain_state, token_network_state, our_
     }
 
     with patch.object(requests, "post", side_effect=requests.RequestException()):
-        routes = get_best_routes_with_iou_request_mocked(
+        routes, feedback_token = get_best_routes_with_iou_request_mocked(
             chain_state=chain_state,
             token_network_state=token_network_state,
+            one_to_n_address=one_to_n_address,
             from_address=our_address,
-            to_address=address1,
+            to_address=address4,
             amount=50,
         )
+        # PFS doesn't work, so internal routing is used, so two possible routes are returned,
+        # whereas the path via address1 is shorter
+        # (even if the route is not possible from a global perspective)
         assert routes[0].node_address == address1
         assert routes[0].channel_identifier == channel_state1.identifier
         assert routes[1].node_address == address2
         assert routes[1].channel_identifier == channel_state2.identifier
+        assert feedback_token is None
 
 
-def test_routing_mocked_pfs_bad_http_code(chain_state, token_network_state, our_address):
+def test_routing_mocked_pfs_bad_http_code(
+    chain_state, token_network_state, one_to_n_address, our_address
+):
     token_network_state, addresses, channel_states = create_square_network_topology(
         token_network_state=token_network_state, our_address=our_address
     )
-    address1, address2, address3 = addresses
+    address1, address2, address3, address4 = addresses
     channel_state1, channel_state2 = channel_states
 
     # test routing with all nodes available
@@ -296,11 +331,18 @@ def test_routing_mocked_pfs_bad_http_code(chain_state, token_network_state, our_
         address3: NODE_NETWORK_REACHABLE,
     }
 
-    # channel 1 and 2 are flipped here, to see when the PFS gets called
+    # in case the pfs sends a bad http code but the correct path back
     json_data = {
         "result": [
-            {"path": [to_checksum_address(our_address), to_checksum_address(address2)], "fees": 0},
-            {"path": [to_checksum_address(our_address), to_checksum_address(address1)], "fees": 0},
+            {
+                "path": [
+                    to_checksum_address(our_address),
+                    to_checksum_address(address2),
+                    to_checksum_address(address3),
+                    to_checksum_address(address4),
+                ],
+                "fees": 0,
+            }
         ]
     }
 
@@ -309,24 +351,32 @@ def test_routing_mocked_pfs_bad_http_code(chain_state, token_network_state, our_
     response.json = Mock(return_value=json_data)
 
     with patch.object(requests, "post", return_value=response):
-        routes = get_best_routes_with_iou_request_mocked(
+        routes, feedback_token = get_best_routes_with_iou_request_mocked(
             chain_state=chain_state,
             token_network_state=token_network_state,
+            one_to_n_address=one_to_n_address,
             from_address=our_address,
-            to_address=address1,
+            to_address=address4,
             amount=50,
         )
+        # PFS doesn't work, so internal routing is used, so two possible routes are returned,
+        # whereas the path via address1 is shorter (
+        # even if the route is not possible from a global perspective)
+        # in case the mocked pfs response were used, we would not see address1 on the route
         assert routes[0].node_address == address1
         assert routes[0].channel_identifier == channel_state1.identifier
         assert routes[1].node_address == address2
         assert routes[1].channel_identifier == channel_state2.identifier
+        assert feedback_token is None
 
 
-def test_routing_mocked_pfs_invalid_json(chain_state, token_network_state, our_address):
+def test_routing_mocked_pfs_invalid_json(
+    chain_state, token_network_state, one_to_n_address, our_address
+):
     token_network_state, addresses, channel_states = create_square_network_topology(
         token_network_state=token_network_state, our_address=our_address
     )
-    address1, address2, address3 = addresses
+    address1, address2, address3, address4 = addresses
     channel_state1, channel_state2 = channel_states
 
     # test routing with all nodes available
@@ -341,24 +391,32 @@ def test_routing_mocked_pfs_invalid_json(chain_state, token_network_state, our_a
     response.json = Mock(side_effect=ValueError())
 
     with patch.object(requests, "post", return_value=response):
-        routes = get_best_routes_with_iou_request_mocked(
+        routes, feedback_token = get_best_routes_with_iou_request_mocked(
             chain_state=chain_state,
             token_network_state=token_network_state,
+            one_to_n_address=one_to_n_address,
             from_address=our_address,
-            to_address=address1,
+            to_address=address4,
             amount=50,
         )
+        # PFS doesn't work, so internal routing is used, so two possible routes are returned,
+        # whereas the path via address1 is shorter (
+        # even if the route is not possible from a global perspective)
+        # in case the mocked pfs response were used, we would not see address1 on the route
         assert routes[0].node_address == address1
         assert routes[0].channel_identifier == channel_state1.identifier
         assert routes[1].node_address == address2
         assert routes[1].channel_identifier == channel_state2.identifier
+        assert feedback_token is None
 
 
-def test_routing_mocked_pfs_invalid_json_structure(chain_state, token_network_state, our_address):
+def test_routing_mocked_pfs_invalid_json_structure(
+    chain_state, one_to_n_address, token_network_state, our_address
+):
     token_network_state, addresses, channel_states = create_square_network_topology(
         token_network_state=token_network_state, our_address=our_address
     )
-    address1, address2, address3 = addresses
+    address1, address2, address3, address4 = addresses
     channel_state1, channel_state2 = channel_states
 
     # test routing with all nodes available
@@ -373,39 +431,47 @@ def test_routing_mocked_pfs_invalid_json_structure(chain_state, token_network_st
     response.json = Mock(return_value={})
 
     with patch.object(requests, "post", return_value=response):
-        routes = get_best_routes_with_iou_request_mocked(
+        routes, feedback_token = get_best_routes_with_iou_request_mocked(
             chain_state=chain_state,
             token_network_state=token_network_state,
+            one_to_n_address=one_to_n_address,
             from_address=our_address,
-            to_address=address1,
+            to_address=address4,
             amount=50,
         )
+        # PFS doesn't work, so internal routing is used, so two possible routes are returned,
+        # whereas the path via address1 is shorter (
+        # even if the route is not possible from a global perspective)
+        # in case the mocked pfs response were used, we would not see address1 on the route
         assert routes[0].node_address == address1
         assert routes[0].channel_identifier == channel_state1.identifier
         assert routes[1].node_address == address2
         assert routes[1].channel_identifier == channel_state2.identifier
+        assert feedback_token is None
 
 
-def test_routing_mocked_pfs_unavailable_peer(chain_state, token_network_state, our_address):
+def test_routing_mocked_pfs_unavailable_peer(
+    chain_state, token_network_state, one_to_n_address, our_address
+):
     token_network_state, addresses, channel_states = create_square_network_topology(
         token_network_state=token_network_state, our_address=our_address
     )
-    address1, address2, address3 = addresses
+    address1, address2, address3, address4 = addresses
     _, channel_state2 = channel_states
 
-    # test routing with all nodes available
-    chain_state.nodeaddresses_to_networkstates = {
-        address1: NODE_NETWORK_REACHABLE,
-        address2: NODE_NETWORK_REACHABLE,
-        address3: NODE_NETWORK_REACHABLE,
-    }
-
-    # channel 1 and 2 are flipped here, to see when the PFS gets called
     json_data = {
         "result": [
-            {"path": [to_checksum_address(our_address), to_checksum_address(address2)], "fees": 0},
-            {"path": [to_checksum_address(our_address), to_checksum_address(address1)], "fees": 0},
-        ]
+            {
+                "path": [
+                    to_checksum_address(our_address),
+                    to_checksum_address(address2),
+                    to_checksum_address(address3),
+                    to_checksum_address(address4),
+                ],
+                "fees": 0,
+            }
+        ],
+        "feedback_token": DEFAULT_FEEDBACK_TOKEN.hex,
     }
 
     # test routing with node 2 unavailable
@@ -419,19 +485,22 @@ def test_routing_mocked_pfs_unavailable_peer(chain_state, token_network_state, o
     response.configure_mock(status_code=200)
     response.json = Mock(return_value=json_data)
     with patch.object(requests, "post", return_value=response):
-        routes = get_best_routes_with_iou_request_mocked(
+        routes, feedback_token = get_best_routes_with_iou_request_mocked(
             chain_state=chain_state,
             token_network_state=token_network_state,
+            one_to_n_address=one_to_n_address,
             from_address=our_address,
-            to_address=address1,
+            to_address=address4,
             amount=50,
         )
+        # Node with address2 is not reachable, so even if the only route sent by the PFS
+        # is over address2, the internal routing does not provide
+        assert routes[0].node_address == address2
+        assert routes[0].channel_identifier == channel_state2.identifier
+        assert feedback_token == DEFAULT_FEEDBACK_TOKEN
 
-    assert routes[0].node_address == address2
-    assert routes[0].channel_identifier == channel_state2.identifier
 
-
-def test_get_and_update_iou():
+def test_get_and_update_iou(one_to_n_address):
 
     request_args = dict(
         url="url",
@@ -471,6 +540,8 @@ def test_get_and_update_iou():
         our_address=factories.UNIT_TRANSFER_INITIATOR,
         privkey=PRIVKEY,
         block_number=10,
+        one_to_n_address=one_to_n_address,
+        chain_id=4,
     )
     response.json = Mock(return_value=dict(last_iou=last_iou))
     with patch.object(requests, "get", return_value=response):
@@ -491,7 +562,7 @@ def test_get_and_update_iou():
     assert is_hex(new_iou_2["signature"])
 
 
-def test_get_pfs_iou():
+def test_get_pfs_iou(one_to_n_address):
     token_network_address = TokenNetworkAddress(bytes([1] * 20))
     privkey = bytes([2] * 32)
     sender = privatekey_to_address(privkey)
@@ -505,13 +576,22 @@ def test_get_pfs_iou():
         )
 
         # Previous IOU
-        iou = dict(sender=sender, receiver=receiver, amount=10, expiration_block=1000)
+        iou = dict(
+            sender=sender,
+            receiver=receiver,
+            amount=10,
+            expiration_block=1000,
+            one_to_n_address=to_checksum_address(one_to_n_address),
+            chain_id=4,
+        )
         iou["signature"] = sign_one_to_n_iou(
             privatekey=encode_hex(privkey),
             sender=to_checksum_address(sender),
             receiver=to_checksum_address(receiver),
             amount=iou["amount"],
-            expiration=iou["expiration_block"],
+            expiration_block=iou["expiration_block"],
+            one_to_n_address=iou["one_to_n_address"],
+            chain_id=iou["chain_id"],
         )
         get_mock.return_value.json.return_value = {"last_iou": iou}
         assert (
@@ -524,13 +604,22 @@ def test_make_iou():
     privkey = bytes([2] * 32)
     sender = Address(privatekey_to_address(privkey))
     receiver = Address(bytes([1] * 20))
+    one_to_n_address = Address(bytes([2] * 20))
+    chain_id = 4
     config = {
         "pathfinding_eth_address": encode_hex(receiver),
         "pathfinding_iou_timeout": 10000,
         "pathfinding_max_fee": 100,
     }
 
-    iou = make_iou(config, our_address=sender, privkey=privkey, block_number=10)
+    iou = make_iou(
+        config,
+        our_address=sender,
+        privkey=privkey,
+        block_number=10,
+        one_to_n_address=one_to_n_address,
+        chain_id=chain_id,
+    )
 
     assert iou["sender"] == to_checksum_address(sender)
     assert iou["receiver"] == encode_hex(receiver)
@@ -541,6 +630,7 @@ def test_update_iou():
     privkey = bytes([2] * 32)
     sender = Address(privatekey_to_address(privkey))
     receiver = Address(bytes([1] * 20))
+    one_to_n_address = Address(bytes([2] * 20))
 
     # prepare iou
     iou = {
@@ -548,6 +638,8 @@ def test_update_iou():
         "receiver": encode_hex(receiver),
         "amount": 10,
         "expiration_block": 1000,
+        "chain_id": 4,
+        "one_to_n_address": encode_hex(one_to_n_address),
     }
     iou["signature"] = encode_hex(
         sign_one_to_n_iou(
@@ -555,7 +647,9 @@ def test_update_iou():
             sender=iou["sender"],
             receiver=iou["receiver"],
             amount=iou["amount"],
-            expiration=iou["expiration_block"],
+            expiration_block=iou["expiration_block"],
+            one_to_n_address=iou["one_to_n_address"],
+            chain_id=iou["chain_id"],
         )
     )
 
@@ -610,13 +704,56 @@ def assert_failed_pfs_request(
             assert post_paths.call_count == expected_requests
 
 
+def test_routing_in_direct_channel(happy_path_fixture, our_address, one_to_n_address):
+    addresses, chain_state, channel_states, _, token_network_state = happy_path_fixture
+    address1, _, _, _ = addresses
+    channel_state1, _ = channel_states
+
+    # with the transfer of 50 the direct channel should be returned,
+    # so there must be not a pfs call
+    with patch("raiden.routing.get_best_routes_pfs") as pfs_request:
+        pfs_request.return_value = True, [], "feedback_token"
+        routes, _ = get_best_routes(
+            chain_state=chain_state,
+            token_network_id=token_network_state.address,
+            one_to_n_address=one_to_n_address,
+            from_address=our_address,
+            to_address=address1,
+            amount=PaymentAmount(50),
+            previous_address=None,
+            config=CONFIG,
+            privkey=PRIVKEY,
+        )
+        assert routes[0].node_address == address1
+        assert routes[0].channel_identifier == channel_state1.identifier
+        assert not pfs_request.called
+
+    # with the transfer of 51 the direct channel should not be returned,
+    # so there must be a pfs call
+    with patch("raiden.routing.get_best_routes_pfs") as pfs_request:
+        pfs_request.return_value = True, [], "feedback_token"
+        get_best_routes(
+            chain_state=chain_state,
+            token_network_id=token_network_state.address,
+            one_to_n_address=one_to_n_address,
+            from_address=our_address,
+            to_address=address1,
+            amount=PaymentAmount(51),
+            previous_address=None,
+            config=CONFIG,
+            privkey=PRIVKEY,
+        )
+
+        assert pfs_request.called
+
+
 @pytest.fixture
 def pfs_max_fee():
     return 1000
 
 
 @pytest.fixture
-def query_paths_args(token_network_state, our_address, pfs_max_fee):
+def query_paths_args(chain_id, token_network_state, one_to_n_address, our_address, pfs_max_fee):
     service_config = dict(
         pathfinding_service_address="mock.pathservice",
         pathfinding_eth_address="0x2222222222222222222222222222222222222222",
@@ -630,6 +767,8 @@ def query_paths_args(token_network_state, our_address, pfs_max_fee):
         privkey=PRIVKEY,
         current_block_number=10,
         token_network_address=token_network_state.address,
+        one_to_n_address=one_to_n_address,
+        chain_id=chain_id,
         route_from=our_address,
         route_to=factories.make_address(),
         value=50,
@@ -638,7 +777,7 @@ def query_paths_args(token_network_state, our_address, pfs_max_fee):
 
 @pytest.fixture
 def valid_response_json():
-    return dict(result="some result")
+    return dict(result="some result", feedback_token=DEFAULT_FEEDBACK_TOKEN.hex)
 
 
 def test_query_paths_with_second_try(query_paths_args, valid_response_json):

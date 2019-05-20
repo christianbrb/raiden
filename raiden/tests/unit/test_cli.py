@@ -6,14 +6,12 @@ from click.testing import CliRunner
 
 from raiden.constants import EthClient
 from raiden.ui.cli import OPTION_DEPENDENCIES, run
-from raiden.utils import is_minified_address
 from raiden.utils.ethereum_clients import is_supported_client
 
 # Values to be used to test the option dependencies, need to be distinct form the default values
 # The tuples define the inverse values for the depended-on options
 _OPTION_DEPENDENCY_TEST_VALUES = {
     "pathfinding-service-address": "https://example.com",
-    "pathfinding-eth-address": "0x22222222222222222222",
     "pathfinding-max-paths": 5,
     "pathfinding-max-fee": 1,
     "pathfinding-iou-timeout": 200,
@@ -141,11 +139,3 @@ def test_check_json_rpc_parity():
     )
     assert not client
     assert not any([b1, b2, b3, b4, b5])
-
-
-def test_minified_address_checker():
-    assert is_minified_address("9bed7fd1")
-    assert is_minified_address("8c1d1f23")
-    assert not is_minified_address("xxxxxx")
-    assert not is_minified_address("123zzz")
-    assert not is_minified_address("$@$^$")

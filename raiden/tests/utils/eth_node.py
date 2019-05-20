@@ -2,8 +2,8 @@ import json
 import os
 import shutil
 import subprocess
-import time
 from contextlib import ExitStack, contextmanager
+from datetime import datetime
 from typing import ContextManager
 
 import gevent
@@ -16,18 +16,19 @@ from raiden.tests.fixtures.constants import DEFAULT_BALANCE_BIN, DEFAULT_PASSPHR
 from raiden.tests.utils.genesis import GENESIS_STUB, PARITY_CHAIN_SPEC_STUB
 from raiden.utils import privatekey_to_address, privatekey_to_publickey
 from raiden.utils.http import JSONRPCExecutor
-from raiden.utils.typing import Any, Dict, List, NamedTuple
+from raiden.utils.typing import Address, Any, ChainID, Dict, List, NamedTuple, Port, PrivateKey
 
 log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+Command = List[str]
 _GETH_VERBOSITY_LEVEL = {"error": 1, "warn": 2, "info": 3, "debug": 4}
 
 
 class EthNodeDescription(NamedTuple):
-    private_key: bytes
-    rpc_port: int
-    p2p_port: int
+    private_key: PrivateKey
+    rpc_port: Port
+    p2p_port: Port
     miner: bool
     extra_config: Dict[str, Any]
     blockchain_type: str = "geth"
@@ -46,12 +47,12 @@ class GenesisDescription(NamedTuple):
         chain_id: The id of the private chain.
     """
 
-    prefunded_accounts: List[bytes]
+    prefunded_accounts: List[Address]
     random_marker: str
-    chain_id: int
+    chain_id: ChainID
 
 
-def geth_clique_extradata(extra_vanity, extra_seal):
+def geth_clique_extradata(extra_vanity: str, extra_seal: str) -> str:
     if len(extra_vanity) > 64:
         raise ValueError("extra_vanity length must be smaller-or-equal to 64")
 
@@ -62,11 +63,11 @@ def geth_clique_extradata(extra_vanity, extra_seal):
     return "0x{:0<64}{:0<170}".format(extra_vanity, extra_seal)
 
 
-def parity_extradata(random_marker):
+def parity_extradata(random_marker: str) -> str:
     return f"0x{random_marker:0<64}"
 
 
-def geth_to_cmd(node: Dict, datadir: str, chain_id: int, verbosity: str) -> List[str]:
+def geth_to_cmd(node: Dict, datadir: str, chain_id: ChainID, verbosity: str) -> Command:
     """
     Transform a node configuration into a cmd-args list for `subprocess.Popen`.
 
@@ -123,7 +124,7 @@ def geth_to_cmd(node: Dict, datadir: str, chain_id: int, verbosity: str) -> List
 
 def parity_to_cmd(
     node: Dict, datadir: str, chain_id: int, chain_spec: str, verbosity: str
-) -> List[str]:
+) -> Command:
 
     node_config = {
         "nodekeyhex": "node-key",
@@ -168,37 +169,35 @@ def parity_to_cmd(
     return cmd
 
 
-def geth_create_account(datadir: str, privkey: bytes):
-    """
-    Create an account in `datadir` -- since we're not interested
-    in the rewards, we don't care about the created address.
+def geth_keystore(datadir: str) -> str:
+    return os.path.join(datadir, "keystore")
 
-    Args:
-        datadir: the datadir in which the account is created
-        privkey: the private key for the account
-    """
-    keyfile_path = os.path.join(datadir, "keyfile")
-    with open(keyfile_path, "wb") as handler:
-        handler.write(remove_0x_prefix(encode_hex(privkey)).encode())
 
-    create = subprocess.Popen(
-        ["geth", "--datadir", datadir, "account", "import", keyfile_path],
-        stdin=subprocess.PIPE,
-        universal_newlines=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+def geth_keyfile(datadir: str, address: Address) -> str:
+    keystore = geth_keystore(datadir)
+    os.makedirs(keystore, exist_ok=True)
 
-    create.stdin.write(DEFAULT_PASSPHRASE + os.linesep)
-    time.sleep(0.1)
-    create.stdin.write(DEFAULT_PASSPHRASE + os.linesep)
-    create.communicate()
-    assert create.returncode == 0
+    address = remove_0x_prefix(to_normalized_address(address))
+    broken_iso_8601 = datetime.now().isoformat().replace(":", "-")
+    account = f"UTC--{broken_iso_8601}000Z--{address}"
+
+    return os.path.join(keystore, account)
+
+
+def eth_create_account_file(keyfile_path: str, privkey: PrivateKey) -> None:
+    keyfile_json = create_keyfile_json(privkey, bytes(DEFAULT_PASSPHRASE, "utf-8"))
+
+    # Parity expects a string of length 32 here, but eth_keyfile does not pad
+    iv = keyfile_json["crypto"]["cipherparams"]["iv"]
+    keyfile_json["crypto"]["cipherparams"]["iv"] = f"{iv:0>32}"
+
+    with open(keyfile_path, "w") as keyfile:
+        json.dump(keyfile_json, keyfile)
 
 
 def parity_generate_chain_spec(
-    genesis_path: str, genesis_description: GenesisDescription, seal_account: bytes
-):
+    genesis_path: str, genesis_description: GenesisDescription, seal_account: Address
+) -> None:
     alloc = {
         to_checksum_address(address): {"balance": 1000000000000000000}
         for address in genesis_description.prefunded_accounts
@@ -216,7 +215,7 @@ def parity_generate_chain_spec(
 
 
 def geth_generate_poa_genesis(
-    genesis_path: str, genesis_description: GenesisDescription, seal_account: bytes
+    genesis_path: str, genesis_description: GenesisDescription, seal_account: Address
 ) -> None:
     """Writes a bare genesis to `genesis_path`."""
 
@@ -253,57 +252,17 @@ def geth_init_datadir(datadir: str, genesis_path: str):
         raise ValueError(msg)
 
 
-def parity_write_key_file(key: bytes, keyhex: str, password_path: str, base_path: str) -> str:
-
-    path = f"{base_path}/{(keyhex[:8]).lower()}"
-    os.makedirs(f"{path}")
-
-    password = DEFAULT_PASSPHRASE
-    with open(password_path, "w") as password_file:
-        password_file.write(password)
-
-    keyfile_json = create_keyfile_json(key, bytes(password, "utf-8"))
-    iv = keyfile_json["crypto"]["cipherparams"]["iv"]
-    keyfile_json["crypto"]["cipherparams"]["iv"] = f"{iv:0>32}"
-    # Parity expects a string of length 32 here, but eth_keyfile does not pad
-    with open(f"{path}/keyfile", "w") as keyfile:
-        json.dump(keyfile_json, keyfile)
-
-    return path
+def parity_keystore(datadir: str) -> str:
+    return os.path.join(datadir, "keys", "RaidenTestChain")
 
 
-def parity_create_account(
-    node_configuration: Dict[str, Any], base_path: str, chain_spec: str
-) -> str:
-    key = node_configuration["nodekey"]
-    keyhex = node_configuration["nodekeyhex"]
-    password = node_configuration["password"]
-
-    path = parity_write_key_file(key, keyhex, password, base_path)
-    try:
-        subprocess.run(
-            [
-                "parity",
-                "account",
-                "import",
-                f"--base-path={path}",
-                f"--chain={chain_spec}",
-                f"--password={password}",
-                f"{path}/keyfile",
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-    except subprocess.CalledProcessError as ex:
-        raise RuntimeError(
-            f"Creation of parity signer account failed with return code {ex.returncode}. "
-            f"Output: {ex.output.decode()}"
-        ) from ex
-    return path
+def parity_keyfile(datadir: str) -> str:
+    keystore = parity_keystore(datadir)
+    os.makedirs(keystore, exist_ok=True)
+    return os.path.join(keystore, "keyfile")
 
 
-def eth_check_balance(web3: Web3, accounts_addresses: List[bytes], retries: int = 10) -> None:
+def eth_check_balance(web3: Web3, accounts_addresses: List[Address], retries: int = 10) -> None:
     """ Wait until the given addresses have a balance.
 
     Raises a ValueError if any of the addresses still have no balance after ``retries``.
@@ -320,7 +279,7 @@ def eth_check_balance(web3: Web3, accounts_addresses: List[bytes], retries: int 
 
 
 def eth_node_config(
-    miner_pkey: bytes, p2p_port: int, rpc_port: int, **extra_config: Dict[str, Any]
+    miner_pkey: PrivateKey, p2p_port: Port, rpc_port: Port, **extra_config: Dict[str, Any]
 ) -> Dict[str, Any]:
     address = privatekey_to_address(miner_pkey)
     pub = privatekey_to_publickey(miner_pkey).hex()
@@ -348,17 +307,17 @@ def eth_node_config_set_bootnodes(nodes_configuration: List[Dict[str, Any]]) -> 
         config["bootnodes"] = bootnodes
 
 
-def eth_node_to_datadir(node_config, base_datadir):
+def eth_node_to_datadir(nodekeyhex: str, base_datadir: str) -> str:
     # HACK: Use only the first 8 characters to avoid golang's issue
     # https://github.com/golang/go/issues/6895 (IPC bind fails with path
     # longer than 108 characters).
     # BSD (and therefore macOS) socket path length limit is 104 chars
-    nodekey_part = node_config["nodekeyhex"][:8]
+    nodekey_part = nodekeyhex[:8]
     datadir = os.path.join(base_datadir, nodekey_part)
     return datadir
 
 
-def eth_node_to_logpath(node_config, base_logdir):
+def eth_node_to_logpath(node_config: Dict[str, Any], base_logdir: str) -> str:
     # HACK: Use only the first 8 characters to avoid golang's issue
     # https://github.com/golang/go/issues/6895 (IPC bind fails with path
     # longer than 108 characters).
@@ -368,27 +327,30 @@ def eth_node_to_logpath(node_config, base_logdir):
     return logpath
 
 
-def geth_prepare_datadir(datadir, genesis_file):
+def geth_prepare_datadir(datadir: str, genesis_file: str) -> None:
     node_genesis_path = os.path.join(datadir, "custom_genesis.json")
     ipc_path = datadir + "/geth.ipc"
     assert len(ipc_path) <= 104, f'geth data path "{ipc_path}" is too large'
 
-    os.makedirs(datadir)
+    os.makedirs(datadir, exist_ok=True)
     shutil.copy(genesis_file, node_genesis_path)
     geth_init_datadir(datadir, node_genesis_path)
 
 
 def eth_nodes_to_cmds(
-    nodes_configuration, eth_node_descs, base_datadir, genesis_file, chain_id, verbosity
-):
+    nodes_configuration: List[Dict[str, Any]],
+    eth_node_descs: List[EthNodeDescription],
+    base_datadir: str,
+    genesis_file: str,
+    chain_id: ChainID,
+    verbosity: str,
+) -> List[Command]:
     cmds = []
     for config, node_desc in zip(nodes_configuration, eth_node_descs):
-        datadir = eth_node_to_datadir(config, base_datadir)
+        datadir = eth_node_to_datadir(config["nodekeyhex"], base_datadir)
 
         if node_desc.blockchain_type == "geth":
             geth_prepare_datadir(datadir, genesis_file)
-            if node_desc.miner:
-                geth_create_account(datadir, node_desc.private_key)
             commandline = geth_to_cmd(config, datadir, chain_id, verbosity)
         elif node_desc.blockchain_type == "parity":
             commandline = parity_to_cmd(config, datadir, chain_id, genesis_file, verbosity)
@@ -407,7 +369,7 @@ def eth_run_nodes(
     nodes_configuration: List[Dict],
     base_datadir: str,
     genesis_file: str,
-    chain_id: int,
+    chain_id: ChainID,
     random_marker: str,
     verbosity: str,
     logdir: str,
@@ -425,10 +387,6 @@ def eth_run_nodes(
         return True, None
 
     os.makedirs(logdir, exist_ok=True)
-
-    password_path = os.path.join(base_datadir, "pw")
-    with open(password_path, "w") as handler:
-        handler.write(DEFAULT_PASSPHRASE)
 
     cmds = eth_nodes_to_cmds(
         nodes_configuration, eth_node_descs, base_datadir, genesis_file, chain_id, verbosity
@@ -464,7 +422,7 @@ def run_private_blockchain(
     log_dir: str,
     verbosity: str,
     genesis_description: GenesisDescription,
-):
+) -> ContextManager[List[JSONRPCExecutor]]:
     """ Starts a private network with private_keys accounts funded.
 
     Args:
@@ -480,6 +438,10 @@ def run_private_blockchain(
         random_marker: A random marked used to identify the private chain.
     """
     # pylint: disable=too-many-locals,too-many-statements,too-many-arguments,too-many-branches
+
+    password_path = os.path.join(base_datadir, "pw")
+    with open(password_path, "w") as handler:
+        handler.write(DEFAULT_PASSPHRASE)
 
     nodes_configuration = []
     for node in eth_nodes:
@@ -510,6 +472,12 @@ def run_private_blockchain(
             seal_account=seal_account,
         )
 
+        for config in nodes_configuration:
+            if config.get("mine"):
+                datadir = eth_node_to_datadir(config["nodekeyhex"], base_datadir)
+                keyfile_path = geth_keyfile(datadir, config["address"])
+                eth_create_account_file(keyfile_path, config["nodekey"])
+
     elif blockchain_type == "parity":
         genesis_path = os.path.join(base_datadir, "chainspec.json")
         parity_generate_chain_spec(
@@ -517,7 +485,12 @@ def run_private_blockchain(
             genesis_description=genesis_description,
             seal_account=seal_account,
         )
-        parity_create_account(nodes_configuration[0], base_datadir, genesis_path)
+
+        for config in nodes_configuration:
+            if config.get("mine"):
+                datadir = eth_node_to_datadir(config["nodekeyhex"], base_datadir)
+                keyfile_path = parity_keyfile(datadir)
+                eth_create_account_file(keyfile_path, config["nodekey"])
 
     else:
         raise TypeError(f'Unknown blockchain client type "{blockchain_type}"')

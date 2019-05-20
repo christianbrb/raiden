@@ -41,7 +41,7 @@ from raiden.transfer.mediated_transfer.state_change import (
     ReceiveLockExpired,
     ReceiveTransferRefund,
 )
-from raiden.transfer.merkle_tree import LEAVES, compute_layers, compute_merkleproof_for, merkleroot
+from raiden.transfer.merkle_tree import LEAVES, compute_layers, merkleroot
 from raiden.transfer.state import (
     CHANNEL_STATE_CLOSED,
     CHANNEL_STATE_CLOSING,
@@ -60,7 +60,6 @@ from raiden.transfer.state import (
     TransactionExecutionStatus,
     TransactionOrder,
     UnlockPartialProofState,
-    UnlockProofState,
     make_empty_merkle_tree,
     message_identifier_from_prng,
 )
@@ -81,7 +80,6 @@ from raiden.utils.signer import recover
 from raiden.utils.typing import (
     MYPY_ANNOTATION,
     Address,
-    Any,
     Balance,
     BlockExpiration,
     BlockHash,
@@ -114,8 +112,8 @@ from raiden.utils.typing import (
 )
 
 # This should be changed to `Union[str, MerkleTreeState]`
-MerkletreeOrError = Tuple[bool, Optional[str], Optional[Any]]
-EventsOrError = Tuple[bool, List[Event], Any]
+MerkletreeOrError = Tuple[bool, Optional[str], Optional[MerkleTreeState]]
+EventsOrError = Tuple[bool, List[Event], Optional[str]]
 BalanceProofData = Tuple[Locksroot, Nonce, TokenAmount, TokenAmount]
 SendUnlockAndMerkleTree = Tuple[SendBalanceProof, MerkleTreeState]
 
@@ -634,26 +632,26 @@ def valid_lockedtransfer_check(
     return result
 
 
-def refund_transfer_matches_received(
-    refund_transfer: LockedTransferSignedState, received_transfer: LockedTransferUnsignedState
+def refund_transfer_matches_transfer(
+    refund_transfer: LockedTransferSignedState, transfer: LockedTransferUnsignedState
 ) -> bool:
     refund_transfer_sender = refund_transfer.balance_proof.sender
     # Ignore a refund from the target
-    if refund_transfer_sender == received_transfer.target:
+    if refund_transfer_sender == transfer.target:
         return False
 
     return (
-        received_transfer.payment_identifier == refund_transfer.payment_identifier
-        and received_transfer.lock.amount == refund_transfer.lock.amount
-        and received_transfer.lock.secrethash == refund_transfer.lock.secrethash
-        and received_transfer.target == refund_transfer.target
-        and received_transfer.lock.expiration == refund_transfer.lock.expiration
+        transfer.payment_identifier == refund_transfer.payment_identifier
+        and transfer.lock.amount == refund_transfer.lock.amount
+        and transfer.lock.secrethash == refund_transfer.lock.secrethash
+        and transfer.target == refund_transfer.target
+        and transfer.lock.expiration == refund_transfer.lock.expiration
         and
         # The refund transfer is not tied to the other direction of the same
         # channel, it may reach this node through a different route depending
         # on the path finding strategy
         # original_receiver == refund_transfer_sender and
-        received_transfer.token == refund_transfer.token
+        transfer.token == refund_transfer.token
     )
 
 
@@ -676,7 +674,7 @@ def is_valid_refund(
     if not is_valid_locked_transfer:
         return False, msg, None
 
-    if not refund_transfer_matches_received(refund.transfer, received_transfer):
+    if not refund_transfer_matches_transfer(refund.transfer, received_transfer):
         return False, "Refund transfer did not match the received transfer", None
 
     return True, "", merkletree
@@ -1038,15 +1036,6 @@ def update_contract_balance(end_state: NettingChannelEndState, contract_balance:
         end_state.contract_balance = contract_balance
 
 
-def compute_proof_for_lock(
-    end_state: NettingChannelEndState, secret: Secret, lock: HashTimeLockState
-) -> UnlockProofState:
-    # forcing bytes because ethereum.abi doesn't work with bytearray
-    merkle_proof = compute_merkleproof_for(end_state.merkletree, Keccak256(lock.lockhash))
-
-    return UnlockProofState(merkle_proof, lock.encoded, secret)
-
-
 def compute_merkletree_with(
     merkletree: MerkleTreeState, lockhash: LockHash
 ) -> Optional[MerkleTreeState]:
@@ -1162,10 +1151,9 @@ def create_unlock(
     assert get_status(channel_state) == CHANNEL_STATE_OPENED, msg
 
     our_balance_proof = our_state.balance_proof
-    if our_balance_proof:
-        transferred_amount = TokenAmount(lock.amount + our_balance_proof.transferred_amount)
-    else:
-        transferred_amount = TokenAmount(lock.amount)
+    msg = "the lock is pending, it must be in the merkletree"
+    assert our_balance_proof is not None, msg
+    transferred_amount = TokenAmount(lock.amount + our_balance_proof.transferred_amount)
 
     merkletree = compute_merkletree_without(our_state.merkletree, lock.lockhash)
     msg = "the lock is pending, it must be in the merkletree"
@@ -1276,7 +1264,7 @@ def send_unlock(
     secrethash: SecretHash,
 ) -> SendBalanceProof:
     lock = get_lock(channel_state.our_state, secrethash)
-    assert lock
+    assert lock, "caller must ensure the lock exists"
 
     unlock, merkletree = create_unlock(
         channel_state, message_identifier, payment_identifier, secret, lock
@@ -1790,17 +1778,30 @@ def apply_channel_newbalance(
 
 
 def handle_channel_batch_unlock(
-    given_channel_state: NettingChannelState, state_change: ContractReceiveChannelBatchUnlock
+    channel_state: NettingChannelState, state_change: ContractReceiveChannelBatchUnlock
 ) -> TransitionResult[NettingChannelState]:
     events: List[Event] = list()
 
-    new_channel_state: Optional[NettingChannelState] = given_channel_state
+    new_channel_state: Optional[NettingChannelState] = channel_state
     # Unlock is allowed by the smart contract only on a settled channel.
     # Ignore the unlock if the channel was not closed yet.
-    if get_status(given_channel_state) == CHANNEL_STATE_SETTLED:
+    if get_status(channel_state) == CHANNEL_STATE_SETTLED:
 
-        # Once our half of the channel is unlocked we can clean-up the channel
-        if state_change.participant == given_channel_state.our_state.address:
+        our_state = channel_state.our_state
+        partner_state = channel_state.partner_state
+
+        # partner is the address of the sender
+        if state_change.partner == our_state.address:
+            our_state.onchain_locksroot = EMPTY_MERKLE_ROOT
+        elif state_change.partner == partner_state.address:
+            partner_state.onchain_locksroot = EMPTY_MERKLE_ROOT
+
+        # only clear the channel state once all unlocks have been done
+        no_unlock_left_to_do = (
+            our_state.onchain_locksroot == EMPTY_MERKLE_ROOT
+            and partner_state.onchain_locksroot == EMPTY_MERKLE_ROOT
+        )
+        if no_unlock_left_to_do:
             new_channel_state = None
 
     return TransitionResult(new_channel_state, events)

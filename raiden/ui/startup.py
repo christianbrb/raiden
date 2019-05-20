@@ -74,11 +74,10 @@ def setup_contracts_or_exit(config: Dict[str, Any], network_id: int) -> Dict[str
     config["contracts_path"] = contracts_precompiled_path(contracts_version)
 
     if network_id in ID_TO_NETWORKNAME and ID_TO_NETWORKNAME[network_id] != "smoketest":
-        try:
-            deployment_data = get_contracts_deployment_info(
-                chain_id=network_id, version=contracts_version
-            )
-        except ValueError:
+        deployment_data = get_contracts_deployment_info(
+            chain_id=network_id, version=contracts_version
+        )
+        if not deployment_data:
             return contracts
 
         contracts = deployment_data["contracts"]
@@ -125,7 +124,6 @@ def setup_proxies_or_exit(
     contracts: Dict[str, Any],
     routing_mode: RoutingMode,
     pathfinding_service_address: str,
-    pathfinding_eth_address: str,
 ) -> Proxies:
     """
     Initialize and setup the contract proxies.
@@ -224,7 +222,6 @@ def setup_proxies_or_exit(
 
         pfs_config = configure_pfs_or_exit(
             pfs_address=pathfinding_service_address,
-            pfs_eth_address=pathfinding_eth_address,
             routing_mode=routing_mode,
             service_registry=service_registry,
         )

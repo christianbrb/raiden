@@ -41,13 +41,13 @@ clean-test:
 
 LINT_PATHS = raiden/ tools/
 ISORT_PARAMS = --ignore-whitespace --settings-path ./ --skip-glob '*/node_modules/*' --recursive $(LINT_PATHS)
-BLACK_PATHS = raiden/ tools/
+BLACK_PATHS = raiden/ tools/ setup.py
 
 lint: mypy mypy-all
 	flake8 raiden/ tools/
 	isort $(ISORT_PARAMS) --diff --check-only
-	black --check $(BLACK_PATHS)
-	pylint --load-plugins=tools.pylint.gevent_checker --rcfile .pylint.rc $(LINT_PATHS)
+	black --check --diff $(BLACK_PATHS)
+	pylint $(LINT_PATHS)
 	python setup.py check --restructuredtext --strict
 
 isort:

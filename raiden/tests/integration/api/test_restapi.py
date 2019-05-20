@@ -17,8 +17,7 @@ from raiden.api.v1.encoding import AddressField, HexAddressConverter
 from raiden.constants import (
     GENESIS_BLOCK_NUMBER,
     RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT,
-    SECRET_HEXSTRING_LENGTH,
-    SECRETHASH_HEXSTRING_LENGTH,
+    SECRET_LENGTH,
     Environment,
 )
 from raiden.messages import LockedTransfer, Unlock
@@ -27,7 +26,7 @@ from raiden.tests.utils import factories
 from raiden.tests.utils.client import burn_eth
 from raiden.tests.utils.events import check_dict_nested_attrs, must_have_event, must_have_events
 from raiden.tests.utils.network import CHAIN
-from raiden.tests.utils.protocol import HoldRaidenEvent, WaitForMessage
+from raiden.tests.utils.protocol import WaitForMessage
 from raiden.tests.utils.smartcontracts import deploy_contract_web3
 from raiden.transfer import views
 from raiden.transfer.state import CHANNEL_STATE_CLOSED, CHANNEL_STATE_OPENED
@@ -870,7 +869,7 @@ def test_api_payments_secret_hash_errors(
         json={"amount": amount, "identifier": identifier, "secret": short_secret},
     )
     response = request.send().response
-    assert_proper_response(response, status_code=HTTPStatus.CONFLICT)
+    assert_proper_response(response, status_code=HTTPStatus.BAD_REQUEST)
 
     request = grequests.post(
         api_url_for(
@@ -882,7 +881,7 @@ def test_api_payments_secret_hash_errors(
         json={"amount": amount, "identifier": identifier, "secret": bad_secret},
     )
     response = request.send().response
-    assert_proper_response(response, status_code=HTTPStatus.CONFLICT)
+    assert_proper_response(response, status_code=HTTPStatus.BAD_REQUEST)
 
     request = grequests.post(
         api_url_for(
@@ -894,7 +893,7 @@ def test_api_payments_secret_hash_errors(
         json={"amount": amount, "identifier": identifier, "secret_hash": short_secret_hash},
     )
     response = request.send().response
-    assert_proper_response(response, status_code=HTTPStatus.CONFLICT)
+    assert_proper_response(response, status_code=HTTPStatus.BAD_REQUEST)
 
     request = grequests.post(
         api_url_for(
@@ -906,7 +905,7 @@ def test_api_payments_secret_hash_errors(
         json={"amount": amount, "identifier": identifier, "secret_hash": bad_secret_hash},
     )
     response = request.send().response
-    assert_proper_response(response, status_code=HTTPStatus.CONFLICT)
+    assert_proper_response(response, status_code=HTTPStatus.BAD_REQUEST)
 
     request = grequests.post(
         api_url_for(
@@ -1043,11 +1042,11 @@ def assert_payment_secret_and_hash(response, payment):
     assert response.items() >= payment.items()
     assert "secret" in response
     assert "secret_hash" in response
-    assert len(response["secret"]) == SECRET_HEXSTRING_LENGTH
-    assert len(response["secret_hash"]) == SECRETHASH_HEXSTRING_LENGTH
 
-    generated_secret_hash = to_hex(sha3(to_bytes(hexstr=response["secret"])))
-    assert generated_secret_hash == response["secret_hash"]
+    secret = to_bytes(hexstr=response["secret"])
+    assert len(secret) == SECRET_LENGTH
+
+    assert to_bytes(hexstr=response["secret_hash"]) == sha3(secret)
 
 
 def assert_payment_conflict(responses):
@@ -1797,7 +1796,6 @@ def test_pending_transfers_endpoint(raiden_network, token_addresses):
     mediator_server = create_api_server(mediator, 8576)
     target_server = create_api_server(target, 8577)
 
-    target.raiden.raiden_event_handler = target_hold = HoldRaidenEvent()
     target.raiden.message_handler = target_wait = WaitForMessage()
     mediator.raiden.message_handler = mediator_wait = WaitForMessage()
 
@@ -1812,6 +1810,7 @@ def test_pending_transfers_endpoint(raiden_network, token_addresses):
     response = request.send().response
     assert response.status_code == 200 and response.content == b"[]"
 
+    target_hold = target.raiden.raiden_event_handler
     target_hold.hold_secretrequest_for(secrethash=secrethash)
 
     initiator.raiden.start_mediated_transfer_with_secret(

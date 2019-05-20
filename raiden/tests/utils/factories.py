@@ -66,6 +66,7 @@ from raiden.utils.typing import (
     PaymentID,
     PaymentNetworkID,
     Secret,
+    SecretHash,
     Signature,
     TargetAddress,
     TokenAddress,
@@ -166,12 +167,20 @@ def make_checksum_address() -> AddressHex:
     return to_checksum_address(make_address())
 
 
+def make_additional_hash() -> AdditionalHash:
+    return AdditionalHash(make_32bytes())
+
+
 def make_32bytes() -> bytes:
     return bytes("".join(random.choice(string.printable) for _ in range(32)), encoding="utf-8")
 
 
 def make_transaction_hash() -> TransactionHash:
     return TransactionHash(make_32bytes())
+
+
+def make_locksroot() -> Locksroot:
+    return Locksroot(make_32bytes())
 
 
 def make_block_hash() -> BlockHash:
@@ -257,6 +266,10 @@ ADDR = b"addraddraddraddraddr"
 
 def make_merkletree_leaves(width: int) -> List[Keccak256]:
     return [make_secret() for _ in range(width)]
+
+
+def make_merkletree(leaves: List[SecretHash]) -> MerkleTreeState:
+    return MerkleTreeState(compute_layers(leaves))
 
 
 @singledispatch
@@ -463,6 +476,38 @@ BalanceProofSignedStateProperties.DEFAULTS = BalanceProofSignedStateProperties(
     sender=UNIT_TRANSFER_SENDER,
     pkey=UNIT_TRANSFER_PKEY,
 )
+
+
+def make_signed_balance_proof_from_unsigned(
+    unsigned: BalanceProofUnsignedState, signer: Signer
+) -> BalanceProofSignedState:
+    balance_hash = hash_balance_data(
+        transferred_amount=unsigned.transferred_amount,
+        locked_amount=unsigned.locked_amount,
+        locksroot=unsigned.locksroot,
+    )
+
+    additional_hash = make_additional_hash()
+    data_to_sign = balance_proof.pack_balance_proof(
+        balance_hash=balance_hash,
+        additional_hash=additional_hash,
+        canonical_identifier=unsigned.canonical_identifier,
+        nonce=unsigned.nonce,
+    )
+
+    signature = signer.sign(data=data_to_sign)
+    sender = signer.address
+
+    return BalanceProofSignedState(
+        nonce=unsigned.nonce,
+        transferred_amount=unsigned.transferred_amount,
+        locked_amount=unsigned.locked_amount,
+        locksroot=unsigned.locksroot,
+        message_hash=additional_hash,
+        signature=signature,
+        sender=sender,
+        canonical_identifier=unsigned.canonical_identifier,
+    )
 
 
 @create.register(BalanceProofSignedStateProperties)  # noqa: F811
@@ -765,7 +810,7 @@ class ChannelSet:
         return make_route_from_channel(self.channels[channel_index])
 
     def get_routes(self, *args) -> List[RouteState]:
-        return [self.get_route(channel_index) for channel_index in args]
+        return [self.get_route(index) for index in (args or range(len(self.channels)))]
 
     def __getitem__(self, item: int) -> NettingChannelState:
         return self.channels[item]
@@ -793,6 +838,14 @@ def make_channel_set(
         channels.append(create(properties[i], defaults))
 
     return ChannelSet(channels, our_pkeys, partner_pkeys)
+
+
+def make_channel_set_from_amounts(amounts: List[TokenAmount]) -> ChannelSet:
+    properties = [
+        NettingChannelStateProperties(our_state=NettingChannelEndStateProperties(balance=amount))
+        for amount in amounts
+    ]
+    return make_channel_set(properties)
 
 
 def mediator_make_channel_pair(

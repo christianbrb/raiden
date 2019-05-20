@@ -30,7 +30,7 @@ from raiden.settings import (
     RED_EYES_CONTRACT_VERSION,
 )
 from raiden.utils import pex, typing
-from raiden.utils.typing import Any, Dict
+from raiden.utils.typing import Address, Any, Dict
 from raiden_contracts.contract_manager import contracts_precompiled_path
 
 log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
@@ -75,7 +75,6 @@ class App:  # pylint: disable=too-few-public-methods
         "shutdown_timeout": DEFAULT_SHUTDOWN_TIMEOUT,
         "services": {
             "pathfinding_service_address": None,
-            "pathfinding_eth_address": None,
             "pathfinding_max_paths": DEFAULT_PATHFINDING_MAX_PATHS,
             "pathfinding_max_fee": DEFAULT_PATHFINDING_MAX_FEE,
             "pathfinding_iou_timeout": DEFAULT_PATHFINDING_IOU_TIMEOUT,
@@ -91,6 +90,7 @@ class App:  # pylint: disable=too-few-public-methods
         default_registry: TokenNetworkRegistry,
         default_secret_registry: SecretRegistry,
         default_service_registry: typing.Optional[ServiceRegistry],
+        default_one_to_n_address: typing.Optional[Address],
         transport,
         raiden_event_handler,
         message_handler,
@@ -101,6 +101,7 @@ class App:  # pylint: disable=too-few-public-methods
             chain=chain,
             query_start_block=query_start_block,
             default_registry=default_registry,
+            default_one_to_n_address=default_one_to_n_address,
             default_secret_registry=default_secret_registry,
             default_service_registry=default_service_registry,
             transport=transport,

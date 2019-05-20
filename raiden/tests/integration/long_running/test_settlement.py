@@ -11,18 +11,18 @@ from raiden.messages import LockedTransfer, LockExpired, RevealSecret
 from raiden.storage.restore import channel_state_until_state_change
 from raiden.tests.utils import factories
 from raiden.tests.utils.detect_failure import raise_on_failure
-from raiden.tests.utils.events import search_for_item
+from raiden.tests.utils.events import raiden_state_changes_search_for_item, search_for_item
 from raiden.tests.utils.network import CHAIN
-from raiden.tests.utils.protocol import HoldOffChainSecretRequest, WaitForMessage
+from raiden.tests.utils.protocol import WaitForMessage
 from raiden.tests.utils.transfer import assert_synced_channel_state, get_channelstate, transfer
 from raiden.transfer import channel, views
-from raiden.transfer.state import UnlockProofState
 from raiden.transfer.state_change import (
     ContractReceiveChannelBatchUnlock,
     ContractReceiveChannelClosed,
     ContractReceiveChannelSettled,
 )
 from raiden.utils import sha3
+from raiden.utils.timeout import BlockTimeout
 
 
 def wait_for_batch_unlock(app, token_network_id, participant, partner):
@@ -282,8 +282,7 @@ def run_test_batch_unlock(
         views.state_from_app(alice_app), alice_app.raiden.default_registry.address, token_address
     )
 
-    hold_event_handler = HoldOffChainSecretRequest()
-    bob_app.raiden.raiden_event_handler = hold_event_handler
+    hold_event_handler = bob_app.raiden.raiden_event_handler
 
     # Take a snapshot early on
     alice_app.raiden.wal.snapshot()
@@ -311,7 +310,7 @@ def run_test_batch_unlock(
     secret = sha3(target)
     secrethash = sha3(secret)
 
-    hold_event_handler.hold_secretrequest_for(secrethash=secrethash)
+    secret_request_event = hold_event_handler.hold_secretrequest_for(secrethash=secrethash)
 
     alice_app.raiden.start_mediated_transfer_with_secret(
         token_network_identifier=token_network_identifier,
@@ -322,7 +321,7 @@ def run_test_batch_unlock(
         secret=secret,
     )
 
-    gevent.sleep(1)  # wait for the messages to be exchanged
+    secret_request_event.get()  # wait for the messages to be exchanged
 
     alice_bob_channel_state = get_channelstate(alice_app, bob_app, token_network_identifier)
     lock = channel.get_lock(alice_bob_channel_state.our_state, secrethash)
@@ -382,14 +381,14 @@ def run_test_batch_unlock(
         in token_network.partneraddresses_to_channelidentifiers[alice_app.raiden.address]
     )
 
-    # wait for the node to call batch unlock
+    # Wait for both nodes to call batch unlock
     timeout = 30 if blockchain_type == "parity" else 10
     with gevent.Timeout(timeout):
         wait_for_batch_unlock(
-            bob_app,
-            token_network_identifier,
-            alice_bob_channel_state.partner_state.address,
-            alice_bob_channel_state.our_state.address,
+            app=bob_app,
+            token_network_id=token_network_identifier,
+            participant=alice_bob_channel_state.partner_state.address,
+            partner=alice_bob_channel_state.our_state.address,
         )
 
     token_network = views.get_token_network_by_identifier(
@@ -431,9 +430,7 @@ def run_test_settled_lock(token_addresses, raiden_network, deposit):
     token_network_identifier = views.get_token_network_identifier_by_token_address(
         views.state_from_app(app0), app0.raiden.default_registry.address, token_address
     )
-
-    hold_event_handler = HoldOffChainSecretRequest()
-    app1.raiden.raiden_event_handler = hold_event_handler
+    hold_event_handler = app1.raiden.raiden_event_handler
 
     address0 = app0.raiden.address
     address1 = app1.raiden.address
@@ -524,14 +521,13 @@ def run_test_automatic_secret_registration(raiden_chain, token_addresses):
     token_network_identifier = views.get_token_network_identifier_by_token_address(
         views.state_from_app(app0), app0.raiden.default_registry.address, token_address
     )
+    hold_event_handler = app1.raiden.raiden_event_handler
 
     amount = 100
     identifier = 1
 
-    hold_event_handler = HoldOffChainSecretRequest()
     message_handler = WaitForMessage()
 
-    app1.raiden.raiden_event_handler = hold_event_handler
     app1.raiden.message_handler = message_handler
 
     target = app1.raiden.address
@@ -604,9 +600,7 @@ def run_test_start_end_attack(token_addresses, raiden_chain, deposit):
     token_network_identifier = views.get_token_network_identifier_by_token_address(
         views.state_from_app(app0), app0.raiden.default_registry.address, token
     )
-
-    hold_event_handler = HoldOffChainSecretRequest()
-    app2.raiden.raiden_event_handler = hold_event_handler
+    hold_event_handler = app2.raiden.raiden_event_handler
 
     # the attacker owns app0 and app2 and creates a transfer through app1
     identifier = 1
@@ -635,8 +629,9 @@ def run_test_start_end_attack(token_addresses, raiden_chain, deposit):
     ).external_state.netting_channel.address
 
     # the attacker can create a merkle proof of the locked transfer
-    lock = attack_channel.partner_state.get_lock_by_secrethash(secrethash)
-    unlock_proof = attack_channel.partner_state.compute_proof_for_lock(secret, lock)
+    # <the commented code below is left for documentation purposes>
+    # lock = attack_channel.partner_state.get_lock_by_secrethash(secrethash)
+    # unlock_proof = attack_channel.partner_state.compute_proof_for_lock(secret, lock)
 
     # start the settle counter
     attack_balance_proof = attack_transfer.to_balanceproof()
@@ -647,9 +642,10 @@ def run_test_start_end_attack(token_addresses, raiden_chain, deposit):
     app2.raiden.chain.wait_until_block(target_block_number=attack_transfer.lock.expiration - 1)
 
     # since the attacker knows the secret he can net the lock
-    attack_channel.netting_channel.unlock(
-        UnlockProofState(unlock_proof, attack_transfer.lock, secret)
-    )
+    # <the commented code below is left for documentation purposes>
+    # attack_channel.netting_channel.unlock(
+    #     UnlockProofState(unlock_proof, attack_transfer.lock, secret)
+    # )
     # XXX: verify that the secret was publicized
 
     # at this point the hub might not know the secret yet, and won't be able to
@@ -802,10 +798,7 @@ def run_test_batch_unlock_after_restart(raiden_network, token_addresses, deposit
         payment_network_id=alice_app.raiden.default_registry.address,
         token_address=token_address,
     )
-
-    hold_event_handler = HoldOffChainSecretRequest()
-    bob_app.raiden.raiden_event_handler = hold_event_handler
-    alice_app.raiden.raiden_event_handler = hold_event_handler
+    timeout = 10
 
     token_network = views.get_token_network_by_identifier(
         chain_state=views.state_from_app(alice_app), token_network_id=token_network_identifier
@@ -827,10 +820,10 @@ def run_test_batch_unlock_after_restart(raiden_network, token_addresses, deposit
     bob_transfer_secret = sha3(bob_app.raiden.address)
     bob_transfer_secrethash = sha3(bob_transfer_secret)
 
-    alice_transfer_hold = hold_event_handler.hold_secretrequest_for(
+    alice_transfer_hold = bob_app.raiden.raiden_event_handler.hold_secretrequest_for(
         secrethash=alice_transfer_secrethash
     )
-    bob_transfer_hold = hold_event_handler.hold_secretrequest_for(
+    bob_transfer_hold = alice_app.raiden.raiden_event_handler.hold_secretrequest_for(
         secrethash=bob_transfer_secrethash
     )
 
@@ -852,8 +845,8 @@ def run_test_batch_unlock_after_restart(raiden_network, token_addresses, deposit
         secret=bob_transfer_secret,
     )
 
-    alice_transfer_hold.wait()
-    bob_transfer_hold.wait()
+    alice_transfer_hold.wait(timeout=timeout)
+    bob_transfer_hold.wait(timeout=timeout)
 
     alice_bob_channel_state = get_channelstate(alice_app, bob_app, token_network_identifier)
     alice_lock = channel.get_lock(alice_bob_channel_state.our_state, alice_transfer_secrethash)
@@ -881,18 +874,46 @@ def run_test_batch_unlock_after_restart(raiden_network, token_addresses, deposit
         partner_address=alice_app.raiden.address,
     )
 
-    alice_app.stop()
+    # wait for the close transaction to be mined, this is necessary to compute
+    # the timeout for the settle
+    with gevent.Timeout(timeout):
+        waiting.wait_for_close(
+            raiden=alice_app.raiden,
+            payment_network_id=registry_address,
+            token_address=token_address,
+            channel_ids=[alice_bob_channel_state.identifier],
+            retry_timeout=alice_app.raiden.alarm.sleep_time,
+        )
 
-    waiting.wait_for_settle(
-        raiden=alice_app.raiden,
-        payment_network_id=registry_address,
-        token_address=token_address,
-        channel_ids=[alice_bob_channel_state.identifier],
-        retry_timeout=alice_app.raiden.alarm.sleep_time,
+    channel_closed = raiden_state_changes_search_for_item(
+        bob_app.raiden,
+        ContractReceiveChannelClosed,
+        {
+            "canonical_identifier": {
+                "token_network_address": token_network_identifier,
+                "channel_identifier": alice_bob_channel_state.identifier,
+            }
+        },
+    )
+    settle_max_wait_block = (
+        channel_closed.block_number + alice_bob_channel_state.settle_timeout * 2
     )
 
-    # wait for the node to call batch unlock
-    timeout = 10
+    settle_timeout = BlockTimeout(
+        RuntimeError("settle did not happen"),
+        bob_app.raiden,
+        settle_max_wait_block,
+        alice_app.raiden.alarm.sleep_time,
+    )
+    with settle_timeout:
+        waiting.wait_for_settle(
+            raiden=alice_app.raiden,
+            payment_network_id=registry_address,
+            token_address=token_address,
+            channel_ids=[alice_bob_channel_state.identifier],
+            retry_timeout=alice_app.raiden.alarm.sleep_time,
+        )
+
     with gevent.Timeout(timeout):
         wait_for_batch_unlock(
             app=bob_app,

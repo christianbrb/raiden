@@ -7,9 +7,9 @@ from gevent import server
 from raiden.app import App
 from raiden.constants import Environment, RoutingMode
 from raiden.network.transport import UDPTransport
-from raiden.tests.utils.factories import make_address, make_checksum_address
+from raiden.tests.utils.factories import make_address
 from raiden.tests.utils.mocks import MockChain, MockWeb3, patched_get_for_succesful_pfs_info
-from raiden.ui.checks import check_network_id
+from raiden.ui.checks import check_ethereum_network_id
 from raiden.ui.startup import (
     setup_contracts_or_exit,
     setup_environment,
@@ -26,16 +26,16 @@ from raiden_contracts.constants import (
 
 
 def test_check_network_id_raises_with_mismatching_ids():
-    check_network_id(68, MockWeb3(68))
+    check_ethereum_network_id(68, MockWeb3(68))
 
     with pytest.raises(SystemExit):
-        check_network_id(61, MockWeb3(68))
+        check_ethereum_network_id(61, MockWeb3(68))
 
 
 @pytest.mark.parametrize("netid", [1, 3, 4, 42, 5, 627])
 def test_setup_does_not_raise_with_matching_ids(netid):
     """Test that network setup works for the known network ids"""
-    check_network_id(netid, MockWeb3(netid))
+    check_ethereum_network_id(netid, MockWeb3(netid))
 
 
 def test_setup_environment():
@@ -168,7 +168,6 @@ def test_setup_proxies_raiden_addresses_are_given():
         contracts=contracts,
         routing_mode=RoutingMode.BASIC,
         pathfinding_service_address=None,
-        pathfinding_eth_address=None,
     )
     assert proxies
     assert proxies.token_network_registry
@@ -200,7 +199,6 @@ def test_setup_proxies_all_addresses_are_given(routing_mode):
             contracts=contracts,
             routing_mode=routing_mode,
             pathfinding_service_address="my-pfs",
-            pathfinding_eth_address=make_checksum_address(),
         )
     assert proxies
     assert proxies.token_network_registry
@@ -232,7 +230,6 @@ def test_setup_proxies_all_addresses_are_known(routing_mode):
             contracts=contracts,
             routing_mode=routing_mode,
             pathfinding_service_address="my-pfs",
-            pathfinding_eth_address=make_checksum_address(),
         )
     assert proxies
     assert proxies.token_network_registry
@@ -266,7 +263,6 @@ def test_setup_proxies_no_service_registry_but_pfs():
             contracts=contracts,
             routing_mode=RoutingMode.PFS,
             pathfinding_service_address="my-pfs",
-            pathfinding_eth_address=make_checksum_address(),
         )
     assert proxies
 
@@ -295,7 +291,6 @@ def test_setup_proxies_no_service_registry_and_no_pfs_address_but_requesting_pfs
                 contracts=contracts,
                 routing_mode=RoutingMode.PFS,
                 pathfinding_service_address=None,
-                pathfinding_eth_address=None,
             )
 
 

@@ -1,5 +1,6 @@
 import os
 import sys
+from typing import Any, Callable, Dict, TextIO
 from urllib.parse import urlparse
 
 import click
@@ -13,6 +14,8 @@ from raiden.constants import (
     MONITORING_BROADCASTING_ROOM,
     PATH_FINDING_BROADCASTING_ROOM,
     RAIDEN_DB_VERSION,
+    Environment,
+    RoutingMode,
 )
 from raiden.exceptions import RaidenError
 from raiden.message_handler import MessageHandler
@@ -26,9 +29,9 @@ from raiden.settings import (
     DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
 )
 from raiden.ui.checks import (
-    check_ethereum_version,
-    check_has_accounts,
-    check_network_id,
+    check_ethereum_client_is_supported,
+    check_ethereum_has_accounts,
+    check_ethereum_network_id,
     check_sql_version,
     check_synced,
 )
@@ -43,8 +46,9 @@ from raiden.ui.startup import (
     setup_proxies_or_exit,
     setup_udp_or_exit,
 )
-from raiden.utils import pex, split_endpoint
+from raiden.utils import BlockNumber, pex, split_endpoint
 from raiden.utils.cli import get_matrix_servers
+from raiden.utils.typing import Address, Optional, PrivateKey, Tuple
 from raiden_contracts.constants import ID_TO_NETWORKNAME
 from raiden_contracts.contract_manager import ContractManager
 
@@ -78,56 +82,9 @@ def _setup_matrix(config):
     return transport
 
 
-def run_app(
-    address,
-    keystore_path,
-    gas_price,
-    eth_rpc_endpoint,
-    tokennetwork_registry_contract_address,
-    secret_registry_contract_address,
-    service_registry_contract_address,
-    endpoint_registry_contract_address,
-    user_deposit_contract_address,
-    listen_address,
-    mapped_socket,
-    max_unresponsive_time,
-    api_address,
-    rpc,
-    sync_check,
-    console,
-    password_file,
-    web_ui,
-    datadir,
-    transport,
-    matrix_server,
-    network_id,
-    environment_type,
-    unrecoverable_error_should_crash,
-    pathfinding_service_address,
-    pathfinding_eth_address,
-    pathfinding_max_paths,
-    enable_monitoring,
-    resolver_endpoint,
-    routing_mode,
-    config=None,
-    extra_config=None,
-    **kwargs,
-):
-    # pylint: disable=too-many-locals,too-many-branches,too-many-statements,unused-argument
-
-    from raiden.app import App
-
-    check_sql_version()
-
-    if transport == "udp" and not mapped_socket:
-        raise RuntimeError("Missing socket")
-
-    if datadir is None:
-        datadir = os.path.join(os.path.expanduser("~"), ".raiden")
-
-    account_manager = AccountManager(keystore_path)
-    check_has_accounts(account_manager)
-
+def get_account_and_private_key(
+    account_manager: AccountManager, address: Optional[Address], password_file: Optional[TextIO]
+) -> Tuple[Address, PrivateKey]:
     if not address:
         address_hex = prompt_account(account_manager)
     else:
@@ -142,7 +99,73 @@ def run_app(
             account_manager=account_manager, address_hex=address_hex
         )
 
-    address = to_canonical_address(address_hex)
+    return to_canonical_address(address_hex), privatekey_bin
+
+
+def rpc_normalized_endpoint(eth_rpc_endpoint: str) -> str:
+    parsed_eth_rpc_endpoint = urlparse(eth_rpc_endpoint)
+
+    if parsed_eth_rpc_endpoint.scheme:
+        return eth_rpc_endpoint
+
+    return f"http://{eth_rpc_endpoint}"
+
+
+def run_app(
+    address: Address,
+    keystore_path: str,
+    gas_price: Callable,
+    eth_rpc_endpoint: str,
+    tokennetwork_registry_contract_address: Address,
+    one_to_n_contract_address: Address,
+    secret_registry_contract_address: Address,
+    service_registry_contract_address: Address,
+    endpoint_registry_contract_address: Address,
+    user_deposit_contract_address: Address,
+    listen_address: str,
+    mapped_socket,
+    max_unresponsive_time: int,
+    api_address: str,
+    rpc: bool,
+    sync_check: bool,
+    console: bool,
+    password_file: TextIO,
+    web_ui: bool,
+    datadir: str,
+    transport: str,
+    matrix_server: str,
+    network_id: int,
+    environment_type: Environment,
+    unrecoverable_error_should_crash: bool,
+    pathfinding_service_address: str,
+    pathfinding_max_paths: int,
+    enable_monitoring: bool,
+    resolver_endpoint: str,
+    routing_mode: RoutingMode,
+    config: Dict[str, Any],
+    **kwargs: Any,  # FIXME: not used here, but still receives stuff in smoketest
+):
+    # pylint: disable=too-many-locals,too-many-branches,too-many-statements,unused-argument
+
+    from raiden.app import App
+
+    if transport == "udp" and not mapped_socket:
+        raise RuntimeError("Missing socket")
+
+    if datadir is None:
+        datadir = os.path.join(os.path.expanduser("~"), ".raiden")
+
+    account_manager = AccountManager(keystore_path)
+    web3 = Web3(HTTPProvider(rpc_normalized_endpoint(eth_rpc_endpoint)))
+
+    check_sql_version()
+    check_ethereum_has_accounts(account_manager)
+    check_ethereum_client_is_supported(web3)
+    check_ethereum_network_id(network_id, web3)
+
+    (address, privatekey_bin) = get_account_and_private_key(
+        account_manager, address, password_file
+    )
 
     (listen_host, listen_port) = split_endpoint(listen_address)
     (api_host, api_port) = split_endpoint(api_address)
@@ -167,14 +190,6 @@ def run_app(
     config["unrecoverable_error_should_crash"] = unrecoverable_error_should_crash
     config["services"]["pathfinding_max_paths"] = pathfinding_max_paths
     config["services"]["monitoring_enabled"] = enable_monitoring
-
-    parsed_eth_rpc_endpoint = urlparse(eth_rpc_endpoint)
-    if not parsed_eth_rpc_endpoint.scheme:
-        eth_rpc_endpoint = f"http://{eth_rpc_endpoint}"
-
-    web3 = Web3(HTTPProvider(eth_rpc_endpoint))
-    check_ethereum_version(web3)
-    check_network_id(network_id, web3)
     config["chain_id"] = network_id
 
     setup_environment(config, environment_type)
@@ -207,7 +222,6 @@ def run_app(
         contracts=contracts,
         routing_mode=routing_mode,
         pathfinding_service_address=pathfinding_service_address,
-        pathfinding_eth_address=pathfinding_eth_address,
     )
 
     database_path = os.path.join(
@@ -247,7 +261,8 @@ def run_app(
         raiden_app = App(
             config=config,
             chain=blockchain_service,
-            query_start_block=start_block,
+            query_start_block=BlockNumber(start_block),
+            default_one_to_n_address=one_to_n_contract_address,
             default_registry=proxies.token_network_registry,
             default_secret_registry=proxies.secret_registry,
             default_service_registry=proxies.service_registry,
@@ -269,8 +284,8 @@ def run_app(
     except filelock.Timeout:
         name_or_id = ID_TO_NETWORKNAME.get(network_id, network_id)
         click.secho(
-            f"FATAL: Another Raiden instance already running for account {address_hex} on "
-            f"network id {name_or_id}",
+            f"FATAL: Another Raiden instance already running for account "
+            f"{to_normalized_address(address)} on network id {name_or_id}",
             fg="red",
         )
         sys.exit(1)

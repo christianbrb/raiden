@@ -7,6 +7,7 @@ from raiden.transfer.architecture import Event, TransitionResult
 from raiden.transfer.events import EventPaymentSentFailed, EventPaymentSentSuccess
 from raiden.transfer.mediated_transfer.events import (
     CHANNEL_IDENTIFIER_GLOBAL_QUEUE,
+    EventRouteFailed,
     EventUnlockFailed,
     EventUnlockSuccess,
     SendLockedTransfer,
@@ -115,7 +116,7 @@ def handle_block(
 
     events: List[Event] = list()
 
-    if lock_has_expired:
+    if lock_has_expired and initiator_state.transfer_state != "transfer_expired":
         is_channel_open = channel.get_status(channel_state) == CHANNEL_STATE_OPENED
         if is_channel_open:
             expired_lock_events = channel.events_for_expired_lock(
@@ -144,6 +145,7 @@ def handle_block(
             target=transfer_description.target,
             reason=reason,
         )
+        route_failed = EventRouteFailed(secrethash=secrethash)
         unlock_failed = EventUnlockFailed(
             identifier=payment_identifier,
             secrethash=initiator_state.transfer_description.secrethash,
@@ -153,13 +155,14 @@ def handle_block(
         lock_exists = channel.lock_exists_in_either_channel_side(
             channel_state=channel_state, secrethash=secrethash
         )
+        initiator_state.transfer_state = "transfer_expired"
 
         return TransitionResult(
             # If the lock is either in our state or partner state we keep the
             # task around to wait for the LockExpired messages to sync.
             # Check https://github.com/raiden-network/raiden/issues/3183
             initiator_state if lock_exists else None,
-            events + [payment_failed, unlock_failed],
+            events + [payment_failed, route_failed, unlock_failed],
         )
     else:
         return TransitionResult(initiator_state, events)
