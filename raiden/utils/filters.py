@@ -9,7 +9,8 @@ from web3.utils.filters import LogFilter, construct_event_filter_params
 from raiden.constants import GENESIS_BLOCK_NUMBER
 from raiden.utils import block_specification_to_number
 from raiden.utils.typing import (
-    Any,
+    ABI,
+    BlockchainEvent,
     BlockNumber,
     BlockSpecification,
     ChannelID,
@@ -20,7 +21,7 @@ from raiden.utils.typing import (
 from raiden_contracts.constants import CONTRACT_TOKEN_NETWORK, ChannelEvent
 from raiden_contracts.contract_manager import ContractManager
 
-log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
+log = structlog.get_logger(__name__)
 
 # The maximum block range to query in a single filter query
 # Helps against timeout errors that occur if you query a filter for
@@ -38,9 +39,6 @@ def get_filter_args_for_specific_event_from_channel(
     to_block: BlockSpecification = "latest",
 ):
     """ Return the filter params for a specific event of a given channel. """
-    if not event_name:
-        raise ValueError("Event name must be given")
-
     event_abi = contract_manager.get_event_abi(CONTRACT_TOKEN_NETWORK, event_name)
 
     # Here the topics for a specific event are created
@@ -83,7 +81,7 @@ def get_filter_args_for_all_events_from_channel(
     return event_filter_params
 
 
-def decode_event(abi: List[Dict], log: Dict):
+def decode_event(abi: ABI, log: BlockchainEvent):
     """ Helper function to unpack event data using a provided ABI
 
     Args:
@@ -126,9 +124,9 @@ class StatelessFilter(LogFilter):
         self._last_block = block_specification_to_number(block=to_block, web3=self.web3)
         return result
 
-    def get_new_entries(self, target_block_number: BlockNumber) -> List[Dict[str, Any]]:
+    def get_new_entries(self, target_block_number: BlockNumber) -> List[BlockchainEvent]:
         with self._lock:
-            result: List[Dict[str, Any]] = []
+            result: List[BlockchainEvent] = []
             filter_from_number = block_specification_to_number(
                 block=self.filter_params.get("fromBlock", GENESIS_BLOCK_NUMBER), web3=self.web3
             )

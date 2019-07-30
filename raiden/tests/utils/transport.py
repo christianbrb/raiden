@@ -2,31 +2,27 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import sys
 from binascii import unhexlify
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
+from subprocess import DEVNULL, STDOUT
 from tempfile import mkdtemp
-from typing import ContextManager, Iterator
+from typing import ContextManager, List
 from urllib.parse import urljoin, urlsplit
 
 import requests
+from gevent import subprocess
 from twisted.internet import defer
 
 from raiden.utils.http import HTTPExecutor
 from raiden.utils.signer import recover
+from raiden.utils.typing import Iterable, Port
 
 _SYNAPSE_BASE_DIR_VAR_NAME = "RAIDEN_TESTS_SYNAPSE_BASE_DIR"
 _SYNAPSE_LOGS_PATH = os.environ.get("RAIDEN_TESTS_SYNAPSE_LOGS_DIR", False)
 _SYNAPSE_CONFIG_TEMPLATE = Path(__file__).parent.joinpath("synapse_config.yaml.template")
-
-
-class MockDiscovery:
-    @staticmethod
-    def get(node_address: bytes):  # pylint: disable=unused-argument
-        return "127.0.0.1:5252"
 
 
 class ParsedURL(str):
@@ -159,8 +155,8 @@ def generate_synapse_config() -> ContextManager:
                 cwd=server_dir,
                 timeout=30,
                 check=True,
-                stderr=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
+                stderr=DEVNULL,
+                stdout=DEVNULL,
             )
         return server_name, config_file
 
@@ -173,22 +169,22 @@ def generate_synapse_config() -> ContextManager:
 
 @contextmanager
 def matrix_server_starter(
-    free_port_generator: Iterator[int],
+    free_port_generator: Iterable[Port],
     *,
     count: int = 1,
     config_generator: ContextManager = None,
     log_context: str = None,
-) -> ContextManager:
+) -> ContextManager[List[ParsedURL]]:
     with ExitStack() as exit_stack:
         if config_generator is None:
             config_generator = exit_stack.enter_context(generate_synapse_config())
-        server_urls = []
+        server_urls: List[ParsedURL] = []
         for _, port in zip(range(count), free_port_generator):
             server_name, config_file = config_generator(port)
             server_url = ParsedURL(f"https://{server_name}")
             server_urls.append(server_url)
 
-            synapse_io = subprocess.DEVNULL
+            synapse_io = DEVNULL
             # Used in CI to capture the logs for failure analysis
             if _SYNAPSE_LOGS_PATH:
                 log_file_path = Path(_SYNAPSE_LOGS_PATH).joinpath(f"{server_name}.log")
@@ -203,23 +199,44 @@ def matrix_server_starter(
                 log_file.write(f"{header:=^100}\n")
                 log_file.flush()
 
-                synapse_io = subprocess.DEVNULL, log_file, subprocess.STDOUT
+                synapse_io = DEVNULL, log_file, STDOUT
 
-            exit_stack.enter_context(
-                HTTPExecutor(
-                    [
-                        sys.executable,
-                        "-m",
-                        "synapse.app.homeserver",
-                        f"--server-name={server_name}",
-                        f"--config-path={config_file!s}",
-                    ],
-                    url=urljoin(server_url, "/_matrix/client/versions"),
-                    method="GET",
-                    timeout=30,
-                    cwd=config_file.parent,
-                    verify_tls=False,
-                    io=synapse_io,
-                )
+            startup_timeout = 10
+            sleep = 0.1
+
+            executor = HTTPExecutor(
+                [
+                    sys.executable,
+                    "-m",
+                    "synapse.app.homeserver",
+                    f"--server-name={server_name}",
+                    f"--config-path={config_file!s}",
+                ],
+                url=urljoin(server_url, "/_matrix/client/versions"),
+                method="GET",
+                timeout=startup_timeout,
+                sleep=sleep,
+                cwd=config_file.parent,
+                verify_tls=False,
+                io=synapse_io,
             )
+            exit_stack.enter_context(executor)
+
+            # The timeout_limit_teardown is necessary to prevent the build
+            # being killed because of the lack of output, at the same time the
+            # timeout must never happen, because if it does, not all finalizers
+            # are executed, leaving dirty state behind and resulting in test
+            # flakiness.
+            #
+            # Because of this, this value is arbitrarily smaller than the
+            # teardown timeout, forcing the subprocess to be killed on a timely
+            # manner, which should allow the teardown to proceed and finish
+            # before the timeout elapses.
+            teardown_timeout = 0.5
+
+            # The timeout values for the startup and teardown must be
+            # different, however the library doesn't support it. So here we
+            # must poke at the private member and overwrite it.
+            executor._timeout = teardown_timeout
+
         yield server_urls

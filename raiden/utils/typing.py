@@ -1,7 +1,11 @@
 from typing import *  # NOQA pylint:disable=wildcard-import,unused-wildcard-import
-from typing import TYPE_CHECKING, Dict, List, NewType, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, List, NewType, Optional, Tuple, Type, Union
 
-from raiden_contracts.contract_manager import DeployedContract
+from raiden_contracts.contract_manager import CompiledContract  # NOQA pylint:disable=unused-import
+from raiden_contracts.utils.type_aliases import (  # NOQA pylint:disable=unused-import
+    ChainID,
+    T_ChainID,
+)
 
 if TYPE_CHECKING:
     # pylint: disable=unused-import
@@ -15,14 +19,20 @@ if TYPE_CHECKING:
         LockedTransferSignedState,
         LockedTransferUnsignedState,
     )
-    from raiden.messages import SignedBlindedBalanceProof  # noqa: F401
-    from raiden.messages import RequestMonitoring  # noqa: F401
+    from raiden.messages.monitoring_service import SignedBlindedBalanceProof  # noqa: F401
     from raiden.exceptions import RaidenUnrecoverableError, RaidenRecoverableError  # noqa: F401
 
 
 MYPY_ANNOTATION = "This assert is used to tell mypy what is the type of the variable"
 
-ABI = DeployedContract
+
+def typecheck(value: Any, expected: Type):
+    if not isinstance(value, expected):
+        raise ValueError(f"Expected a value of type {expected}")
+
+
+ABI = List[Dict[str, Any]]
+BlockchainEvent = Dict[str, Any]
 
 T_Address = bytes
 Address = NewType("Address", T_Address)
@@ -42,9 +52,6 @@ BalanceHash = NewType("BalanceHash", T_BalanceHash)
 
 T_BlockGasLimit = int
 BlockGasLimit = NewType("BlockGasLimit", T_BlockGasLimit)
-
-T_BlockGasPrice = int
-BlockGasPrice = NewType("BlockGasPrice", T_BlockGasPrice)
 
 T_BlockHash = bytes
 BlockHash = NewType("BlockHash", T_BlockHash)
@@ -68,16 +75,8 @@ InitiatorAddress = NewType("InitiatorAddress", T_InitiatorAddress)
 T_Locksroot = bytes
 Locksroot = NewType("Locksroot", T_Locksroot)
 
-T_LockHash = bytes
-LockHash = NewType("LockHash", T_LockHash)
-
-T_MerkleTreeLeaves = List[Union["HashTimeLockState", "UnlockPartialProofState"]]
-MerkleTreeLeaves = NewType("MerkleTreeLeaves", T_MerkleTreeLeaves)
-
 T_MessageID = int
 MessageID = NewType("MessageID", T_MessageID)
-
-UDPMessageID = Union[Tuple[str, int, Address], MessageID]
 
 T_Nonce = int
 Nonce = NewType("Nonce", T_Nonce)
@@ -110,14 +109,14 @@ LockedAmount = NewType("LockedAmount", T_LockedAmount)
 T_PaymentWithFeeAmount = int
 PaymentWithFeeAmount = NewType("PaymentWithFeeAmount", T_FeeAmount)
 
-T_PaymentNetworkID = bytes
-PaymentNetworkID = NewType("PaymentNetworkID", T_PaymentNetworkID)
+T_PaymentNetworkAddress = bytes
+PaymentNetworkAddress = NewType("PaymentNetworkAddress", T_PaymentNetworkAddress)
 
 T_RaidenProtocolVersion = int
 RaidenProtocolVersion = NewType("RaidenProtocolVersion", T_RaidenProtocolVersion)
 
-T_ChainID = int
-ChainID = NewType("ChainID", T_ChainID)
+T_RaidenDBVersion = int
+RaidenDBVersion = NewType("RaidenDBVersion", T_RaidenDBVersion)
 
 T_Keccak256 = bytes
 Keccak256 = NewType("Keccak256", T_Keccak256)
@@ -130,9 +129,6 @@ TokenAddress = NewType("TokenAddress", T_TokenAddress)
 
 T_TokenNetworkAddress = bytes
 TokenNetworkAddress = NewType("TokenNetworkAddress", T_TokenNetworkAddress)
-
-T_TokenNetworkID = bytes
-TokenNetworkID = NewType("TokenNetworkID", T_TokenNetworkID)
 
 T_TokenAmount = int
 TokenAmount = NewType("TokenAmount", T_TokenAmount)
@@ -155,20 +151,23 @@ Signature = NewType("Signature", T_Signature)
 T_TransactionHash = bytes
 TransactionHash = NewType("TransactionHash", T_TransactionHash)
 
+T_EncodedData = bytes
+EncodedData = NewType("EncodedData", T_EncodedData)
+
+T_WithdrawAmount = int
+WithdrawAmount = NewType("WithdrawAmount", T_WithdrawAmount)
+
 # This should be changed to `Optional[str]`
 SuccessOrError = Tuple[bool, Optional[str]]
 
 BlockSpecification = Union[str, T_BlockNumber, T_BlockHash]
 
-ChannelMap = Dict[ChannelID, "NettingChannelState"]
-
-InitiatorTransfersMap = Dict[SecretHash, "InitiatorTransferState"]
-
 NodeNetworkStateMap = Dict[Address, str]
 
 Host = NewType("Host", str)
 Port = NewType("Port", int)
-HostPort = Tuple[Host, Optional[Port]]
+HostPort = Tuple[Host, Port]
+Endpoint = NewType("Endpoint", str)
 
 LockType = Union["HashTimeLockState", "UnlockPartialProofState"]
 ErrorType = Union[Type["RaidenRecoverableError"], Type["RaidenUnrecoverableError"]]

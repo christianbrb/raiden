@@ -1,20 +1,11 @@
-import copy
 import json
-import os
 import warnings
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gevent
 import structlog
-from eth_utils import (
-    decode_hex,
-    encode_hex,
-    is_checksum_address,
-    remove_0x_prefix,
-    to_canonical_address,
-    to_checksum_address,
-)
+from eth_utils import encode_hex, is_checksum_address, to_canonical_address, to_checksum_address
 from gevent.lock import Semaphore
 from hexbytes import HexBytes
 from requests.exceptions import ConnectTimeout
@@ -30,6 +21,7 @@ from web3.utils.toolz import assoc
 from raiden import constants
 from raiden.exceptions import (
     AddressWithoutCode,
+    ContractCodeMismatch,
     EthNodeCommunicationError,
     EthNodeInterfaceError,
     InsufficientFunds,
@@ -40,25 +32,22 @@ from raiden.network.rpc.middleware import (
     http_retry_with_backoff_middleware,
 )
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
-from raiden.utils import pex, privatekey_to_address
+from raiden.utils import privatekey_to_address
 from raiden.utils.ethereum_clients import is_supported_client
 from raiden.utils.filters import StatelessFilter
-from raiden.utils.solc import (
-    solidity_library_symbol,
-    solidity_resolve_symbols,
-    solidity_unresolved_symbols,
-)
 from raiden.utils.typing import (
     ABI,
     Address,
     AddressHex,
     BlockHash,
     BlockSpecification,
+    CompiledContract,
     Nonce,
+    PrivateKey,
     TransactionHash,
 )
 
-log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
+log = structlog.get_logger(__name__)
 
 
 def logs_blocks_sanity_check(from_block: BlockSpecification, to_block: BlockSpecification) -> None:
@@ -178,75 +167,23 @@ def geth_discover_next_available_nonce(web3: Web3, address: AddressHex) -> Nonce
     return web3.eth.getTransactionCount(address, "latest")
 
 
-def check_address_has_code(client: "JSONRPCClient", address: Address, contract_name: str = ""):
+def check_address_has_code(
+    client: "JSONRPCClient", address: Address, contract_name: str = "", expected_code: bytes = None
+):
     """ Checks that the given address contains code. """
     result = client.web3.eth.getCode(to_checksum_address(address), "latest")
 
     if not result:
-        if contract_name:
-            formated_contract_name = "[{}]: ".format(contract_name)
-        else:
-            formated_contract_name = ""
-
         raise AddressWithoutCode(
-            "{}Address {} does not contain code".format(
-                formated_contract_name, to_checksum_address(address)
+            "[{}]Address {} does not contain code".format(
+                contract_name, to_checksum_address(address)
             )
         )
 
-
-def deploy_dependencies_symbols(all_contract):
-    dependencies = {}
-
-    symbols_to_contract = dict()
-    for contract_name in all_contract:
-        symbol = solidity_library_symbol(contract_name)
-
-        if symbol in symbols_to_contract:
-            raise ValueError("Conflicting library names.")
-
-        symbols_to_contract[symbol] = contract_name
-
-    for contract_name, contract in all_contract.items():
-        unresolved_symbols = solidity_unresolved_symbols(contract["bin"])
-        dependencies[contract_name] = [
-            symbols_to_contract[unresolved] for unresolved in unresolved_symbols
-        ]
-
-    return dependencies
-
-
-def dependencies_order_of_build(target_contract, dependencies_map):
-    """ Return an ordered list of contracts that is sufficient to successfully
-    deploy the target contract.
-
-    Note:
-        This function assumes that the `dependencies_map` is an acyclic graph.
-    """
-    if not dependencies_map:
-        return [target_contract]
-
-    if target_contract not in dependencies_map:
-        raise ValueError("no dependencies defined for {}".format(target_contract))
-
-    order = [target_contract]
-    todo = list(dependencies_map[target_contract])
-
-    while todo:
-        target_contract = todo.pop(0)
-        target_pos = len(order)
-
-        for dependency in dependencies_map[target_contract]:
-            # we need to add the current contract before all its depedencies
-            if dependency in order:
-                target_pos = order.index(dependency)
-            else:
-                todo.append(dependency)
-
-        order.insert(target_pos, target_contract)
-
-    order.reverse()
-    return order
+    if expected_code is not None and result != expected_code:
+        raise ContractCodeMismatch(
+            f"[{contract_name}]Address {to_checksum_address(address)} has wrong code."
+        )
 
 
 class ParityCallType(Enum):
@@ -365,7 +302,7 @@ def estimate_gas_for_function(
 def patched_contractfunction_estimateGas(self, transaction=None, block_identifier=None):
     """Temporary workaround until next web3.py release (5.X.X)"""
     if transaction is None:
-        estimate_gas_transaction = {}
+        estimate_gas_transaction: Dict[str, Any] = {}
     else:
         estimate_gas_transaction = dict(**transaction)
 
@@ -450,7 +387,7 @@ class JSONRPCClient:
     def __init__(
         self,
         web3: Web3,
-        privkey: bytes,
+        privkey: Optional[PrivateKey],
         gas_price_strategy: Callable = rpc_gas_price_strategy,
         gas_estimate_correction: Callable = lambda gas: gas,
         block_num_confirmations: int = 0,
@@ -469,7 +406,10 @@ class JSONRPCClient:
         except ConnectTimeout:
             raise EthNodeCommunicationError("couldnt reach the ethereum node")
 
-        _, eth_node = is_supported_client(version)
+        supported, eth_node, _ = is_supported_client(version)
+
+        if not supported:
+            raise EthNodeInterfaceError(f"Unsupported Ethereum client {version}")
 
         address = privatekey_to_address(privkey)
         address_checksumed = to_checksum_address(address)
@@ -496,9 +436,6 @@ class JSONRPCClient:
             geth_assert_rpc_interfaces(web3)
             available_nonce = geth_discover_next_available_nonce(web3, address_checksumed)
 
-        else:
-            raise EthNodeInterfaceError(f"Unsupported Ethereum client {version}")
-
         self.eth_node = eth_node
         self.privkey = privkey
         self.address = address
@@ -511,13 +448,17 @@ class JSONRPCClient:
 
         log.debug(
             "JSONRPCClient created",
-            node=pex(self.address),
+            node=to_checksum_address(self.address),
             available_nonce=available_nonce,
             client=version,
         )
 
     def __repr__(self):
-        return f"<JSONRPCClient node:{pex(self.address)} nonce:{self._available_nonce}>"
+        return (
+            f"<JSONRPCClient "
+            f"node:{to_checksum_address(self.address)} nonce:{self._available_nonce}"
+            f">"
+        )
 
     def block_number(self):
         """ Return the most recent block. """
@@ -594,7 +535,7 @@ class JSONRPCClient:
 
         return price
 
-    def new_contract_proxy(self, contract_interface, contract_address: Address):
+    def new_contract_proxy(self, contract_interface, contract_address: Address) -> ContractProxy:
         """ Return a proxy for interacting with a smart contract.
 
         Args:
@@ -605,7 +546,7 @@ class JSONRPCClient:
             self, contract=self.new_contract(contract_interface, contract_address)
         )
 
-    def new_contract(self, contract_interface: Dict, contract_address: Address):
+    def new_contract(self, contract_interface: ABI, contract_address: Address):
         return self.web3.eth.contract(
             abi=contract_interface, address=to_checksum_address(contract_address)
         )
@@ -613,104 +554,22 @@ class JSONRPCClient:
     def get_transaction_receipt(self, tx_hash: bytes):
         return self.web3.eth.getTransactionReceipt(encode_hex(tx_hash))
 
-    def deploy_solidity_contract(
-        self,  # pylint: disable=too-many-locals
+    def deploy_single_contract(
+        self,
         contract_name: str,
-        all_contracts: Dict[str, ABI],
-        libraries: Dict[str, str] = None,
-        constructor_parameters: Tuple[Any] = None,
-        contract_path: str = None,
-    ):
+        contract: CompiledContract,
+        constructor_parameters: Tuple[Any, ...] = None,
+    ) -> Tuple[ContractProxy, Dict]:
         """
-        Deploy a solidity contract.
+        Deploy a single solidity contract without dependencies.
 
         Args:
             contract_name: The name of the contract to compile.
-            all_contracts: The json dictionary containing the result of compiling a file.
-            libraries: A list of libraries to use in deployment.
+            contract: The dictionary containing the contract information (like ABI and BIN)
             constructor_parameters: A tuple of arguments to pass to the constructor.
-            contract_path: If we are dealing with solc >= v0.4.9 then the path
-                           to the contract is a required argument to extract
-                           the contract data from the `all_contracts` dict.
         """
-        if libraries:
-            libraries = dict(libraries)
-        else:
-            libraries = dict()
 
         ctor_parameters = constructor_parameters or ()
-        all_contracts = copy.deepcopy(all_contracts)
-
-        if contract_name in all_contracts:
-            contract_key = contract_name
-
-        elif contract_path is not None:
-            contract_key = os.path.basename(contract_path) + ":" + contract_name
-
-            if contract_key not in all_contracts:
-                raise ValueError("Unknown contract {}".format(contract_name))
-        else:
-            raise ValueError(
-                "Unknown contract {} and no contract_path given".format(contract_name)
-            )
-
-        contract = all_contracts[contract_key]
-        contract_interface = contract["abi"]
-        symbols = solidity_unresolved_symbols(contract["bin"])
-
-        if symbols:
-            available_symbols = list(map(solidity_library_symbol, all_contracts.keys()))
-
-            unknown_symbols = set(symbols) - set(available_symbols)
-            if unknown_symbols:
-                msg = "Cannot deploy contract, known symbols {}, unresolved symbols {}.".format(
-                    available_symbols, unknown_symbols
-                )
-                raise Exception(msg)
-
-            dependencies = deploy_dependencies_symbols(all_contracts)
-            deployment_order = dependencies_order_of_build(contract_key, dependencies)
-
-            deployment_order.pop()  # remove `contract_name` from the list
-
-            log.debug(
-                "Deploying dependencies: {}".format(str(deployment_order)), node=pex(self.address)
-            )
-
-            for deploy_contract in deployment_order:
-                dependency_contract = all_contracts[deploy_contract]
-
-                hex_bytecode = solidity_resolve_symbols(dependency_contract["bin"], libraries)
-                bytecode = decode_hex(hex_bytecode)
-
-                dependency_contract["bin"] = bytecode
-
-                gas_limit = self.web3.eth.getBlock("latest")["gasLimit"] * 8 // 10
-                transaction_hash = self.send_transaction(
-                    to=Address(b""), startgas=gas_limit, data=bytecode
-                )
-
-                self.poll(transaction_hash)
-                receipt = self.get_transaction_receipt(transaction_hash)
-
-                contract_address = receipt["contractAddress"]
-                # remove the hexadecimal prefix 0x from the address
-                contract_address = remove_0x_prefix(contract_address)
-
-                libraries[deploy_contract] = contract_address
-
-                deployed_code = self.web3.eth.getCode(to_checksum_address(contract_address))
-
-                if not deployed_code:
-                    raise RuntimeError("Contract address has no code, check gas usage.")
-
-            hex_bytecode = solidity_resolve_symbols(contract["bin"], libraries)
-            bytecode = decode_hex(hex_bytecode)
-
-            contract["bin"] = bytecode
-
-        if isinstance(contract["bin"], str):
-            contract["bin"] = decode_hex(contract["bin"])
 
         contract_object = self.web3.eth.contract(abi=contract["abi"], bytecode=contract["bin"])
         contract_transaction = contract_object.constructor(*ctor_parameters).buildTransaction()
@@ -733,7 +592,7 @@ class JSONRPCClient:
                 )
             )
 
-        return self.new_contract_proxy(contract_interface, contract_address), receipt
+        return self.new_contract_proxy(contract["abi"], contract_address), receipt
 
     def send_transaction(
         self, to: Address, startgas: int, value: int = 0, data: bytes = b""
@@ -761,7 +620,7 @@ class JSONRPCClient:
             node_gas_price = self.web3.eth.gasPrice
             log.debug(
                 "Calculated gas price for transaction",
-                node=pex(self.address),
+                node=to_checksum_address(self.address),
                 calculated_gas_price=gas_price,
                 node_gas_price=node_gas_price,
             )
@@ -773,7 +632,7 @@ class JSONRPCClient:
             signed_txn = self.web3.eth.account.signTransaction(transaction, self.privkey)
 
             log_details = {
-                "node": pex(self.address),
+                "node": to_checksum_address(self.address),
                 "nonce": transaction["nonce"],
                 "gasLimit": transaction["gas"],
                 "gasPrice": transaction["gasPrice"],

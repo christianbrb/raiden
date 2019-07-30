@@ -17,8 +17,6 @@ from raiden.tests.utils.network import (
 )
 from raiden.tests.utils.tests import shutdown_apps_and_cleanup_tasks
 
-_ETH_LOGDIR = os.environ.get("RAIDEN_TESTS_ETH_LOGSDIR")
-
 
 def timeout(blockchain_type: str):
     """As parity nodes are slower, we need to set a longer timeout when
@@ -36,16 +34,9 @@ def raiden_chain(
     settle_timeout,
     chain_id,
     blockchain_services,
-    endpoint_discovery_services,
-    raiden_udp_ports,
     reveal_timeout,
     retry_interval,
     retries_before_backoff,
-    throttle_capacity,
-    throttle_fill_rate,
-    nat_invitation_timeout,
-    nat_keepalive_retries,
-    nat_keepalive_timeout,
     environment_type,
     unrecoverable_error_should_crash,
     local_matrix_servers,
@@ -53,9 +44,9 @@ def raiden_chain(
     blockchain_type,
     contracts_path,
     user_deposit_address,
+    monitoring_service_contract_address,
     global_rooms,
-    tmpdir,
-    request,
+    logs_storage,
 ):
 
     if len(token_addresses) != 1:
@@ -66,10 +57,7 @@ def raiden_chain(
         "with 0, 1 or 2 channels"
     )
 
-    if _ETH_LOGDIR:
-        base_datadir = os.path.join(_ETH_LOGDIR, request.node.name, "raiden_nodes")
-    else:
-        base_datadir = os.path.join(tmpdir.strpath, "raiden_nodes")
+    base_datadir = os.path.join(logs_storage, "raiden_nodes")
 
     service_registry_address = None
     if blockchain_services.service_registry:
@@ -77,23 +65,17 @@ def raiden_chain(
     raiden_apps = create_apps(
         chain_id=chain_id,
         blockchain_services=blockchain_services.blockchain_services,
-        endpoint_discovery_services=endpoint_discovery_services,
         token_network_registry_address=token_network_registry_address,
         one_to_n_address=one_to_n_address,
         secret_registry_address=blockchain_services.secret_registry.address,
         service_registry_address=service_registry_address,
         user_deposit_address=user_deposit_address,
-        raiden_udp_ports=raiden_udp_ports,
+        monitoring_service_contract_address=monitoring_service_contract_address,
         reveal_timeout=reveal_timeout,
         settle_timeout=settle_timeout,
         database_basedir=base_datadir,
         retry_interval=retry_interval,
         retries_before_backoff=retries_before_backoff,
-        throttle_capacity=throttle_capacity,
-        throttle_fill_rate=throttle_fill_rate,
-        nat_invitation_timeout=nat_invitation_timeout,
-        nat_keepalive_retries=nat_keepalive_retries,
-        nat_keepalive_timeout=nat_keepalive_timeout,
         environment_type=environment_type,
         unrecoverable_error_should_crash=unrecoverable_error_should_crash,
         local_matrix_url=local_matrix_servers[0],
@@ -142,6 +124,11 @@ def raiden_chain(
 
 
 @pytest.fixture
+def monitoring_service_contract_address():
+    return bytes([1] * 20)
+
+
+@pytest.fixture
 def raiden_network(
     token_addresses,
     token_network_registry_address,
@@ -151,16 +138,9 @@ def raiden_network(
     settle_timeout,
     chain_id,
     blockchain_services,
-    endpoint_discovery_services,
-    raiden_udp_ports,
     reveal_timeout,
     retry_interval,
     retries_before_backoff,
-    throttle_capacity,
-    throttle_fill_rate,
-    nat_invitation_timeout,
-    nat_keepalive_retries,
-    nat_keepalive_timeout,
     environment_type,
     unrecoverable_error_should_crash,
     local_matrix_servers,
@@ -168,40 +148,31 @@ def raiden_network(
     blockchain_type,
     contracts_path,
     user_deposit_address,
+    monitoring_service_contract_address,
     global_rooms,
-    tmpdir,
-    request,
+    logs_storage,
 ):
     service_registry_address = None
     if blockchain_services.service_registry:
         service_registry_address = blockchain_services.service_registry.address
 
-    if _ETH_LOGDIR:
-        base_datadir = os.path.join(_ETH_LOGDIR, request.node.name, "raiden_nodes")
-    else:
-        base_datadir = os.path.join(tmpdir.strpath, "raiden_nodes")
+    base_datadir = os.path.join(logs_storage, "raiden_nodes")
 
     raiden_apps = create_apps(
         chain_id=chain_id,
         contracts_path=contracts_path,
         blockchain_services=blockchain_services.blockchain_services,
-        endpoint_discovery_services=endpoint_discovery_services,
         token_network_registry_address=token_network_registry_address,
         secret_registry_address=blockchain_services.secret_registry.address,
         service_registry_address=service_registry_address,
         one_to_n_address=one_to_n_address,
         user_deposit_address=user_deposit_address,
-        raiden_udp_ports=raiden_udp_ports,
+        monitoring_service_contract_address=monitoring_service_contract_address,
         reveal_timeout=reveal_timeout,
         settle_timeout=settle_timeout,
         database_basedir=base_datadir,
         retry_interval=retry_interval,
         retries_before_backoff=retries_before_backoff,
-        throttle_capacity=throttle_capacity,
-        throttle_fill_rate=throttle_fill_rate,
-        nat_invitation_timeout=nat_invitation_timeout,
-        nat_keepalive_retries=nat_keepalive_retries,
-        nat_keepalive_timeout=nat_keepalive_timeout,
         environment_type=environment_type,
         unrecoverable_error_should_crash=unrecoverable_error_should_crash,
         local_matrix_url=local_matrix_servers[0],

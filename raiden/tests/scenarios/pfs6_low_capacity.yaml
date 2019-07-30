@@ -6,8 +6,7 @@ settings:
   chain: any
   services:
     pfs:
-      # url: https://pfs-kovan.services-dev.raiden.network
-      url: http://localhost:6000
+      url: https://pfs-goerli.services-dev.raiden.network
     udc:
       enable: true
       token:
@@ -18,7 +17,7 @@ token:
 nodes:
   mode: managed
   count: 5
-  ## add path to Raiden virtual env
+  raiden_version: local
 
   default_options:
     gas-price: fast

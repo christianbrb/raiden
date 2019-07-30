@@ -1,9 +1,12 @@
 import copy
 import random
 from collections import deque
+from typing import Deque, Set
 
 import gevent
 import structlog
+from eth_utils import to_checksum_address
+from gevent import Greenlet
 from gevent.event import Event
 from gevent.lock import BoundedSemaphore
 from gevent.queue import Queue
@@ -13,8 +16,7 @@ from raiden.api.python import RaidenAPI
 from raiden.tasks import REMOVE_CALLBACK
 from raiden.transfer import channel
 from raiden.transfer.events import EventPaymentReceivedSuccess
-from raiden.transfer.state import CHANNEL_STATE_OPENED
-from raiden.utils import pex
+from raiden.transfer.state import ChannelState
 
 log = structlog.get_logger(__name__)
 
@@ -22,7 +24,7 @@ log = structlog.get_logger(__name__)
 TRANSFER_MEMORY = 4096
 
 
-class EchoNode:
+class EchoNode:  # pragma: no unittest
     def __init__(self, api, token_address):
         assert isinstance(api, RaidenAPI)
         self.ready = Event()
@@ -37,15 +39,16 @@ class EchoNode:
         open_channels = [
             channel_state
             for channel_state in existing_channels
-            if channel.get_status(channel_state) == CHANNEL_STATE_OPENED
+            if channel.get_status(channel_state) == ChannelState.STATE_OPENED
         ]
 
         if len(open_channels) == 0:
             token = self.api.raiden.chain.token(self.token_address)
             if not token.balance_of(self.api.raiden.address) > 0:
                 raise ValueError(
-                    "not enough funds for echo node %s for token %s"
-                    % (pex(self.api.raiden.address), pex(self.token_address))
+                    f"not enough funds for echo node "
+                    f"{to_checksum_address(self.api.raiden.address)} for token "
+                    f"{to_checksum_address(self.token_address)}"
                 )
             self.api.token_network_connect(
                 self.api.raiden.default_registry.address,
@@ -58,9 +61,9 @@ class EchoNode:
         self.last_poll_offset = 0
         self.received_transfers = Queue()
         self.stop_signal = None  # used to signal REMOVE_CALLBACK and stop echo_workers
-        self.greenlets = set()
+        self.greenlets: Set[Greenlet] = set()
         self.lock = BoundedSemaphore()
-        self.seen_transfers = deque(list(), TRANSFER_MEMORY)
+        self.seen_transfers: Deque[EventPaymentReceivedSuccess] = deque(list(), TRANSFER_MEMORY)
         self.num_handled_transfers = 0
         self.lottery_pool = Queue()
         # register ourselves with the raiden alarm task
@@ -138,7 +141,7 @@ class EchoNode:
                 if transfer in self.seen_transfers:
                     log.debug(
                         "duplicate transfer ignored",
-                        initiator=pex(transfer.initiator),
+                        initiator=to_checksum_address(transfer.initiator),
                         amount=transfer.amount,
                         identifier=transfer.identifier,
                     )
@@ -166,7 +169,7 @@ class EchoNode:
         if transfer.amount % 3 == 0:
             log.info(
                 "ECHO amount - 1",
-                initiator=pex(transfer.initiator),
+                initiator=to_checksum_address(transfer.initiator),
                 amount=transfer.amount,
                 identifier=transfer.identifier,
             )
@@ -175,7 +178,7 @@ class EchoNode:
         elif transfer.amount == 7:
             log.info(
                 "ECHO lucky number draw",
-                initiator=pex(transfer.initiator),
+                initiator=to_checksum_address(transfer.initiator),
                 amount=transfer.amount,
                 identifier=transfer.identifier,
                 poolsize=self.lottery_pool.qsize(),
@@ -191,7 +194,7 @@ class EchoNode:
                 assert transfer not in tickets
                 log.debug(
                     "duplicate lottery entry",
-                    initiator=pex(transfer.initiator),
+                    initiator=to_checksum_address(transfer.initiator),
                     identifier=transfer.identifier,
                     poolsize=len(tickets),
                 )
@@ -215,7 +218,7 @@ class EchoNode:
         else:
             log.debug(
                 "echo transfer received",
-                initiator=pex(transfer.initiator),
+                initiator=to_checksum_address(transfer.initiator),
                 amount=transfer.amount,
                 identifier=transfer.identifier,
             )
@@ -224,11 +227,11 @@ class EchoNode:
         if echo_amount:
             log.debug(
                 "sending echo transfer",
-                target=pex(transfer.initiator),
+                target=to_checksum_address(transfer.initiator),
                 amount=echo_amount,
                 orig_identifier=transfer.identifier,
                 echo_identifier=transfer.identifier + echo_amount,
-                token_address=pex(self.token_address),
+                token_address=to_checksum_address(self.token_address),
                 num_handled_transfers=self.num_handled_transfers + 1,
             )
 

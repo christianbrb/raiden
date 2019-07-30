@@ -8,6 +8,7 @@ from raiden.constants import (
     RED_EYES_PER_TOKEN_NETWORK_LIMIT,
 )
 from raiden.exceptions import AddressWithoutCode, InvalidToken, RaidenRecoverableError
+from raiden.network.blockchain_service import BlockChainService
 from raiden.network.proxies.token import Token
 from raiden.network.proxies.token_network_registry import TokenNetworkRegistry
 from raiden.tests.utils.factories import make_address
@@ -15,13 +16,20 @@ from raiden.tests.utils.smartcontracts import deploy_token
 from raiden_contracts.constants import TEST_SETTLE_TIMEOUT_MAX, TEST_SETTLE_TIMEOUT_MIN
 
 
-def test_token_network_registry(deploy_client, contract_manager, token_network_registry_address):
+def test_token_network_registry(
+    deploy_client, contract_manager, token_network_registry_address, token_contract_name
+):
     registry_address = to_canonical_address(token_network_registry_address)
+
+    blockchain_service = BlockChainService(
+        jsonrpc_client=deploy_client, contract_manager=contract_manager
+    )
 
     token_network_registry_proxy = TokenNetworkRegistry(
         jsonrpc_client=deploy_client,
         registry_address=registry_address,
         contract_manager=contract_manager,
+        blockchain_service=blockchain_service,
     )
 
     assert token_network_registry_proxy.settlement_timeout_min() == TEST_SETTLE_TIMEOUT_MIN
@@ -43,6 +51,7 @@ def test_token_network_registry(deploy_client, contract_manager, token_network_r
         decimals=0,
         token_name="TKN",
         token_symbol="TKN",
+        token_contract_name=token_contract_name,
     )
 
     test_token_address = to_canonical_address(test_token.contract.address)

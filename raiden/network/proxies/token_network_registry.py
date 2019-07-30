@@ -6,45 +6,53 @@ from eth_utils import (
     event_abi_to_log_topic,
     is_binary_address,
     is_same_address,
+    to_bytes,
     to_canonical_address,
     to_checksum_address,
     to_normalized_address,
 )
 
-from raiden.constants import (
-    GAS_REQUIRED_FOR_CREATE_ERC20_TOKEN_NETWORK,
-    GENESIS_BLOCK_NUMBER,
-    NULL_ADDRESS,
-)
+from raiden.constants import GENESIS_BLOCK_NUMBER, NULL_ADDRESS
 from raiden.exceptions import (
     InvalidAddress,
     InvalidToken,
     RaidenRecoverableError,
     RaidenUnrecoverableError,
 )
-from raiden.network.proxies.token import Token
-from raiden.network.proxies.utils import compare_contract_versions
+from raiden.network.proxies.utils import log_transaction
 from raiden.network.rpc.client import StatelessFilter, check_address_has_code
 from raiden.network.rpc.transactions import check_transaction_threw
-from raiden.utils import pex, safe_gas_limit
+from raiden.utils import safe_gas_limit
 from raiden.utils.typing import (
+    TYPE_CHECKING,
     Address,
     BlockSpecification,
     Dict,
-    PaymentNetworkID,
+    PaymentNetworkAddress,
     T_TargetAddress,
     TokenAddress,
     TokenAmount,
+    TokenNetworkAddress,
+    typecheck,
 )
 from raiden_contracts.constants import CONTRACT_TOKEN_NETWORK_REGISTRY, EVENT_TOKEN_NETWORK_CREATED
-from raiden_contracts.contract_manager import ContractManager
+from raiden_contracts.contract_manager import ContractManager, gas_measurements
 
-log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
+if TYPE_CHECKING:
+    # pylint: disable=unused-import
+    from raiden.network.blockchain_service import BlockChainService
+
+
+log = structlog.get_logger(__name__)
 
 
 class TokenNetworkRegistry:
     def __init__(
-        self, jsonrpc_client, registry_address: PaymentNetworkID, contract_manager: ContractManager
+        self,
+        jsonrpc_client,
+        registry_address: PaymentNetworkAddress,
+        contract_manager: ContractManager,
+        blockchain_service: "BlockChainService",
     ):
         if not is_binary_address(registry_address):
             raise InvalidAddress("Expected binary address format for token network registry")
@@ -53,6 +61,9 @@ class TokenNetworkRegistry:
             client=jsonrpc_client,
             address=Address(registry_address),
             contract_name=CONTRACT_TOKEN_NETWORK_REGISTRY,
+            expected_code=to_bytes(
+                hexstr=contract_manager.get_runtime_hexcode(CONTRACT_TOKEN_NETWORK_REGISTRY)
+            ),
         )
 
         self.contract_manager = contract_manager
@@ -61,12 +72,9 @@ class TokenNetworkRegistry:
             to_normalized_address(registry_address),
         )
 
-        compare_contract_versions(
-            proxy=proxy,
-            expected_version=contract_manager.contracts_version,
-            contract_name=CONTRACT_TOKEN_NETWORK_REGISTRY,
-            address=Address(registry_address),
-        )
+        self.gas_measurements = gas_measurements(self.contract_manager.contracts_version)
+
+        self.blockchain_service = blockchain_service
 
         self.address = registry_address
         self.proxy = proxy
@@ -75,12 +83,11 @@ class TokenNetworkRegistry:
 
     def get_token_network(
         self, token_address: TokenAddress, block_identifier: BlockSpecification = "latest"
-    ) -> Optional[Address]:
+    ) -> Optional[TokenNetworkAddress]:
         """ Return the token network address for the given token or None if
         there is no correspoding address.
         """
-        if not isinstance(token_address, T_TargetAddress):
-            raise ValueError("token_address must be an address")
+        typecheck(token_address, T_TargetAddress)
 
         address = self.proxy.contract.functions.token_to_token_networks(
             to_checksum_address(token_address)
@@ -97,7 +104,7 @@ class TokenNetworkRegistry:
         token_address: TokenAddress,
         channel_participant_deposit_limit: TokenAmount,
         token_network_deposit_limit: TokenAmount,
-    ) -> Address:
+    ) -> TokenNetworkAddress:
         """
         Register token of `token_address` with the token network.
         The limits apply for version 0.13.0 and above of raiden-contracts,
@@ -111,7 +118,7 @@ class TokenNetworkRegistry:
             },
         )
 
-    def add_token_without_limits(self, token_address: TokenAddress) -> Address:
+    def add_token_without_limits(self, token_address: TokenAddress) -> TokenNetworkAddress:
         """
         Register token of `token_address` with the token network.
         This applies for versions prior to 0.13.0 of raiden-contracts,
@@ -119,15 +126,13 @@ class TokenNetworkRegistry:
         """
         return self._add_token(token_address=token_address, additional_arguments=dict())
 
-    def _add_token(self, token_address: TokenAddress, additional_arguments: Dict) -> Address:
+    def _add_token(
+        self, token_address: TokenAddress, additional_arguments: Dict
+    ) -> TokenNetworkAddress:
         if not is_binary_address(token_address):
             raise InvalidAddress("Expected binary address format for token")
 
-        token_proxy = Token(
-            jsonrpc_client=self.client,
-            token_address=token_address,
-            contract_manager=self.contract_manager,
-        )
+        token_proxy = self.blockchain_service.token(token_address)
 
         if token_proxy.total_supply() == "":
             raise InvalidToken(
@@ -135,67 +140,63 @@ class TokenNetworkRegistry:
             )
 
         log_details = {
-            "node": pex(self.node_address),
-            "token_address": pex(token_address),
-            "registry_address": pex(self.address),
+            "node": to_checksum_address(self.node_address),
+            "contract": to_checksum_address(self.address),
+            "token_address": to_checksum_address(token_address),
         }
-        log.debug("createERC20TokenNetwork called", **log_details)
 
-        checking_block = self.client.get_checking_block()
-        error_prefix = "Call to createERC20TokenNetwork will fail"
+        with log_transaction(log, "add_token", log_details):
+            checking_block = self.client.get_checking_block()
+            error_prefix = "Call to createERC20TokenNetwork will fail"
 
-        kwarguments = {"_token_address": token_address}
-        kwarguments.update(additional_arguments)
-        gas_limit = self.proxy.estimate_gas(
-            checking_block, "createERC20TokenNetwork", **kwarguments
-        )
-
-        if gas_limit:
-            error_prefix = "Call to createERC20TokenNetwork failed"
-            transaction_hash = self.proxy.transact(
-                "createERC20TokenNetwork",
-                safe_gas_limit(gas_limit, GAS_REQUIRED_FOR_CREATE_ERC20_TOKEN_NETWORK),
-                **kwarguments,
+            kwarguments = {"_token_address": token_address}
+            kwarguments.update(additional_arguments)
+            gas_limit = self.proxy.estimate_gas(
+                checking_block, "createERC20TokenNetwork", **kwarguments
             )
 
-            self.client.poll(transaction_hash)
-            receipt_or_none = check_transaction_threw(self.client, transaction_hash)
+            if gas_limit:
+                error_prefix = "Call to createERC20TokenNetwork failed"
+                gas_limit = safe_gas_limit(
+                    gas_limit,
+                    self.gas_measurements["TokenNetworkRegistry createERC20TokenNetwork"],
+                )
+                log_details["gas_limit"] = gas_limit
+                transaction_hash = self.proxy.transact(
+                    "createERC20TokenNetwork", gas_limit, **kwarguments
+                )
 
-        transaction_executed = gas_limit is not None
-        if not transaction_executed or receipt_or_none:
-            if transaction_executed:
-                block = receipt_or_none["blockNumber"]
-            else:
-                block = checking_block
+                self.client.poll(transaction_hash)
+                receipt_or_none = check_transaction_threw(self.client, transaction_hash)
 
-            required_gas = gas_limit if gas_limit else GAS_REQUIRED_FOR_CREATE_ERC20_TOKEN_NETWORK
-            self.proxy.jsonrpc_client.check_for_insufficient_eth(
-                transaction_name="createERC20TokenNetwork",
-                transaction_executed=transaction_executed,
-                required_gas=required_gas,
-                block_identifier=block,
-            )
+            transaction_executed = gas_limit is not None
+            if not transaction_executed or receipt_or_none:
+                if transaction_executed:
+                    block = receipt_or_none["blockNumber"]
+                else:
+                    block = checking_block
 
-            if self.get_token_network(token_address, block):
-                error_msg = f"{error_prefix}. Token already registered"
-                log.warning(error_msg, **log_details)
-                raise RaidenRecoverableError(error_msg)
+                required_gas = (
+                    gas_limit
+                    if gas_limit
+                    else self.gas_measurements["TokenNetworkRegistry createERC20TokenNetwork"]
+                )
+                self.proxy.jsonrpc_client.check_for_insufficient_eth(
+                    transaction_name="createERC20TokenNetwork",
+                    transaction_executed=transaction_executed,
+                    required_gas=required_gas,
+                    block_identifier=block,
+                )
 
-            error_msg = f"{error_prefix}"
-            log.critical(error_msg, **log_details)
-            raise RaidenUnrecoverableError(error_msg)
+                if self.get_token_network(token_address, block):
+                    raise RaidenRecoverableError(f"{error_prefix}. Token already registered")
 
-        token_network_address = self.get_token_network(token_address, "latest")
-        if token_network_address is None:
-            msg = "createERC20TokenNetwork succeeded but token network address is Null"
-            log.critical(msg, **log_details)
-            raise RuntimeError(msg)
+                raise RaidenUnrecoverableError(error_prefix)
 
-        log.info(
-            "createERC20TokenNetwork successful",
-            token_network_address=pex(token_network_address),
-            **log_details,
-        )
+            token_network_address = self.get_token_network(token_address, "latest")
+            if token_network_address is None:
+                msg = "createERC20TokenNetwork succeeded but token network address is Null"
+                raise RuntimeError(msg)
 
         return token_network_address
 

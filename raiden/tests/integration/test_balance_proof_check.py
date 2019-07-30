@@ -1,15 +1,19 @@
 import pytest
+from eth_utils import encode_hex, to_checksum_address
 
 from raiden import waiting
 from raiden.api.python import RaidenAPI
-from raiden.constants import EMPTY_HASH, EMPTY_SIGNATURE
+from raiden.constants import EMPTY_BALANCE_HASH, EMPTY_HASH, EMPTY_SIGNATURE
 from raiden.network.proxies.token_network import TokenNetwork
+from raiden.storage.sqlite import RANGE_ALL_STATE_CHANGES
+from raiden.tests.integration.network.proxies import BalanceProof
 from raiden.tests.utils.detect_failure import raise_on_failure
 from raiden.tests.utils.events import search_for_item
 from raiden.tests.utils.network import CHAIN
 from raiden.tests.utils.transfer import get_channelstate, transfer
 from raiden.transfer import views
 from raiden.transfer.state_change import ContractReceiveChannelSettled
+from raiden_contracts.constants import MessageTypeId
 
 
 @pytest.mark.parametrize("deposit", [10])
@@ -44,12 +48,14 @@ def run_test_node_can_settle_if_close_didnt_use_any_balance_proof(
     app0, app1 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_id = app0.raiden.default_registry.address
+    payment_network_address = app0.raiden.default_registry.address
     registry_address = app0.raiden.default_registry.address
-    token_network_identifier = views.get_token_network_identifier_by_token_address(
-        chain_state=chain_state, payment_network_id=payment_network_id, token_address=token_address
+    token_network_address = views.get_token_network_address_by_token_address(
+        chain_state=chain_state,
+        payment_network_address=payment_network_address,
+        token_address=token_address,
     )
-    channel_identifier = get_channelstate(app0, app1, token_network_identifier).identifier
+    channel_identifier = get_channelstate(app0, app1, token_network_address).identifier
 
     # make a transfer from app0 to app1 so that app1 is supposed to have a non
     # empty balance hash
@@ -65,9 +71,23 @@ def run_test_node_can_settle_if_close_didnt_use_any_balance_proof(
     app1.stop()
     token_network_contract = TokenNetwork(
         jsonrpc_client=app1.raiden.chain.client,
-        token_network_address=token_network_identifier,
+        token_network_address=token_network_address,
         contract_manager=app1.raiden.contract_manager,
+        blockchain_service=app1.raiden.chain,
     )
+    empty_balance_proof = BalanceProof(
+        channel_identifier=channel_identifier,
+        token_network_address=to_checksum_address(token_network_contract.address),
+        balance_hash=encode_hex(EMPTY_BALANCE_HASH),
+        nonce=0,
+        chain_id=chain_state.chain_id,
+        transferred_amount=0,
+    )
+    closing_data = (
+        empty_balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF_UPDATE)
+        + EMPTY_SIGNATURE
+    )
+    closing_signature = app1.raiden.signer.sign(data=closing_data)
 
     # app1 closes the channel with an empty hash instead of the expected hash
     # of the transferred amount from app0
@@ -77,26 +97,22 @@ def run_test_node_can_settle_if_close_didnt_use_any_balance_proof(
         balance_hash=EMPTY_HASH,
         nonce=0,
         additional_hash=EMPTY_HASH,
-        signature=EMPTY_SIGNATURE,
+        non_closing_signature=EMPTY_SIGNATURE,
+        closing_signature=closing_signature,
         given_block_identifier="latest",
     )
     waiting.wait_for_settle(
         raiden=app0.raiden,
-        payment_network_id=registry_address,
+        payment_network_address=registry_address,
         token_address=token_address,
         channel_ids=[channel_identifier],
         retry_timeout=app0.raiden.alarm.sleep_time,
     )
-    state_changes = app0.raiden.wal.storage.get_statechanges_by_identifier(
-        from_identifier=0, to_identifier="latest"
-    )
+    state_changes = app0.raiden.wal.storage.get_statechanges_by_range(RANGE_ALL_STATE_CHANGES)
     assert search_for_item(
         state_changes,
         ContractReceiveChannelSettled,
-        {
-            "token_network_identifier": token_network_identifier,
-            "channel_identifier": channel_identifier,
-        },
+        {"token_network_address": token_network_address, "channel_identifier": channel_identifier},
     )
 
 
@@ -133,12 +149,14 @@ def run_test_node_can_settle_if_partner_does_not_call_update_transfer(
     app0, app1 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_id = app0.raiden.default_registry.address
+    payment_network_address = app0.raiden.default_registry.address
     registry_address = app0.raiden.default_registry.address
-    token_network_identifier = views.get_token_network_identifier_by_token_address(
-        chain_state=chain_state, payment_network_id=payment_network_id, token_address=token_address
+    token_network_address = views.get_token_network_address_by_token_address(
+        chain_state=chain_state,
+        payment_network_address=payment_network_address,
+        token_address=token_address,
     )
-    channel_identifier = get_channelstate(app0, app1, token_network_identifier).identifier
+    channel_identifier = get_channelstate(app0, app1, token_network_address).identifier
 
     transfer(
         initiator_app=app0,
@@ -160,19 +178,14 @@ def run_test_node_can_settle_if_partner_does_not_call_update_transfer(
 
     waiting.wait_for_settle(
         raiden=app0.raiden,
-        payment_network_id=registry_address,
+        payment_network_address=registry_address,
         token_address=token_address,
         channel_ids=[channel_identifier],
         retry_timeout=app0.raiden.alarm.sleep_time,
     )
-    state_changes = app0.raiden.wal.storage.get_statechanges_by_identifier(
-        from_identifier=0, to_identifier="latest"
-    )
+    state_changes = app0.raiden.wal.storage.get_statechanges_by_range(RANGE_ALL_STATE_CHANGES)
     assert search_for_item(
         state_changes,
         ContractReceiveChannelSettled,
-        {
-            "token_network_identifier": token_network_identifier,
-            "channel_identifier": channel_identifier,
-        },
+        {"token_network_address": token_network_address, "channel_identifier": channel_identifier},
     )

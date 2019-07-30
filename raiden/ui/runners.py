@@ -21,14 +21,13 @@ from raiden.exceptions import (
     EthNodeCommunicationError,
     EthNodeInterfaceError,
     RaidenError,
-    RaidenServicePortInUseError,
 )
 from raiden.log_config import configure_logging
-from raiden.network.sockfactory import SocketFactory
 from raiden.tasks import check_gas_reserve, check_network_id, check_rdn_deposits, check_version
 from raiden.utils import get_system_spec, merge_dict, split_endpoint, typing
 from raiden.utils.echo_node import EchoNode
 from raiden.utils.runnable import Runnable
+from raiden.utils.typing import Port
 
 from .app import run_app
 from .config import dump_cmd_options, dump_config, dump_module
@@ -67,6 +66,7 @@ class NodeRunner:
             log_json=self._options["log_json"],
             log_file=self._options["log_file"],
             disable_debug_logfile=self._options["disable_debug_logfile"],
+            debug_log_file_name=self._options["debug_logfile_name"],
         )
 
         log.info("Starting Raiden", **get_system_spec())
@@ -118,6 +118,10 @@ class NodeRunner:
         if self._options["rpc"]:
             rest_api = RestAPI(self._raiden_api)
             (api_host, api_port) = split_endpoint(self._options["api_address"])
+
+            if not api_port:
+                api_port = Port(settings.DEFAULT_HTTP_SERVER_PORT)
+
             api_server = APIServer(
                 rest_api,
                 config={"host": api_host, "port": api_port},
@@ -234,32 +238,9 @@ class NodeRunner:
         return app_
 
 
-class UDPRunner(NodeRunner):
-    def run(self):
-        super().run()
-
-        (listen_host, listen_port) = split_endpoint(self._options["listen_address"])
-        try:
-            factory = SocketFactory(listen_host, listen_port, strategy=self._options["nat"])
-            with factory as mapped_socket:
-                self._options["mapped_socket"] = mapped_socket
-                app = self._start_services()
-
-        except RaidenServicePortInUseError:
-            click.secho(
-                "ERROR: Address %s:%s is in use. "
-                "Use --listen-address <host:port> to specify port to listen on."
-                % (listen_host, listen_port),
-                fg="red",
-            )
-            sys.exit(1)
-        return app
-
-
 class MatrixRunner(NodeRunner):
     def run(self):
         super().run()
-        self._options["mapped_socket"] = None
         return self._start_services()
 
 
@@ -268,6 +249,10 @@ class EchoNodeRunner(NodeRunner):
         super().__init__(options, ctx)
         self._token_address = token_address
         self._echo_node = None
+
+    def run(self):
+        super().run()
+        return self._start_services()
 
     @property
     def welcome_string(self):

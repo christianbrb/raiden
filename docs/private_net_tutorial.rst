@@ -42,7 +42,7 @@ Install Raiden and dependencies
  <snip>/priv_chain
  (env) $ git clone https://github.com/raiden-network/raiden
  (env) $ cd raiden
- (env) $ pip install -r requirements.txt -c constraints.txt -e .
+ (env) $ make install-dev
 
 Launch a private network
 ========================
@@ -220,4 +220,4 @@ Find the relevant contract addresses and you can start the Raiden client:
  (env) $ export SecretRegistry=0xbF45e5a082Be39692c800D985e9c45F49aE26d69
  (env) $ export TokenNetworkRegistry=0x2f7C7bbF10bCEe496F42F1eaB87Ab50a48FdBa61
  (env) $ export Address=0x8AE8A9d3074CAdf540506FFEdca8A3a9da4f0e71
- (env) $ raiden --datadir exchange-a  --keystore-path   ./blkchain1/keystore/ --network-id 4321  --accept-disclaimer --address $Address --rpc --api-address 0.0.0.0:5001 --web-ui  --environment-type development  --password-file passwd_file  --console --no-sync-check --accept-disclaimer --tokennetwork-registry-contract-address $TokenNetworkRegistry --secret-registry-contract-address  $SecretRegistry --endpoint-registry-contract-address $EndpointRegistry  #--gas-price 10000000000 --transport udp --nat ext:127.0.0.1
+ (env) $ raiden --datadir exchange-a  --keystore-path   ./blkchain1/keystore/ --network-id 4321  --accept-disclaimer --address $Address --rpc --api-address 0.0.0.0:5001 --web-ui  --environment-type development  --password-file passwd_file  --console --no-sync-check --accept-disclaimer --tokennetwork-registry-contract-address $TokenNetworkRegistry --secret-registry-contract-address  $SecretRegistry --endpoint-registry-contract-address $EndpointRegistry  #--gas-price 10000000000

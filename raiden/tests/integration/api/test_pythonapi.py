@@ -7,12 +7,7 @@ from raiden.tests.utils.detect_failure import raise_on_failure
 from raiden.tests.utils.events import must_have_event, wait_for_state_change
 from raiden.tests.utils.transfer import get_channelstate
 from raiden.transfer import channel, views
-from raiden.transfer.state import (
-    CHANNEL_STATE_CLOSED,
-    CHANNEL_STATE_OPENED,
-    NODE_NETWORK_REACHABLE,
-    NODE_NETWORK_UNKNOWN,
-)
+from raiden.transfer.state import NODE_NETWORK_REACHABLE, NODE_NETWORK_UNKNOWN, ChannelState
 from raiden.transfer.state_change import ContractReceiveChannelSettled
 from raiden_contracts.constants import ChannelEvent
 
@@ -52,7 +47,7 @@ def test_raidenapi_channel_lifecycle(raiden_network, token_addresses, deposit, r
 def run_test_raidenapi_channel_lifecycle(raiden_network, token_addresses, deposit, retry_timeout):
     node1, node2 = raiden_network
     token_address = token_addresses[0]
-    token_network_identifier = views.get_token_network_identifier_by_token_address(
+    token_network_address = views.get_token_network_address_by_token_address(
         views.state_from_app(node1), node1.raiden.default_registry.address, token_address
     )
 
@@ -77,8 +72,8 @@ def run_test_raidenapi_channel_lifecycle(raiden_network, token_addresses, deposi
     channels = api1.get_channel_list(registry_address, token_address, api2.address)
     assert len(channels) == 1
 
-    channel12 = get_channelstate(node1, node2, token_network_identifier)
-    assert channel.get_status(channel12) == CHANNEL_STATE_OPENED
+    channel12 = get_channelstate(node1, node2, token_network_address)
+    assert channel.get_status(channel12) == ChannelState.STATE_OPENED
 
     channel_event_list1 = api1.get_blockchain_events_channel(
         token_address, channel12.partner_state.address
@@ -118,9 +113,9 @@ def run_test_raidenapi_channel_lifecycle(raiden_network, token_addresses, deposi
     with pytest.raises(DepositMismatch):
         api1.set_total_channel_deposit(registry_address, token_address, api2.address, deposit)
 
-    channel12 = get_channelstate(node1, node2, token_network_identifier)
+    channel12 = get_channelstate(node1, node2, token_network_address)
 
-    assert channel.get_status(channel12) == CHANNEL_STATE_OPENED
+    assert channel.get_status(channel12) == ChannelState.STATE_OPENED
     assert channel.get_balance(channel12.our_state, channel12.partner_state) == deposit
     assert channel12.our_state.contract_balance == deposit
     assert api1.get_channel_list(registry_address, token_address, api2.address) == [channel12]
@@ -143,7 +138,7 @@ def run_test_raidenapi_channel_lifecycle(raiden_network, token_addresses, deposi
     api1.channel_close(registry_address, token_address, api2.address)
 
     # Load the new state with the channel closed
-    channel12 = get_channelstate(node1, node2, token_network_identifier)
+    channel12 = get_channelstate(node1, node2, token_network_address)
 
     event_list3 = api1.get_blockchain_events_channel(
         token_address, channel12.partner_state.address
@@ -156,14 +151,16 @@ def run_test_raidenapi_channel_lifecycle(raiden_network, token_addresses, deposi
             "args": {"closing_participant": to_checksum_address(api1.address)},
         },
     )
-    assert channel.get_status(channel12) == CHANNEL_STATE_CLOSED
+    assert channel.get_status(channel12) == ChannelState.STATE_CLOSED
 
     assert wait_for_state_change(
         node1.raiden,
         ContractReceiveChannelSettled,
         {
-            "token_network_identifier": token_network_identifier,
-            "channel_identifier": channel12.identifier,
+            "canonical_identifier": {
+                "token_network_address": token_network_address,
+                "channel_identifier": channel12.identifier,
+            }
         },
         retry_timeout,
     )

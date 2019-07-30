@@ -1,4 +1,4 @@
-from raiden.constants import EMPTY_HASH, EMPTY_MERKLE_ROOT
+from raiden.constants import LOCKSROOT_OF_NO_LOCKS
 from raiden.network.proxies.token_network import ParticipantDetails, ParticipantsDetails
 from raiden.raiden_event_handler import RaidenEventHandler
 from raiden.tests.utils.factories import (
@@ -21,24 +21,24 @@ def test_handle_contract_send_channelunlock_already_unlocked():
     Regression test for https://github.com/raiden-network/raiden/issues/3152
     """
     channel_identifier = 1
-    payment_network_identifier = make_address()
-    token_network_identifier = make_address()
+    payment_network_address = make_address()
+    token_network_address = make_address()
     participant = make_address()
     raiden = make_raiden_service_mock(
-        payment_network_identifier=payment_network_identifier,
-        token_network_identifier=token_network_identifier,
+        payment_network_address=payment_network_address,
+        token_network_address=token_network_address,
         channel_identifier=channel_identifier,
         partner=participant,
     )
 
     channel_state = get_channelstate_by_token_network_and_partner(
         chain_state=state_from_raiden(raiden),
-        token_network_id=token_network_identifier,
+        token_network_address=token_network_address,
         partner_address=participant,
     )
 
-    channel_state.our_state.onchain_locksroot = EMPTY_MERKLE_ROOT
-    channel_state.partner_state.onchain_locksroot = EMPTY_MERKLE_ROOT
+    channel_state.our_state.onchain_locksroot = LOCKSROOT_OF_NO_LOCKS
+    channel_state.partner_state.onchain_locksroot = LOCKSROOT_OF_NO_LOCKS
 
     def detail_participants(  # pylint: disable=unused-argument
         participant1, participant2, block_identifier, channel_identifier
@@ -69,7 +69,7 @@ def test_handle_contract_send_channelunlock_already_unlocked():
             is_closer=True,
             balance_hash=balance_hash,
             nonce=1,
-            locksroot=EMPTY_HASH,
+            locksroot=LOCKSROOT_OF_NO_LOCKS,
             locked_amount=locked_amount,
         )
         return ParticipantsDetails(our_details, partner_details)
@@ -79,9 +79,9 @@ def test_handle_contract_send_channelunlock_already_unlocked():
 
     event = ContractSendChannelBatchUnlock(
         canonical_identifier=make_canonical_identifier(
-            token_network_address=token_network_identifier, channel_identifier=channel_identifier
+            token_network_address=token_network_address, channel_identifier=channel_identifier
         ),
-        participant=participant,
+        sender=participant,
         triggered_by_block_hash=make_block_hash(),
     )
 

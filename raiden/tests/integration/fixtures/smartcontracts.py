@@ -2,11 +2,14 @@ import pytest
 from eth_utils import to_canonical_address, to_checksum_address
 
 from raiden.constants import (
+    EMPTY_ADDRESS,
     RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT,
     RED_EYES_PER_TOKEN_NETWORK_LIMIT,
+    SECONDS_PER_DAY,
     UINT256_MAX,
     Environment,
 )
+from raiden.network.blockchain_service import BlockChainService
 from raiden.network.proxies.secret_registry import SecretRegistry
 from raiden.network.proxies.token import Token
 from raiden.network.proxies.token_network import TokenNetwork
@@ -20,13 +23,18 @@ from raiden.tests.utils.smartcontracts import (
 from raiden.utils import privatekey_to_address, typing
 from raiden.utils.typing import Optional
 from raiden_contracts.constants import (
-    CONTRACT_ENDPOINT_REGISTRY,
+    CONTRACT_CUSTOM_TOKEN,
     CONTRACT_ONE_TO_N,
     CONTRACT_SECRET_REGISTRY,
     CONTRACT_SERVICE_REGISTRY,
     CONTRACT_TOKEN_NETWORK_REGISTRY,
     CONTRACT_USER_DEPOSIT,
 )
+
+
+@pytest.fixture
+def token_contract_name() -> str:
+    return CONTRACT_CUSTOM_TOKEN
 
 
 @pytest.fixture(name="token_addresses")
@@ -38,6 +46,7 @@ def deploy_all_tokens_register_and_return_their_addresses(
     token_network_registry_address,
     register_tokens,
     contract_manager,
+    token_contract_name,
 ) -> typing.List[typing.Address]:
     """ Fixture that yields `number_of_tokens` ERC20 token addresses, where the
     `token_amount` (per token) is distributed among the addresses behind `deploy_client` and
@@ -57,6 +66,7 @@ def deploy_all_tokens_register_and_return_their_addresses(
         deploy_service=deploy_service,
         participants=participants,
         contract_manager=contract_manager,
+        token_contract_name=token_contract_name,
     )
 
     if register_tokens:
@@ -74,16 +84,6 @@ def deploy_all_tokens_register_and_return_their_addresses(
                 )
 
     return token_addresses
-
-
-@pytest.fixture
-def endpoint_registry_address(deploy_client, contract_manager) -> typing.Address:
-    address = deploy_contract_web3(
-        contract_name=CONTRACT_ENDPOINT_REGISTRY,
-        deploy_client=deploy_client,
-        contract_manager=contract_manager,
-    )
-    return address
 
 
 @pytest.fixture(name="secret_registry_address")
@@ -104,7 +104,16 @@ def maybe_deploy_service_registry_and_return_address(
         return None
     # Not sure what to put in the registration fee token for testing, so using
     # the same token we use for testing for now
-    constructor_arguments = (token_proxy.address,)
+    constructor_arguments = (
+        token_proxy.address,
+        EMPTY_ADDRESS,
+        int(500e18),
+        6,
+        5,
+        180 * SECONDS_PER_DAY,
+        1000,
+        200 * SECONDS_PER_DAY,
+    )
     address = deploy_contract_web3(
         contract_name=CONTRACT_SERVICE_REGISTRY,
         deploy_client=deploy_client,
@@ -134,7 +143,9 @@ def deploy_user_deposit_and_return_address(
 
     participants = [privatekey_to_address(key) for key in private_keys]
     for transfer_to in participants:
-        user_deposit.deposit(beneficiary=transfer_to, total_deposit=100, block_identifier="latest")
+        user_deposit.deposit(
+            beneficiary=transfer_to, total_deposit=100, given_block_identifier="latest"
+        )
 
     return user_deposit_address
 
@@ -183,16 +194,14 @@ def deploy_token_network_registry_and_return_address(
     settle_timeout_min,
     settle_timeout_max,
     contract_manager,
-    environment_type,
 ) -> typing.Address:
     constructor_arguments = [
         to_checksum_address(secret_registry_address),
         chain_id,
         settle_timeout_min,
         settle_timeout_max,
+        UINT256_MAX,
     ]
-    if environment_type == Environment.DEVELOPMENT:
-        constructor_arguments.append(UINT256_MAX)
 
     address = deploy_contract_web3(
         contract_name=CONTRACT_TOKEN_NETWORK_REGISTRY,
@@ -209,10 +218,15 @@ def register_token_and_return_the_network_proxy(
 ):
     registry_address = to_canonical_address(token_network_registry_address)
 
+    blockchain_service = BlockChainService(
+        jsonrpc_client=deploy_client, contract_manager=contract_manager
+    )
+
     token_network_registry_proxy = TokenNetworkRegistry(
         jsonrpc_client=deploy_client,
         registry_address=registry_address,
         contract_manager=contract_manager,
+        blockchain_service=blockchain_service,
     )
     token_network_address = token_network_registry_proxy.add_token_with_limits(
         token_address=token_proxy.address,
@@ -220,15 +234,19 @@ def register_token_and_return_the_network_proxy(
         token_network_deposit_limit=RED_EYES_PER_TOKEN_NETWORK_LIMIT,
     )
 
+    blockchain_service = BlockChainService(
+        jsonrpc_client=deploy_client, contract_manager=contract_manager
+    )
     return TokenNetwork(
         jsonrpc_client=deploy_client,
         token_network_address=token_network_address,
         contract_manager=contract_manager,
+        blockchain_service=blockchain_service,
     )
 
 
 @pytest.fixture(name="token_proxy")
-def deploy_token_and_return_proxy(deploy_client, contract_manager):
+def deploy_token_and_return_proxy(deploy_client, contract_manager, token_contract_name):
     token_contract = deploy_token(
         deploy_client=deploy_client,
         contract_manager=contract_manager,
@@ -236,6 +254,7 @@ def deploy_token_and_return_proxy(deploy_client, contract_manager):
         decimals=0,
         token_name="TKN",
         token_symbol="TKN",
+        token_contract_name=token_contract_name,
     )
 
     return Token(

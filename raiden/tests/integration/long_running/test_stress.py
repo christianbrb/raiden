@@ -1,4 +1,3 @@
-import logging
 from http import HTTPStatus
 from itertools import combinations, count
 
@@ -8,19 +7,18 @@ import pytest
 import structlog
 from eth_utils import to_canonical_address, to_checksum_address
 from flask import url_for
-from gevent import server
 
 from raiden import waiting
 from raiden.api.python import RaidenAPI
 from raiden.api.rest import APIServer, RestAPI
 from raiden.app import App
+from raiden.constants import RoutingMode
 from raiden.message_handler import MessageHandler
-from raiden.network.transport import UDPTransport
+from raiden.network.transport import MatrixTransport
 from raiden.raiden_event_handler import RaidenEventHandler
 from raiden.tests.integration.api.utils import wait_for_listening_port
 from raiden.tests.utils.transfer import assert_synced_channel_state, wait_assert
 from raiden.transfer import views
-from raiden.utils.cli import LogLevelConfigType
 
 log = structlog.get_logger(__name__)
 
@@ -32,49 +30,7 @@ def _url_for(apiserver, endpoint, **kwargs):
             kwargs[key] = to_canonical_address(val)
 
     with apiserver.flask_app.app_context():
-        return url_for("v1_resources.{}".format(endpoint), **kwargs)
-
-
-def _trimmed_logging(logger_level_config):
-    structlog.reset_defaults()
-
-    logger_level_config = logger_level_config or dict()
-    logger_level_config.setdefault("filelock", "ERROR")
-    logger_level_config.setdefault("", "DEBUG")
-
-    processors = [
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-    ]
-
-    logging.config.dictConfig(
-        {
-            "version": 1,
-            "disable_existing_loggers": False,
-            "formatters": {
-                "plain": {
-                    "()": structlog.stdlib.ProcessorFormatter,
-                    "processor": structlog.dev.ConsoleRenderer(colors=False),
-                    "foreign_pre_chain": processors,
-                }
-            },
-            "handlers": {
-                "default": {
-                    "class": "logging.StreamHandler",
-                    "level": "DEBUG",
-                    "formatter": "plain",
-                }
-            },
-            "loggers": {"": {"handlers": ["default"], "propagate": True}},
-        }
-    )
-    structlog.configure(
-        processors=processors + [structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
-        wrapper_class=structlog.stdlib.BoundLogger,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
-    )
+        return url_for(f"v1_resources.{endpoint}", **kwargs)
 
 
 def start_apiserver(raiden_app, rest_api_port_number):
@@ -83,7 +39,7 @@ def start_apiserver(raiden_app, rest_api_port_number):
     api_server = APIServer(rest_api, config={"host": "localhost", "port": rest_api_port_number})
 
     # required for url_for
-    api_server.flask_app.config["SERVER_NAME"] = "localhost:{}".format(rest_api_port_number)
+    api_server.flask_app.config["SERVER_NAME"] = f"localhost:{rest_api_port_number}"
 
     api_server.start()
 
@@ -97,18 +53,7 @@ def start_apiserver_for_network(raiden_network, port_generator):
 
 
 def restart_app(app):
-    host_port = (
-        app.raiden.config["transport"]["udp"]["host"],
-        app.raiden.config["transport"]["udp"]["port"],
-    )
-    socket = server._udp_socket(host_port)  # pylint: disable=protected-access
-    new_transport = UDPTransport(
-        app.raiden.address,
-        app.discovery,
-        socket,
-        app.raiden.transport.throttle_policy,
-        app.raiden.config["transport"]["udp"],
-    )
+    new_transport = MatrixTransport(app.raiden.config["transport"]["matrix"])
     app = App(
         config=app.config,
         chain=app.raiden.chain,
@@ -117,10 +62,11 @@ def restart_app(app):
         default_registry=app.raiden.default_registry,
         default_secret_registry=app.raiden.default_secret_registry,
         default_service_registry=app.raiden.default_service_registry,
+        default_msc_address=app.raiden.default_msc_address,
         transport=new_transport,
         raiden_event_handler=RaidenEventHandler(),
         message_handler=MessageHandler(),
-        discovery=app.raiden.discovery,
+        routing_mode=RoutingMode.PRIVATE,
     )
 
     app.start()
@@ -316,13 +262,13 @@ def stress_send_and_receive_parallel_transfers(
     gevent.wait(foward_transfers + backwards_transfers)
 
 
-def assert_channels(raiden_network, token_network_identifier, deposit):
+def assert_channels(raiden_network, token_network_address, deposit):
     pairs = list(zip(raiden_network, raiden_network[1:] + [raiden_network[0]]))
 
     for first, second in pairs:
         wait_assert(
             assert_synced_channel_state,
-            token_network_identifier,
+            token_network_address,
             first,
             deposit,
             [],
@@ -335,37 +281,22 @@ def assert_channels(raiden_network, token_network_identifier, deposit):
 @pytest.mark.parametrize("number_of_nodes", [3])
 @pytest.mark.parametrize("number_of_tokens", [1])
 @pytest.mark.parametrize("channels_per_node", [2])
-@pytest.mark.parametrize("deposit", [5])
+@pytest.mark.parametrize("deposit", [2])
 @pytest.mark.parametrize("reveal_timeout", [15])
 @pytest.mark.parametrize("settle_timeout", [120])
-def test_stress(
-    request,
-    raiden_network,
-    deposit,
-    retry_timeout,
-    token_addresses,
-    port_generator,
-    skip_if_not_udp,  # pylint: disable=unused-argument
-):
-
-    config_converter = LogLevelConfigType()
-    logging_levels = config_converter.convert(
-        value=request.config.option.log_config or "", param=None, ctx=None
-    )
-    _trimmed_logging(logging_levels)
-
+def test_stress(raiden_network, deposit, retry_timeout, token_addresses, port_generator):
     token_address = token_addresses[0]
     rest_apis = start_apiserver_for_network(raiden_network, port_generator)
     identifier_generator = count()
 
-    token_network_identifier = views.get_token_network_identifier_by_token_address(
+    token_network_address = views.get_token_network_address_by_token_address(
         views.state_from_app(raiden_network[0]),
         raiden_network[0].raiden.default_registry.address,
         token_address,
     )
 
     for _ in range(2):
-        assert_channels(raiden_network, token_network_identifier, deposit)
+        assert_channels(raiden_network, token_network_address, deposit)
 
         stress_send_serial_transfers(rest_apis, token_address, identifier_generator, deposit)
 
@@ -373,7 +304,7 @@ def test_stress(
             raiden_network, rest_apis, port_generator, retry_timeout
         )
 
-        assert_channels(raiden_network, token_network_identifier, deposit)
+        assert_channels(raiden_network, token_network_address, deposit)
 
         stress_send_parallel_transfers(rest_apis, token_address, identifier_generator, deposit)
 
@@ -381,7 +312,7 @@ def test_stress(
             raiden_network, rest_apis, port_generator, retry_timeout
         )
 
-        assert_channels(raiden_network, token_network_identifier, deposit)
+        assert_channels(raiden_network, token_network_address, deposit)
 
         stress_send_and_receive_parallel_transfers(
             rest_apis, token_address, identifier_generator, deposit

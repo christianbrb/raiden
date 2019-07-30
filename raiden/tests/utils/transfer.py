@@ -1,31 +1,35 @@
 """ Utilities to make and assert transfers. """
 import random
 from enum import Enum
+from hashlib import sha256
 
 import gevent
+from eth_utils import to_checksum_address
 from gevent.timeout import Timeout
 
 from raiden.app import App
-from raiden.constants import UINT64_MAX
+from raiden.constants import EMPTY_SIGNATURE, UINT64_MAX
 from raiden.message_handler import MessageHandler
-from raiden.messages import LockedTransfer, LockExpired, Message, Unlock
+from raiden.messages.abstract import Message
+from raiden.messages.decode import balanceproof_from_envelope
+from raiden.messages.metadata import Metadata, RouteMetadata
+from raiden.messages.transfers import LockedTransfer, LockExpired, Unlock
 from raiden.tests.utils.factories import make_address, make_secret
 from raiden.tests.utils.protocol import WaitForMessage
 from raiden.transfer import channel, views
 from raiden.transfer.architecture import TransitionResult
+from raiden.transfer.channel import compute_locksroot
 from raiden.transfer.mediated_transfer.events import SendSecretRequest
 from raiden.transfer.mediated_transfer.state import LockedTransferSignedState
 from raiden.transfer.mediated_transfer.state_change import ReceiveLockExpired
-from raiden.transfer.merkle_tree import MERKLEROOT, compute_layers
 from raiden.transfer.state import (
-    CHANNEL_STATE_OPENED,
+    ChannelState,
     HashTimeLockState,
-    MerkleTreeState,
     NettingChannelState,
-    balanceproof_from_envelope,
-    make_empty_merkle_tree,
+    PendingLocksState,
+    make_empty_pending_locks_state,
 )
-from raiden.utils import lpex, pex, random_secret, sha3
+from raiden.utils import random_secret
 from raiden.utils.signer import LocalSigner, Signer
 from raiden.utils.typing import (
     Any,
@@ -42,7 +46,8 @@ from raiden.utils.typing import (
     PaymentID,
     TokenAddress,
     TokenAmount,
-    TokenNetworkID,
+    TokenNetworkAddress,
+    typecheck,
 )
 
 
@@ -63,10 +68,10 @@ def sign_and_inject(message: Message, signer: Signer, app: App) -> None:
 
 
 def get_channelstate(
-    app0: App, app1: App, token_network_identifier: TokenNetworkID
+    app0: App, app1: App, token_network_address: TokenNetworkAddress
 ) -> NettingChannelState:
     channel_state = views.get_channelstate_by_token_network_and_partner(
-        views.state_from_app(app0), token_network_identifier, app1.raiden.address
+        views.state_from_app(app0), token_network_address, app1.raiden.address
     )
     return channel_state
 
@@ -86,7 +91,6 @@ def transfer(
     Note:
         Only the initiator and target are synched.
     """
-    assert identifier is not None, "The identifier must be provided"
     if transfer_state is TransferState.UNLOCKED:
         _transfer_unlocked(
             initiator_app=initiator_app,
@@ -139,14 +143,14 @@ def _transfer_unlocked(
         Unlock, {"payment_identifier": identifier}
     )
 
-    payment_network_identifier = initiator_app.raiden.default_registry.address
-    token_network_identifier = views.get_token_network_identifier_by_token_address(
+    payment_network_address = initiator_app.raiden.default_registry.address
+    token_network_address = views.get_token_network_address_by_token_address(
         chain_state=views.state_from_app(initiator_app),
-        payment_network_id=payment_network_identifier,
+        payment_network_address=payment_network_address,
         token_address=token_address,
     )
     payment_status = initiator_app.raiden.mediated_transfer_async(
-        token_network_identifier=token_network_identifier,
+        token_network_address=token_network_address,
         amount=amount,
         target=target_app.raiden.address,
         identifier=identifier,
@@ -156,8 +160,8 @@ def _transfer_unlocked(
     with Timeout(seconds=timeout):
         wait_for_unlock.get()
         msg = (
-            f"transfer from {pex(initiator_app.raiden.address)} "
-            f"to {pex(target_app.raiden.address)} failed."
+            f"transfer from {to_checksum_address(initiator_app.raiden.address)} "
+            f"to {to_checksum_address(target_app.raiden.address)} failed."
         )
         assert payment_status.payment_done.get(), msg
 
@@ -184,20 +188,20 @@ def _transfer_expired(
         timeout = 90
 
     secret = make_secret()
-    secrethash = sha3(secret)
+    secrethash = sha256(secret).digest()
 
     wait_for_remove_expired_lock = target_app.raiden.message_handler.wait_for_message(
         LockExpired, {"secrethash": secrethash}
     )
 
-    payment_network_identifier = initiator_app.raiden.default_registry.address
-    token_network_identifier = views.get_token_network_identifier_by_token_address(
+    payment_network_address = initiator_app.raiden.default_registry.address
+    token_network_address = views.get_token_network_address_by_token_address(
         chain_state=views.state_from_app(initiator_app),
-        payment_network_id=payment_network_identifier,
+        payment_network_address=payment_network_address,
         token_address=token_address,
     )
     payment_status = initiator_app.raiden.start_mediated_transfer_with_secret(
-        token_network_identifier=token_network_identifier,
+        token_network_address=token_network_address,
         amount=amount,
         fee=fee,
         target=target_app.raiden.address,
@@ -209,8 +213,8 @@ def _transfer_expired(
     with Timeout(seconds=timeout):
         wait_for_remove_expired_lock.get()
         msg = (
-            f"transfer from {pex(initiator_app.raiden.address)} "
-            f"to {pex(target_app.raiden.address)} did not expire."
+            f"transfer from {to_checksum_address(initiator_app.raiden.address)} "
+            f"to {to_checksum_address(target_app.raiden.address)} did not expire."
         )
         assert payment_status.payment_done.get() is False, msg
 
@@ -228,20 +232,20 @@ def _transfer_secret_not_requested(
         timeout = 10
 
     secret = make_secret()
-    secrethash = sha3(secret)
+    secrethash = sha256(secret).digest()
 
     hold_secret_request = target_app.raiden.raiden_event_handler.hold(
         SendSecretRequest, {"secrethash": secrethash}
     )
 
-    payment_network_identifier = initiator_app.raiden.default_registry.address
-    token_network_identifier = views.get_token_network_identifier_by_token_address(
+    payment_network_address = initiator_app.raiden.default_registry.address
+    token_network_address = views.get_token_network_address_by_token_address(
         chain_state=views.state_from_app(initiator_app),
-        payment_network_id=payment_network_identifier,
+        payment_network_address=payment_network_address,
         token_address=token_address,
     )
     initiator_app.raiden.start_mediated_transfer_with_secret(
-        token_network_identifier=token_network_identifier,
+        token_network_address=token_network_address,
         amount=amount,
         fee=fee,
         target=target_app.raiden.address,
@@ -274,10 +278,10 @@ def transfer_and_assert_path(
     secret = random_secret()
 
     first_app = path[0]
-    payment_network_identifier = first_app.raiden.default_registry.address
-    token_network_address = views.get_token_network_identifier_by_token_address(
+    payment_network_address = first_app.raiden.default_registry.address
+    token_network_address = views.get_token_network_address_by_token_address(
         chain_state=views.state_from_app(first_app),
-        payment_network_id=payment_network_identifier,
+        payment_network_address=payment_network_address,
         token_address=token_address,
     )
 
@@ -285,11 +289,11 @@ def transfer_and_assert_path(
         assert isinstance(app.raiden.message_handler, WaitForMessage)
 
         msg = "The apps must be on the same payment network"
-        assert app.raiden.default_registry.address == payment_network_identifier, msg
+        assert app.raiden.default_registry.address == payment_network_address, msg
 
-        app_token_network_address = views.get_token_network_identifier_by_token_address(
+        app_token_network_address = views.get_token_network_address_by_token_address(
             chain_state=views.state_from_app(app),
-            payment_network_id=payment_network_identifier,
+            payment_network_address=payment_network_address,
             token_address=token_address,
         )
 
@@ -301,30 +305,30 @@ def transfer_and_assert_path(
     for from_app, to_app in pairs:
         from_channel_state = views.get_channelstate_by_token_network_and_partner(
             chain_state=views.state_from_app(from_app),
-            token_network_id=token_network_address,
+            token_network_address=token_network_address,
             partner_address=to_app.raiden.address,
         )
         to_channel_state = views.get_channelstate_by_token_network_and_partner(
             chain_state=views.state_from_app(to_app),
-            token_network_id=token_network_address,
+            token_network_address=token_network_address,
             partner_address=from_app.raiden.address,
         )
 
         msg = (
-            f"{pex(from_app.raiden.address)} does not have a channel with "
-            f"{pex(to_app.raiden.address)} needed to transfer through the "
-            f"path {lpex(app.raiden.address for app in path)}."
+            f"{to_checksum_address(from_app.raiden.address)} does not have a channel with "
+            f"{to_checksum_address(to_app.raiden.address)} needed to transfer through the "
+            f"path {[to_checksum_address(app.raiden.address) for app in path]}."
         )
         assert from_channel_state, msg
         assert to_channel_state, msg
 
         msg = (
-            f"channel among {pex(from_app.raiden.address)} and "
-            f"{pex(to_app.raiden.address)} must be open to be used for a "
+            f"channel among {to_checksum_address(from_app.raiden.address)} and "
+            f"{to_checksum_address(to_app.raiden.address)} must be open to be used for a "
             f"transfer"
         )
-        assert channel.get_status(from_channel_state) == CHANNEL_STATE_OPENED, msg
-        assert channel.get_status(to_channel_state) == CHANNEL_STATE_OPENED, msg
+        assert channel.get_status(from_channel_state) == ChannelState.STATE_OPENED, msg
+        assert channel.get_status(to_channel_state) == ChannelState.STATE_OPENED, msg
 
         receiving.append((to_app, to_channel_state.identifier))
 
@@ -343,7 +347,7 @@ def transfer_and_assert_path(
 
     last_app = path[-1]
     payment_status = first_app.raiden.start_mediated_transfer_with_secret(
-        token_network_identifier=token_network_address,
+        token_network_address=token_network_address,
         amount=amount,
         fee=fee,
         target=last_app.raiden.address,
@@ -354,14 +358,14 @@ def transfer_and_assert_path(
     with Timeout(seconds=timeout):
         gevent.wait(results)
         msg = (
-            f"transfer from {pex(first_app.raiden.address)} "
-            f"to {pex(last_app.raiden.address)} failed."
+            f"transfer from {to_checksum_address(first_app.raiden.address)} "
+            f"to {to_checksum_address(last_app.raiden.address)} failed."
         )
         assert payment_status.payment_done.get(), msg
 
 
 def assert_synced_channel_state(
-    token_network_identifier: TokenNetworkID,
+    token_network_address: TokenNetworkAddress,
     app0: App,
     balance0: Balance,
     pending_locks0: List[HashTimeLockState],
@@ -376,8 +380,8 @@ def assert_synced_channel_state(
         hasn't been delivered yet or has been completely lost."""
     # pylint: disable=too-many-arguments
 
-    channel0 = get_channelstate(app0, app1, token_network_identifier)
-    channel1 = get_channelstate(app1, app0, token_network_identifier)
+    channel0 = get_channelstate(app0, app1, token_network_address)
+    channel1 = get_channelstate(app1, app0, token_network_address)
 
     assert channel0.our_state.contract_balance == channel1.partner_state.contract_balance
     assert channel0.partner_state.contract_balance == channel1.our_state.contract_balance
@@ -449,13 +453,11 @@ def assert_locked(
     """ Assert the locks created from `from_channel`. """
     # a locked transfer is registered in the _partner_ state
     if pending_locks:
-        leaves = [sha3(lock.encoded) for lock in pending_locks]
-        layers = compute_layers(leaves)
-        tree = MerkleTreeState(layers)
+        locks = PendingLocksState(list(bytes(lock.encoded) for lock in pending_locks))
     else:
-        tree = make_empty_merkle_tree()
+        locks = make_empty_pending_locks_state()
 
-    assert from_channel.our_state.merkletree == tree
+    assert from_channel.our_state.pending_locks == locks
 
     for lock in pending_locks:
         pending = lock.secrethash in from_channel.our_state.secrethashes_to_lockedlocks
@@ -508,42 +510,47 @@ def make_receive_transfer_mediated(
     nonce: Nonce,
     transferred_amount: TokenAmount,
     lock: HashTimeLockState,
-    merkletree_leaves: List[Keccak256] = None,
+    pending_locks: PendingLocksState = None,
     locked_amount: Optional[LockedAmount] = None,
     chain_id: Optional[ChainID] = None,
 ) -> LockedTransferSignedState:
 
-    if not isinstance(lock, HashTimeLockState):
-        raise ValueError("lock must be of type HashTimeLockState")
+    typecheck(lock, HashTimeLockState)
 
     signer = LocalSigner(privkey)
     address = signer.address
     if address not in (channel_state.our_state.address, channel_state.partner_state.address):
         raise ValueError("Private key does not match any of the participants.")
 
-    if merkletree_leaves is None:
-        layers = [[lock.lockhash]]
+    if pending_locks is None:
+        locks = make_empty_pending_locks_state()
+        locks.locks.append(bytes(lock.encoded))
     else:
-        assert lock.lockhash in merkletree_leaves
-        layers = compute_layers(merkletree_leaves)
+        assert bytes(lock.encoded) in pending_locks.locks
+        locks = pending_locks
 
     if locked_amount is None:
         locked_amount = lock.amount
 
     assert locked_amount >= lock.amount
 
-    locksroot = layers[MERKLEROOT][0]
+    locksroot = compute_locksroot(locks)
 
     payment_identifier = nonce
     transfer_target = make_address()
     transfer_initiator = make_address()
     chain_id = chain_id or channel_state.chain_id
+
+    transfer_metadata = Metadata(
+        routes=[RouteMetadata(route=[channel_state.our_state.address, transfer_target])]
+    )
+
     mediated_transfer_msg = LockedTransfer(
         chain_id=chain_id,
         message_identifier=random.randint(0, UINT64_MAX),
         payment_identifier=payment_identifier,
         nonce=nonce,
-        token_network_address=channel_state.token_network_identifier,
+        token_network_address=channel_state.token_network_address,
         token=channel_state.token_address,
         channel_identifier=channel_state.identifier,
         transferred_amount=transferred_amount,
@@ -553,19 +560,23 @@ def make_receive_transfer_mediated(
         lock=lock,
         target=transfer_target,
         initiator=transfer_initiator,
+        signature=EMPTY_SIGNATURE,
+        fee=0,
+        metadata=transfer_metadata,
     )
     mediated_transfer_msg.sign(signer)
 
     balance_proof = balanceproof_from_envelope(mediated_transfer_msg)
 
     receive_lockedtransfer = LockedTransferSignedState(
-        random.randint(0, UINT64_MAX),
-        payment_identifier,
-        channel_state.token_address,
-        balance_proof,
-        lock,
-        transfer_initiator,
-        transfer_target,
+        payment_identifier=payment_identifier,
+        token=channel_state.token_address,
+        lock=lock,
+        initiator=transfer_initiator,
+        target=transfer_target,
+        message_identifier=random.randint(0, UINT64_MAX),
+        balance_proof=balance_proof,
+        routes=transfer_metadata.routes,
     )
 
     return receive_lockedtransfer
@@ -577,26 +588,24 @@ def make_receive_expired_lock(
     nonce: Nonce,
     transferred_amount: TokenAmount,
     lock: HashTimeLockState,
-    merkletree_leaves: List[Keccak256] = None,
+    pending_locks: List[Keccak256] = None,
     locked_amount: LockedAmount = None,
     chain_id: ChainID = None,
 ) -> ReceiveLockExpired:
 
-    if not isinstance(lock, HashTimeLockState):
-        raise ValueError("lock must be of type HashTimeLockState")
+    typecheck(lock, HashTimeLockState)
 
     signer = LocalSigner(privkey)
     address = signer.address
     if address not in (channel_state.our_state.address, channel_state.partner_state.address):
         raise ValueError("Private key does not match any of the participants.")
 
-    if merkletree_leaves is None:
-        layers = make_empty_merkle_tree().layers
+    if pending_locks is None:
+        pending_locks = make_empty_pending_locks_state()
     else:
-        assert lock.lockhash not in merkletree_leaves
-        layers = compute_layers(merkletree_leaves)
+        assert bytes(lock.encoded) not in pending_locks
 
-    locksroot = layers[MERKLEROOT][0]
+    locksroot = compute_locksroot(pending_locks)
 
     chain_id = chain_id or channel_state.chain_id
     lock_expired_msg = LockExpired(
@@ -607,9 +616,10 @@ def make_receive_expired_lock(
         locked_amount=locked_amount,
         locksroot=locksroot,
         channel_identifier=channel_state.identifier,
-        token_network_address=channel_state.token_network_identifier,
+        token_network_address=channel_state.token_network_address,
         recipient=channel_state.partner_state.address,
         secrethash=lock.secrethash,
+        signature=EMPTY_SIGNATURE,
     )
     lock_expired_msg.sign(signer)
 
@@ -619,6 +629,7 @@ def make_receive_expired_lock(
         balance_proof=balance_proof,
         secrethash=lock.secrethash,
         message_identifier=random.randint(0, UINT64_MAX),
+        sender=balance_proof.sender,
     )
 
     return receive_lockedtransfer

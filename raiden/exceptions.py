@@ -2,52 +2,57 @@ from typing import Any, Dict, Optional
 
 
 class RaidenError(Exception):
-    """ Base exception, used to catch all raiden related exceptions. """
+    """Raiden base exception.
 
-    pass
+    This exception exists for user code to catch all Raiden related exceptions.
+
+    This should be used with care, because `RaidenUnrecoverableError` is a
+    `RaidenError`, and when one of such exceptions is raised the state of the
+    client node is undetermined.
+    """
 
 
 class RaidenRecoverableError(RaidenError):
-    pass
+    """Exception for recoverable errors.
+
+    This base exception exists for code written in a EAFP style. It should be
+    inherited when exceptions are expected to happen and handling them will not
+    leave the node is a undefined state.
+
+    Usage examples:
+
+    - Operations that failed because of race conditions, e.g. openning a
+      channel fails because both participants try at the same time.
+    - Transient connectivety problems.
+    - Timeouts.
+
+    Note:
+
+    Some errors are undesirable, but they are still possible and should be
+    expected. Example a secret registration that finishes after the timeout
+    window.
+    """
 
 
 class RaidenUnrecoverableError(RaidenError):
-    pass
+    """Base exception for unexpected errors that should crash the client.
 
+    This exception is used when something unrecoverable happened:
 
-# Exceptions raised due to programming errors
-
-
-class HashLengthNot32(RaidenError):
-    """ Raised if the length of the provided element is not 32 bytes in length,
-    a keccak hash is required to include the element in the merkle tree.
+    - Corrupted database.
+    - Running out of disk space.
     """
-
-    pass
-
-
-class UnknownEventType(RaidenError):
-    """Raised if decoding of an event failed."""
-
-    pass
-
-
-# Exceptions raised due to user interaction (the user may be another software)
 
 
 class ChannelNotFound(RaidenError):
     """ Raised when a provided channel via the REST api is not found in the
     internal data structures"""
 
-    pass
-
 
 class PaymentConflict(RaidenRecoverableError):
     """ Raised when there is another payment with the same identifier but the
     attributes of the payment don't match.
     """
-
-    pass
 
 
 class InsufficientFunds(RaidenError):
@@ -58,8 +63,6 @@ class InsufficientFunds(RaidenError):
     but his account doesn't have enough funds to pay for the deposit.
     """
 
-    pass
-
 
 class DepositOverLimit(RaidenError):
     """ Raised when the requested deposit is over the limit
@@ -68,35 +71,33 @@ class DepositOverLimit(RaidenError):
     but the amount is over the testing limit.
     """
 
-    pass
-
 
 class DepositMismatch(RaidenRecoverableError):
     """ Raised when the requested deposit is lower than actual channel deposit
 
-    Used when a *user* tries to deposit a given amount of token in a channel,
+    Used when a *user* tries to deposit a given amount of tokens in a channel,
     but the on-chain amount is already higher.
     """
 
-    pass
+
+class InvalidChannelID(RaidenError):
+    """ Raised when the user provided value is not a channel id. """
+
+
+class WithdrawMismatch(RaidenRecoverableError):
+    """ Raised when the requested withdraw is larger than actual channel balance. """
 
 
 class InvalidAddress(RaidenError):
     """ Raised when the user provided value is not a valid address. """
 
-    pass
-
 
 class InvalidSecret(RaidenError):
     """ Raised when the user provided value is not a valid secret. """
 
-    pass
-
 
 class InvalidSecretHash(RaidenError):
     """ Raised when the user provided value is not a valid secrethash. """
-
-    pass
 
 
 class InvalidAmount(RaidenError):
@@ -104,20 +105,14 @@ class InvalidAmount(RaidenError):
     cannot be used to define a transfer value.
     """
 
-    pass
-
 
 class InvalidSettleTimeout(RaidenError):
     """ Raised when the user provided timeout value is less than the minimum
     settle timeout"""
 
-    pass
-
 
 class InvalidSignature(RaidenError):
     """Raised on invalid signature recover/verify"""
-
-    pass
 
 
 class SamePeerAddress(RaidenError):
@@ -130,35 +125,21 @@ class UnknownAddress(RaidenError):
     """ Raised when the user provided address is valid but is not from a known
     node. """
 
-    pass
-
 
 class UnknownTokenAddress(RaidenError):
     """ Raised when the token address in unknown. """
-
-    pass
 
 
 class TokenNotRegistered(RaidenError):
     """ Raised if there is no token network for token used when opening a channel  """
 
-    pass
-
 
 class AlreadyRegisteredTokenAddress(RaidenError):
     """ Raised when the token address in already registered with the given network. """
 
-    pass
-
 
 class InvalidToken(RaidenError):
     """ Raised if the token does not follow the ERC20 standard """
-
-    pass
-
-
-# Exceptions raised due to protocol errors (this includes messages received
-# from a byzantine node)
 
 
 class STUNUnavailableException(RaidenError):
@@ -176,28 +157,22 @@ class EthNodeCommunicationError(RaidenError):
 class EthNodeInterfaceError(RaidenError):
     """ Raised when the underlying ETH node does not support an rpc interface"""
 
-    pass
-
 
 class AddressWithoutCode(RaidenError):
     """Raised on attempt to execute contract on address without a code."""
-
-    pass
 
 
 class AddressWrongContract(RaidenError):
     """Raised on attempt to execute contract on address that has code but
     is probably not the contract we wanted."""
 
-    pass
-
 
 class DuplicatedChannelError(RaidenRecoverableError):
     """Raised if someone tries to create a channel that already exists."""
 
 
-class ContractVersionMismatch(RaidenError):
-    """Raised if deployed version of the contract differs."""
+class ContractCodeMismatch(RaidenError):
+    """Raised if the onchain code of the contract differs."""
 
 
 class TransactionThrew(RaidenError):
@@ -205,11 +180,7 @@ class TransactionThrew(RaidenError):
     the receipt has a 0x0 status field"""
 
     def __init__(self, txname: str, receipt: Optional[Dict[str, Any]]) -> None:
-        super().__init__("{} transaction threw. Receipt={}".format(txname, receipt))
-
-
-class InvalidProtocolMessage(RaidenError):
-    """Raised on an invalid or an unknown Raiden protocol message"""
+        super().__init__(f"{txname} transaction threw. Receipt={receipt}")
 
 
 class APIServerPortInUseError(RaidenError):
@@ -264,6 +235,17 @@ class InsufficientGasReserve(RaidenError):
     """
 
 
+class BrokenPreconditionError(RaidenError):
+    """ Raised while checking transaction preconditions
+    which should be satisfied before sending the transaction.
+    This exception when:
+    1. An assert or a revert in the smart contract would be hit for
+    triggering block.
+
+    2. If provided values are invalid (i.e ValueError)
+    """
+
+
 class ServiceRequestFailed(RaidenError):
     """ Raised when a request to one of the raiden services fails. """
 
@@ -274,3 +256,24 @@ class ServiceRequestIOURejected(ServiceRequestFailed):
     def __init__(self, message: str, error_code: int) -> None:
         super().__init__(f"{message} ({error_code})")
         self.error_code = error_code
+
+
+class UndefinedMediationFee(RaidenError):
+    """The fee schedule is not applicable resulting in undefined fees
+
+    Either the raiden node is not capable of mediating this payment, or the
+    FeeSchedule is outdated/inconsistent."""
+
+
+class TokenNetworkDeprecated(RaidenError):
+    """ Raised when the token network proxy safety switch
+    is turned on (i.e deprecated).
+    """
+
+
+class MintFailed(RaidenError):
+    """ Raised when an attempt to mint a testnet token failed. """
+
+
+class SerializationError(RaidenError):
+    """ Invalid data are to be (de-)serialized. """

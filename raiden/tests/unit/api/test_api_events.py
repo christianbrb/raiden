@@ -30,8 +30,8 @@ def test_get_contract_events_invalid_blocknumber():
 
 def test_v1_event_payment_sent_failed_schema():
     event = EventPaymentSentFailed(
-        payment_network_identifier=factories.make_payment_network_identifier(),
-        token_network_identifier=factories.make_address(),
+        payment_network_address=factories.make_payment_network_address(),
+        token_network_address=factories.make_address(),
         identifier=1,
         target=factories.make_address(),
         reason="whatever",
@@ -44,43 +44,46 @@ def test_v1_event_payment_sent_failed_schema():
 
     expected = {"event": "EventPaymentSentFailed", "log_time": log_time, "reason": "whatever"}
 
-    assert all(dumped.data.get(key) == value for key, value in expected.items())
+    assert all(dumped.get(key) == value for key, value in expected.items())
 
 
 def test_event_filter_for_payments():
-    token_network_identifier = factories.make_address()
-    payment_network_identifier = factories.make_payment_network_identifier()
+    token_network_address = factories.make_address()
+    secret = factories.make_secret()
+    payment_network_address = factories.make_payment_network_address()
     identifier = 1
     target = factories.make_address()
     event = EventPaymentSentSuccess(
-        payment_network_identifier=payment_network_identifier,
-        token_network_identifier=token_network_identifier,
+        payment_network_address=payment_network_address,
+        token_network_address=token_network_address,
         identifier=identifier,
         amount=5,
         target=target,
+        secret=secret,
+        route=[],
     )
-    assert event_filter_for_payments(event, token_network_identifier, None)
-    assert event_filter_for_payments(event, token_network_identifier, target)
-    assert not event_filter_for_payments(event, token_network_identifier, factories.make_address())
+    assert event_filter_for_payments(event, token_network_address, None)
+    assert event_filter_for_payments(event, token_network_address, target)
+    assert not event_filter_for_payments(event, token_network_address, factories.make_address())
 
     event = EventPaymentReceivedSuccess(
-        payment_network_identifier=payment_network_identifier,
-        token_network_identifier=token_network_identifier,
+        payment_network_address=payment_network_address,
+        token_network_address=token_network_address,
         identifier=identifier,
         amount=5,
         initiator=target,
     )
-    assert event_filter_for_payments(event, token_network_identifier, None)
-    assert event_filter_for_payments(event, token_network_identifier, target)
-    assert not event_filter_for_payments(event, token_network_identifier, factories.make_address())
+    assert event_filter_for_payments(event, token_network_address, None)
+    assert event_filter_for_payments(event, token_network_address, target)
+    assert not event_filter_for_payments(event, token_network_address, factories.make_address())
 
     event = EventPaymentSentFailed(
-        payment_network_identifier=factories.make_payment_network_identifier(),
-        token_network_identifier=token_network_identifier,
+        payment_network_address=factories.make_payment_network_address(),
+        token_network_address=token_network_address,
         identifier=identifier,
         target=target,
         reason="whatever",
     )
-    assert event_filter_for_payments(event, token_network_identifier, None)
-    assert event_filter_for_payments(event, token_network_identifier, target)
-    assert not event_filter_for_payments(event, token_network_identifier, factories.make_address())
+    assert event_filter_for_payments(event, token_network_address, None)
+    assert event_filter_for_payments(event, token_network_address, target)
+    assert not event_filter_for_payments(event, token_network_address, factories.make_address())

@@ -18,7 +18,7 @@ from raiden.exceptions import (
     InsufficientGasReserve,
     InvalidAddress,
 )
-from raiden.messages import RequestMonitoring
+from raiden.storage.serialization import DictSerializer
 from raiden.tests.utils.client import burn_eth
 from raiden.tests.utils.detect_failure import raise_on_failure
 from raiden.tests.utils.events import must_have_event, wait_for_state_change
@@ -27,7 +27,11 @@ from raiden.tests.utils.network import CHAIN
 from raiden.tests.utils.smartcontracts import deploy_contract_web3
 from raiden.tests.utils.transfer import assert_synced_channel_state, get_channelstate, transfer
 from raiden.transfer import views
-from raiden.transfer.events import EventPaymentReceivedSuccess, EventPaymentSentSuccess
+from raiden.transfer.events import (
+    EventPaymentReceivedSuccess,
+    EventPaymentSentFailed,
+    EventPaymentSentSuccess,
+)
 from raiden.transfer.state_change import ContractReceiveNewTokenNetwork
 from raiden.utils import create_default_identifier
 from raiden.utils.gas_reserve import (
@@ -129,7 +133,7 @@ def run_test_register_token_insufficient_eth(raiden_network, token_amount, contr
     assert token_address not in api1.get_tokens_list(registry_address)
 
     # app1.raiden loses all its ETH because it has been naughty
-    burn_eth(app1.raiden)
+    burn_eth(app1.raiden.chain.client)
 
     # At this point we should get an UnrecoverableError due to InsufficientFunds
     with pytest.raises(InsufficientFunds):
@@ -217,7 +221,7 @@ def run_test_token_registered_race(raiden_chain, token_amount, retry_timeout, co
 def test_deposit_updates_balance_immediately(raiden_chain, token_addresses):
     """ Test that the balance of a channel gets updated by the deposit() call
     immediately and without having to wait for the
-    `ContractReceiveChannelNewBalance` message since the API needs to return
+    `ContractReceiveChannelDeposit` message since the API needs to return
     the channel with the deposit balance updated.
     """
     raise_on_failure(
@@ -232,15 +236,15 @@ def run_test_deposit_updates_balance_immediately(raiden_chain, token_addresses):
     app0, app1 = raiden_chain
     registry_address = app0.raiden.default_registry.address
     token_address = token_addresses[0]
-    token_network_identifier = views.get_token_network_identifier_by_token_address(
+    token_network_address = views.get_token_network_address_by_token_address(
         views.state_from_app(app0), app0.raiden.default_registry.address, token_address
     )
 
     api0 = RaidenAPI(app0.raiden)
 
-    old_state = get_channelstate(app0, app1, token_network_identifier)
+    old_state = get_channelstate(app0, app1, token_network_address)
     api0.set_total_channel_deposit(registry_address, token_address, app1.raiden.address, 210)
-    new_state = get_channelstate(app0, app1, token_network_identifier)
+    new_state = get_channelstate(app0, app1, token_network_address)
 
     assert new_state.our_state.contract_balance == old_state.our_state.contract_balance + 10
 
@@ -385,7 +389,7 @@ def run_test_insufficient_funds(raiden_network, token_addresses, deposit):
         deposit + 1,
         target=app1.raiden.address,
     )
-    assert not result.payment_done.get()
+    assert isinstance(result.payment_done.get(), EventPaymentSentFailed)
 
 
 @pytest.mark.parametrize("number_of_nodes", [3])
@@ -407,7 +411,7 @@ def run_test_funds_check_for_openchannel(raiden_network, token_addresses):
     gas = get_required_gas_estimate(raiden=app0.raiden, channels_to_open=1)
     gas = round(gas * GAS_RESERVE_ESTIMATE_SECURITY_FACTOR)
     api0 = RaidenAPI(app0.raiden)
-    burn_eth(raiden_service=app0.raiden, amount_to_leave=gas)
+    burn_eth(rpc_client=app0.raiden.chain.client, amount_to_leave=gas)
 
     partners = [app1.raiden.address, app2.raiden.address]
 
@@ -430,7 +434,7 @@ def run_test_funds_check_for_openchannel(raiden_network, token_addresses):
 @pytest.mark.parametrize("reveal_timeout", [8])
 @pytest.mark.parametrize("settle_timeout", [30])
 def test_payment_timing_out_if_partner_does_not_respond(  # pylint: disable=unused-argument
-    raiden_network, token_addresses, reveal_timeout, skip_if_not_matrix, retry_timeout
+    raiden_network, token_addresses, reveal_timeout, retry_timeout
 ):
     """ Test to make sure that when our target does not respond payment times out
 
@@ -446,13 +450,12 @@ def test_payment_timing_out_if_partner_does_not_respond(  # pylint: disable=unus
         raiden_network=raiden_network,
         token_addresses=token_addresses,
         reveal_timeout=reveal_timeout,
-        skip_if_not_matrix=skip_if_not_matrix,
         retry_timeout=retry_timeout,
     )
 
 
 def run_test_payment_timing_out_if_partner_does_not_respond(  # pylint: disable=unused-argument
-    raiden_network, token_addresses, reveal_timeout, skip_if_not_matrix, retry_timeout
+    raiden_network, token_addresses, reveal_timeout, retry_timeout
 ):
     app0, app1 = raiden_network
     token_address = token_addresses[0]
@@ -559,9 +562,11 @@ def run_test_create_monitoring_request(raiden_network, token_addresses):
     app0, app1 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_id = app0.raiden.default_registry.address
-    token_network_identifier = views.get_token_network_identifier_by_token_address(
-        chain_state=chain_state, payment_network_id=payment_network_id, token_address=token_address
+    payment_network_address = app0.raiden.default_registry.address
+    token_network_address = views.get_token_network_address_by_token_address(
+        chain_state=chain_state,
+        payment_network_address=payment_network_address,
+        token_address=token_address,
     )
 
     payment_identifier = create_default_identifier()
@@ -574,12 +579,12 @@ def run_test_create_monitoring_request(raiden_network, token_addresses):
     )
     chain_state = views.state_from_raiden(app0.raiden)
     channel_state = views.get_channelstate_by_token_network_and_partner(
-        chain_state, token_network_identifier, app1.raiden.address
+        chain_state, token_network_address, app1.raiden.address
     )
     balance_proof = channel_state.partner_state.balance_proof
     api = RaidenAPI(app0.raiden)
     request = api.create_monitoring_request(balance_proof=balance_proof, reward_amount=1)
     assert request
-    as_dict = request.to_dict()
-    from_dict = RequestMonitoring.from_dict(as_dict)
-    assert from_dict.to_dict() == as_dict
+    as_dict = DictSerializer.serialize(request)
+    from_dict = DictSerializer.deserialize(as_dict)
+    assert DictSerializer.serialize(from_dict) == as_dict

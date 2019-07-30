@@ -1,5 +1,6 @@
 import math
 from enum import Enum
+from hashlib import sha256
 
 from eth_utils import keccak, to_checksum_address
 
@@ -9,26 +10,28 @@ from raiden.utils.typing import (
     BlockHash,
     BlockNumber,
     Locksroot,
+    RaidenDBVersion,
     RaidenProtocolVersion,
     Secret,
+    SecretHash,
     Signature,
     TokenAmount,
+    TransactionHash,
 )
 
 LATEST = "https://api.github.com/repos/raiden-network/raiden/releases/latest"
 RELEASE_PAGE = "https://github.com/raiden-network/raiden/releases"
 SECURITY_EXPRESSION = r"\[CRITICAL UPDATE.*?\]"
 
-RAIDEN_DB_VERSION = 22
+RAIDEN_DB_VERSION = RaidenDBVersion(23)
 SQLITE_MIN_REQUIRED_VERSION = (3, 9, 0)
 PROTOCOL_VERSION = RaidenProtocolVersion(1)
-MIN_REQUIRED_SOLC = "v0.4.23"
 
-INT64_MAX = 2 ** 63 - 1
 UINT256_MAX = 2 ** 256 - 1
 UINT64_MAX = 2 ** 64 - 1
 
-RED_EYES_MAX_TOKEN_NETWORKS = 1
+SECONDS_PER_DAY = 24 * 60 * 60
+
 RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT = int(0.075 * 10 ** 18)
 RED_EYES_PER_TOKEN_NETWORK_LIMIT = int(250 * 10 ** 18)
 
@@ -43,13 +46,17 @@ NULL_ADDRESS_BYTES = bytes(20)
 NULL_ADDRESS = to_checksum_address(NULL_ADDRESS_BYTES)
 
 EMPTY_HASH = BlockHash(bytes(32))
+EMPTY_TRANSACTION_HASH = TransactionHash(bytes(32))
 EMPTY_BALANCE_HASH = BalanceHash(bytes(32))
 EMPTY_MESSAGE_HASH = AdditionalHash(bytes(32))
-EMPTY_HASH_KECCAK = keccak(EMPTY_HASH)
 EMPTY_SIGNATURE = Signature(bytes(65))
-EMPTY_MERKLE_ROOT = Locksroot(bytes(32))
-EMPTY_SECRET = Secret(b"")
+EMPTY_SECRETHASH = SecretHash(bytes(32))
+EMPTY_SECRET = Secret(bytes(32))
+EMPTY_SECRET_SHA256 = SecretHash(sha256(EMPTY_SECRET).digest())
+LOCKSROOT_OF_NO_LOCKS = Locksroot(keccak(b""))
 ZERO_TOKENS = TokenAmount(0)
+
+ABSENT_SECRET = Secret(b"")
 
 SECRET_LENGTH = 32
 SECRETHASH_LENGTH = 32
@@ -62,11 +69,6 @@ class EthClient(Enum):
     PARITY = "parity"
 
 
-ETH_RPC_DEFAULT_PORT = 8545
-HTTP_PORT = 80
-HTTPS_PORT = 443
-
-START_QUERY_BLOCK_KEY = "DefaultStartBlock"
 SNAPSHOT_STATE_CHANGES_COUNT = 500
 
 # An arbitrary limit for transaction size in Raiden, added in PR #1990
@@ -94,11 +96,11 @@ class Environment(Enum):
 class RoutingMode(Enum):
     """Routing mode configuration that can be chosen on the command line"""
 
-    BASIC = "basic"
     PFS = "pfs"
+    LOCAL = "local"
+    PRIVATE = "private"
 
 
-GAS_REQUIRED_FOR_CREATE_ERC20_TOKEN_NETWORK = 3_234_716
 GAS_REQUIRED_PER_SECRET_IN_BATCH = math.ceil(UNLOCK_TX_GAS_LIMIT / MAXIMUM_PENDING_TRANSFERS)
 GAS_LIMIT_FOR_TOKEN_CONTRACT_CALL = 100_000
 
@@ -112,3 +114,18 @@ DEFAULT_HTTP_REQUEST_TIMEOUT = 1.0  # seconds
 DISCOVERY_DEFAULT_ROOM = "discovery"
 MONITORING_BROADCASTING_ROOM = "monitoring"
 PATH_FINDING_BROADCASTING_ROOM = "path_finding"
+
+# According to the smart contracts as of 07/08:
+# https://github.com/raiden-network/raiden-contracts/blob/fff8646ebcf2c812f40891c2825e12ed03cc7628/raiden_contracts/contracts/TokenNetwork.sol#L213
+# channel_identifier can never be 0. We make this a requirement in the client and use this fact
+# to signify that a channel_identifier of `0` passed to the messages adds them to the
+# global queue
+EMPTY_ADDRESS = b"\0" * 20
+
+
+# Keep in sync with .circleci/config.yaml
+HIGHEST_SUPPORTED_GETH_VERSION = "1.8.27"
+LOWEST_SUPPORTED_GETH_VERSION = "1.7.2"
+# this is the last stable version as of this comment
+HIGHEST_SUPPORTED_PARITY_VERSION = "2.5.5"
+LOWEST_SUPPORTED_PARITY_VERSION = "1.7.6"

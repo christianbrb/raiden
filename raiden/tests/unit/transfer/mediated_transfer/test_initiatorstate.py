@@ -1,11 +1,14 @@
 # pylint: disable=invalid-name,too-few-public-methods,too-many-arguments,too-many-locals
 import random
+import uuid
 from copy import deepcopy
 from typing import NamedTuple
+from unittest.mock import patch
 
 import pytest
 
 from raiden.constants import EMPTY_HASH, MAXIMUM_PENDING_TRANSFERS
+from raiden.raiden_service import initiator_init
 from raiden.tests.utils import factories
 from raiden.tests.utils.events import search_for_item
 from raiden.tests.utils.factories import (
@@ -16,6 +19,7 @@ from raiden.tests.utils.factories import (
     UNIT_TRANSFER_INITIATOR,
     UNIT_TRANSFER_TARGET,
 )
+from raiden.tests.utils.mocks import MockRaidenService
 from raiden.tests.utils.transfer import assert_dropped
 from raiden.transfer import channel
 from raiden.transfer.architecture import State
@@ -27,7 +31,6 @@ from raiden.transfer.events import (
 )
 from raiden.transfer.mediated_transfer import initiator, initiator_manager
 from raiden.transfer.mediated_transfer.events import (
-    CHANNEL_IDENTIFIER_GLOBAL_QUEUE,
     EventRouteFailed,
     EventUnlockFailed,
     EventUnlockSuccess,
@@ -45,6 +48,7 @@ from raiden.transfer.mediated_transfer.state_change import (
     ReceiveTransferRefundCancelRoute,
 )
 from raiden.transfer.state import (
+    NODE_NETWORK_REACHABLE,
     HashTimeLockState,
     NettingChannelState,
     RouteState,
@@ -56,7 +60,8 @@ from raiden.transfer.state_change import (
     ContractReceiveChannelClosed,
     ContractReceiveSecretReveal,
 )
-from raiden.utils import random_secret, typing
+from raiden.utils import random_secret, sha3, typing
+from raiden.utils.typing import FeeAmount, NodeNetworkStateMap, PaymentAmount
 
 
 def get_transfer_at_index(
@@ -73,11 +78,17 @@ def make_initiator_manager_state(
     block_number: typing.BlockNumber = 1,
 ):
     init = ActionInitInitiator(
-        transfer_description or factories.UNIT_TRANSFER_DESCRIPTION, channels.get_routes()
+        transfer=transfer_description or factories.UNIT_TRANSFER_DESCRIPTION,
+        routes=channels.get_routes(),
     )
     initial_state = None
     iteration = initiator_manager.state_transition(
-        initial_state, init, channels.channel_map, pseudo_random_generator, block_number
+        payment_state=initial_state,
+        state_change=init,
+        channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
+        pseudo_random_generator=pseudo_random_generator,
+        block_number=block_number,
     )
     return iteration.new_state
 
@@ -86,10 +97,11 @@ class InitiatorSetup(NamedTuple):
     current_state: State
     block_number: typing.BlockNumber
     channel: NettingChannelState
-    channel_map: typing.ChannelMap
+    channel_map: typing.Dict[typing.ChannelID, NettingChannelState]
     available_routes: typing.List[RouteState]
     prng: random.Random
     lock: HashTimeLockState
+    nodeaddresses_to_networkstates: NodeNetworkStateMap
 
 
 def setup_initiator_tests(
@@ -123,14 +135,18 @@ def setup_initiator_tests(
 
     initiator_state = get_transfer_at_index(current_state, 0)
     lock = channel.get_lock(channels[0].our_state, initiator_state.transfer_description.secrethash)
+    available_routes = channels.get_routes()
     setup = InitiatorSetup(
         current_state=current_state,
         block_number=block_number,
         channel=channels[0],
         channel_map=channels.channel_map,
-        available_routes=channels.get_routes(),
+        available_routes=available_routes,
         prng=prng,
         lock=lock,
+        nodeaddresses_to_networkstates={
+            channel.partner_state.address: NODE_NETWORK_REACHABLE for channel in channels.channels
+        },
     )
     return setup
 
@@ -150,12 +166,13 @@ def test_next_route():
     assert initiator_state.channel_identifier == channels[0].identifier, msg
     assert not state.cancelled_channels
 
-    iteration = initiator_manager.maybe_try_new_route(
+    iteration = initiator_manager.maybe_try_new_route_or_cancel(
         payment_state=state,
         initiator_state=initiator_state,
         transfer_description=initiator_state.transfer_description,
-        available_routes=channels.get_routes(),
+        candidate_route_states=channels.get_routes(),
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=prng,
         block_number=block_number,
     )
@@ -177,13 +194,20 @@ def test_init_with_usable_routes():
 
     block_number = 1
     transition = initiator_manager.state_transition(
-        None, init_state_change, channels.channel_map, pseudo_random_generator, block_number
+        payment_state=None,
+        state_change=init_state_change,
+        channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
+        pseudo_random_generator=pseudo_random_generator,
+        block_number=block_number,
     )
 
     assert isinstance(transition.new_state, InitiatorPaymentState)
     assert transition.events, "we have a valid route, the mediated transfer event must be emitted"
 
     payment_state = transition.new_state
+    assert len(payment_state.routes) == 1
+
     initiator_state = get_transfer_at_index(payment_state, 0)
     assert initiator_state.transfer_description == factories.UNIT_TRANSFER_DESCRIPTION
 
@@ -192,12 +216,13 @@ def test_init_with_usable_routes():
 
     send_mediated_transfer = mediated_transfers[0]
     transfer = send_mediated_transfer.transfer
-    expiration = initiator.get_initial_lock_expiration(block_number, channels[0].reveal_timeout)
+    expiration = channel.get_safe_initial_expiration(block_number, channels[0].reveal_timeout)
 
-    assert transfer.balance_proof.token_network_identifier == channels[0].token_network_identifier
+    assert transfer.balance_proof.token_network_address == channels[0].token_network_address
     assert transfer.lock.amount == factories.UNIT_TRANSFER_DESCRIPTION.amount
     assert transfer.lock.expiration == expiration
     assert transfer.lock.secrethash == factories.UNIT_TRANSFER_DESCRIPTION.secrethash
+    # pylint: disable=E1101
     assert send_mediated_transfer.recipient == channels[0].partner_state.address
 
 
@@ -209,8 +234,14 @@ def test_init_without_routes():
     init_state_change = ActionInitInitiator(factories.UNIT_TRANSFER_DESCRIPTION, routes)
 
     channel_map = dict()
+    network_state_map = dict()
     iteration = initiator_manager.state_transition(
-        None, init_state_change, channel_map, pseudo_random_generator, block_number
+        payment_state=None,
+        state_change=init_state_change,
+        channelidentifiers_to_channels=channel_map,
+        nodeaddresses_to_networkstates=network_state_map,
+        pseudo_random_generator=pseudo_random_generator,
+        block_number=block_number,
     )
 
     assert iteration.new_state is None
@@ -224,15 +255,20 @@ def test_state_wait_secretrequest_valid():
     setup = setup_initiator_tests()
 
     state_change = ReceiveSecretRequest(
-        UNIT_TRANSFER_IDENTIFIER,
-        setup.lock.amount,
-        setup.lock.expiration,
-        setup.lock.secrethash,
-        UNIT_TRANSFER_TARGET,
+        payment_identifier=UNIT_TRANSFER_IDENTIFIER,
+        amount=setup.lock.amount,
+        expiration=setup.lock.expiration,
+        secrethash=setup.lock.secrethash,
+        sender=UNIT_TRANSFER_TARGET,
     )
 
     iteration = initiator_manager.state_transition(
-        setup.current_state, state_change, setup.channel_map, setup.prng, setup.block_number
+        payment_state=setup.current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     assert len(iteration.events) == 1
@@ -242,15 +278,20 @@ def test_state_wait_secretrequest_valid():
     assert initiator_state.received_secret_request is True
 
     state_change_2 = ReceiveSecretRequest(
-        UNIT_TRANSFER_IDENTIFIER,
-        setup.lock.amount,
-        setup.lock.expiration,
-        setup.lock.secrethash,
-        UNIT_TRANSFER_TARGET,
+        payment_identifier=UNIT_TRANSFER_IDENTIFIER,
+        amount=setup.lock.amount,
+        expiration=setup.lock.expiration,
+        secrethash=setup.lock.secrethash,
+        sender=UNIT_TRANSFER_TARGET,
     )
 
     iteration2 = initiator_manager.state_transition(
-        iteration.new_state, state_change_2, setup.channel_map, setup.prng, setup.block_number
+        payment_state=iteration.new_state,
+        state_change=state_change_2,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     assert not iteration2.events
@@ -260,15 +301,20 @@ def test_state_wait_secretrequest_invalid_amount():
     setup = setup_initiator_tests()
 
     state_change = ReceiveSecretRequest(
-        UNIT_TRANSFER_IDENTIFIER,
-        setup.lock.amount + 1,
-        setup.lock.expiration,
-        setup.lock.secrethash,
-        UNIT_TRANSFER_TARGET,
+        payment_identifier=UNIT_TRANSFER_IDENTIFIER,
+        amount=setup.lock.amount + 1,
+        expiration=setup.lock.expiration,
+        secrethash=setup.lock.secrethash,
+        sender=UNIT_TRANSFER_TARGET,
     )
 
     iteration = initiator_manager.state_transition(
-        setup.current_state, state_change, setup.channel_map, setup.prng, setup.block_number
+        payment_state=setup.current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     msg = "The payment event now is emitted when the lock expires"
@@ -278,15 +324,20 @@ def test_state_wait_secretrequest_invalid_amount():
     assert initiator_state.received_secret_request is True
 
     state_change_2 = ReceiveSecretRequest(
-        UNIT_TRANSFER_IDENTIFIER,
-        setup.lock.amount,
-        setup.lock.expiration,
-        setup.lock.secrethash,
-        UNIT_TRANSFER_TARGET,
+        payment_identifier=UNIT_TRANSFER_IDENTIFIER,
+        amount=setup.lock.amount,
+        expiration=setup.lock.expiration,
+        secrethash=setup.lock.secrethash,
+        sender=UNIT_TRANSFER_TARGET,
     )
 
     iteration2 = initiator_manager.state_transition(
-        iteration.new_state, state_change_2, setup.channel_map, setup.prng, setup.block_number
+        payment_state=iteration.new_state,
+        state_change=state_change_2,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     assert len(iteration2.events) == 0
@@ -296,15 +347,20 @@ def test_state_wait_secretrequest_invalid_amount_and_sender():
     setup = setup_initiator_tests()
 
     state_change = ReceiveSecretRequest(
-        UNIT_TRANSFER_IDENTIFIER,
-        setup.lock.amount + 1,
-        setup.lock.expiration,
-        setup.lock.secrethash,
-        UNIT_TRANSFER_INITIATOR,
+        payment_identifier=UNIT_TRANSFER_IDENTIFIER,
+        amount=setup.lock.amount + 1,
+        expiration=setup.lock.expiration,
+        secrethash=setup.lock.secrethash,
+        sender=UNIT_TRANSFER_INITIATOR,
     )
 
     iteration = initiator_manager.state_transition(
-        setup.current_state, state_change, setup.channel_map, setup.prng, setup.block_number
+        payment_state=setup.current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     assert len(iteration.events) == 0
@@ -313,15 +369,20 @@ def test_state_wait_secretrequest_invalid_amount_and_sender():
 
     # Now the proper target sends the message, this should be applied
     state_change_2 = ReceiveSecretRequest(
-        UNIT_TRANSFER_IDENTIFIER,
-        setup.lock.amount,
-        setup.lock.expiration,
-        setup.lock.secrethash,
-        UNIT_TRANSFER_TARGET,
+        payment_identifier=UNIT_TRANSFER_IDENTIFIER,
+        amount=setup.lock.amount,
+        expiration=setup.lock.expiration,
+        secrethash=setup.lock.secrethash,
+        sender=UNIT_TRANSFER_TARGET,
     )
 
     iteration2 = initiator_manager.state_transition(
-        iteration.new_state, state_change_2, setup.channel_map, setup.prng, setup.block_number
+        payment_state=iteration.new_state,
+        state_change=state_change_2,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     initiator_state = get_transfer_at_index(iteration2.new_state, 0)
@@ -334,18 +395,19 @@ def test_state_wait_unlock_valid():
 
     # setup the state for the wait unlock
     initiator_state = get_transfer_at_index(setup.current_state, 0)
-    initiator_state.revealsecret = SendSecretReveal(
-        recipient=UNIT_TRANSFER_TARGET,
-        channel_identifier=CHANNEL_IDENTIFIER_GLOBAL_QUEUE,
-        message_identifier=UNIT_TRANSFER_IDENTIFIER,
-        secret=UNIT_SECRET,
-    )
+    initiator_state.transfer_state = "transfer_secret_revealed"
 
     state_change = ReceiveSecretReveal(
         secret=UNIT_SECRET, sender=setup.channel.partner_state.address
     )
+
     iteration = initiator_manager.state_transition(
-        setup.current_state, state_change, setup.channel_map, setup.prng, setup.block_number
+        payment_state=setup.current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     assert len(iteration.events) == 3
@@ -355,6 +417,8 @@ def test_state_wait_unlock_valid():
     assert search_for_item(iteration.events, EventUnlockSuccess, {})
     assert balance_proof
     assert complete
+    assert len(complete.route) == 2
+    assert complete.route[1] == balance_proof.recipient
 
     assert balance_proof.recipient == setup.channel.partner_state.address
     assert complete.identifier == UNIT_TRANSFER_IDENTIFIER
@@ -363,23 +427,21 @@ def test_state_wait_unlock_valid():
 
 def test_state_wait_unlock_invalid():
     setup = setup_initiator_tests()
-    identifier = setup.channel.identifier
-    target_address = factories.make_address()
 
     # setup the state for the wait unlock
     initiator_state = get_transfer_at_index(setup.current_state, 0)
-    initiator_state.revealsecret = SendSecretReveal(
-        recipient=target_address,
-        channel_identifier=CHANNEL_IDENTIFIER_GLOBAL_QUEUE,
-        message_identifier=identifier,
-        secret=UNIT_SECRET,
-    )
+    initiator_state.transfer_state = "transfer_secret_revealed"
 
     before_state = deepcopy(setup.current_state)
 
     state_change = ReceiveSecretReveal(secret=UNIT_SECRET, sender=factories.ADDR)
     iteration = initiator_manager.state_transition(
-        setup.current_state, state_change, setup.channel_map, setup.prng, setup.block_number
+        payment_state=setup.current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     assert not iteration.events
@@ -429,14 +491,23 @@ def test_refund_transfer_next_route():
         )
     )
 
+    # pylint: disable=E1101
     assert channels[0].partner_state.address == refund_address
 
     state_change = ReceiveTransferRefundCancelRoute(
-        routes=channels.get_routes(), transfer=refund_transfer, secret=random_secret()
+        transfer=refund_transfer,
+        secret=random_secret(),
+        balance_proof=refund_transfer.balance_proof,
+        sender=refund_transfer.balance_proof.sender,
     )
 
     iteration = initiator_manager.state_transition(
-        current_state, state_change, channels.channel_map, prng, block_number
+        payment_state=current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
+        pseudo_random_generator=prng,
+        block_number=block_number,
     )
     assert iteration.new_state is not None
 
@@ -481,11 +552,19 @@ def test_refund_transfer_no_more_routes():
     )
 
     state_change = ReceiveTransferRefundCancelRoute(
-        routes=setup.available_routes, transfer=refund_transfer, secret=random_secret()
+        transfer=refund_transfer,
+        secret=random_secret(),
+        balance_proof=refund_transfer.balance_proof,
+        sender=refund_transfer.balance_proof.sender,  # pylint: disable=no-member
     )
 
     iteration = initiator_manager.state_transition(
-        setup.current_state, state_change, setup.channel_map, setup.prng, setup.block_number
+        payment_state=setup.current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
     # As per the description of the issue here:
     # https://github.com/raiden-network/raiden/issues/3146#issuecomment-447378046
@@ -516,13 +595,19 @@ def test_refund_transfer_no_more_routes():
     invalid_balance_proof = factories.create(missing_pkey)
     balance_proof = factories.create(complete)
     invalid_lock_expired_state_change = ReceiveLockExpired(
-        invalid_balance_proof, secrethash=original_transfer.lock.secrethash, message_identifier=5
+        sender=invalid_balance_proof.sender,  # pylint: disable=no-member
+        balance_proof=invalid_balance_proof,
+        secrethash=original_transfer.lock.secrethash,
+        message_identifier=5,
     )
     lock_expired_state_change = ReceiveLockExpired(
-        balance_proof, secrethash=original_transfer.lock.secrethash, message_identifier=5
+        balance_proof=balance_proof,
+        sender=balance_proof.sender,  # pylint: disable=no-member
+        secrethash=original_transfer.lock.secrethash,
+        message_identifier=5,
     )
     before_expiry_block = original_transfer.lock.expiration - 1
-    expiry_block = channel.get_sender_expiration_threshold(original_transfer.lock)
+    expiry_block = channel.get_sender_expiration_threshold(original_transfer.lock.expiration)
 
     # a block before lock expiration, no events should be emitted
     current_state = iteration.new_state
@@ -530,7 +615,12 @@ def test_refund_transfer_no_more_routes():
         block_number=before_expiry_block, gas_limit=1, block_hash=factories.make_transaction_hash()
     )
     iteration = initiator_manager.state_transition(
-        current_state, state_change, setup.channel_map, setup.prng, expiry_block
+        payment_state=current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=expiry_block,
     )
     assert not iteration.events
     assert iteration.new_state, "payment task should not be deleted at this block"
@@ -538,11 +628,12 @@ def test_refund_transfer_no_more_routes():
     # process an invalid lock expired message before lock expiration
     current_state = iteration.new_state
     iteration = initiator_manager.state_transition(
-        current_state,
-        invalid_lock_expired_state_change,
-        setup.channel_map,
-        setup.prng,
-        before_expiry_block,
+        payment_state=current_state,
+        state_change=invalid_lock_expired_state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=before_expiry_block,
     )
     assert iteration.new_state, "payment task should not be deleted at this lock expired"
     # should not be accepted
@@ -552,11 +643,12 @@ def test_refund_transfer_no_more_routes():
     # process a valid lock expired message before lock expiration
     current_state = iteration.new_state
     iteration = initiator_manager.state_transition(
-        current_state,
-        lock_expired_state_change,
-        setup.channel_map,
-        setup.prng,
-        before_expiry_block,
+        payment_state=current_state,
+        state_change=lock_expired_state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=before_expiry_block,
     )
     assert iteration.new_state, "payment task should not be deleted at this lock expired"
     # should not be accepted
@@ -568,7 +660,12 @@ def test_refund_transfer_no_more_routes():
         block_number=expiry_block, gas_limit=1, block_hash=factories.make_transaction_hash()
     )
     iteration = initiator_manager.state_transition(
-        current_state, state_change, setup.channel_map, setup.prng, expiry_block
+        payment_state=current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=expiry_block,
     )
     assert search_for_item(iteration.events, SendLockExpired, {}) is not None
     # The lock expired, so the route failed
@@ -579,7 +676,12 @@ def test_refund_transfer_no_more_routes():
     # process the lock expired message after lock expiration
     current_state = iteration.new_state
     iteration = initiator_manager.state_transition(
-        current_state, lock_expired_state_change, setup.channel_map, setup.prng, expiry_block
+        payment_state=current_state,
+        state_change=lock_expired_state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=expiry_block,
     )
     # should be accepted
     assert search_for_item(iteration.events, SendProcessed, {}) is not None
@@ -591,7 +693,12 @@ def test_refund_transfer_no_more_routes():
         block_number=expiry_block + 1, gas_limit=1, block_hash=factories.make_transaction_hash()
     )
     iteration = initiator_manager.state_transition(
-        current_state, state_change, setup.channel_map, setup.prng, expiry_block + 1
+        payment_state=current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=expiry_block + 1,
     )
     assert iteration.new_state is None, "from this point on the payment task should go"
 
@@ -604,6 +711,7 @@ def test_cancel_transfer():
         payment_state=setup.current_state,
         state_change=state_change,
         channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
         pseudo_random_generator=setup.prng,
         block_number=setup.block_number,
     )
@@ -625,6 +733,7 @@ def test_cancelpayment():
         payment_state=setup.current_state,
         state_change=state_change,
         channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
         pseudo_random_generator=setup.prng,
         block_number=setup.block_number,
     )
@@ -636,7 +745,7 @@ def test_cancelpayment():
 
     transfer = transfer_state.transfer
 
-    expiry_block = channel.get_sender_expiration_threshold(transfer.lock)
+    expiry_block = channel.get_sender_expiration_threshold(transfer.lock.expiration)
     expiry_block_state_change = Block(
         block_number=expiry_block, gas_limit=1, block_hash=factories.make_transaction_hash()
     )
@@ -645,6 +754,7 @@ def test_cancelpayment():
         payment_state=iteration.new_state,
         state_change=expiry_block_state_change,
         channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
         pseudo_random_generator=setup.prng,
         block_number=expiry_block,
     )
@@ -659,16 +769,17 @@ def test_invalid_cancelpayment():
     """
     setup = setup_initiator_tests(amount=2 * MAXIMUM_PENDING_TRANSFERS * UNIT_TRANSFER_AMOUNT)
     receive_secret_request = ReceiveSecretRequest(
-        UNIT_TRANSFER_IDENTIFIER,
-        setup.lock.amount,
-        setup.lock.expiration,
-        setup.lock.secrethash,
-        UNIT_TRANSFER_TARGET,
+        payment_identifier=UNIT_TRANSFER_IDENTIFIER,
+        amount=setup.lock.amount,
+        expiration=setup.lock.expiration,
+        secrethash=setup.lock.secrethash,
+        sender=UNIT_TRANSFER_TARGET,
     )
     secret_transition = initiator_manager.state_transition(
         payment_state=setup.current_state,
         state_change=receive_secret_request,
         channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
         pseudo_random_generator=setup.prng,
         block_number=1,
     )
@@ -690,7 +801,14 @@ def test_init_with_maximum_pending_transfers_exceeded():
         )
     )
     channel_map = {channel1.identifier: channel1}
-    available_routes = [factories.make_route_from_channel(channel1)]
+    available_routes = [
+        RouteState(
+            # pylint: disable=E1101
+            route=[channel1.our_state.address, channel1.partner_state.address],
+            forward_channel_id=channel1.canonical_identifier.channel_identifier,
+        )
+    ]
+
     pseudo_random_generator = random.Random()
 
     transitions = list()
@@ -700,7 +818,14 @@ def test_init_with_maximum_pending_transfers_exceeded():
         init_state_change = ActionInitInitiator(transfer_description, available_routes)
         transitions.append(
             initiator_manager.state_transition(
-                None, init_state_change, channel_map, pseudo_random_generator, block_number
+                payment_state=None,
+                state_change=init_state_change,
+                channelidentifiers_to_channels=channel_map,
+                nodeaddresses_to_networkstates={
+                    channel1.partner_state.address: NODE_NETWORK_REACHABLE
+                },
+                pseudo_random_generator=pseudo_random_generator,
+                block_number=block_number,
             )
         )
 
@@ -765,7 +890,7 @@ def test_initiator_lock_expired():
     block_number = 10
     transfer_description = factories.create(
         factories.TransferDescriptionProperties(
-            secret=UNIT_SECRET, payment_network_identifier=channels[0].payment_network_identifier
+            secret=UNIT_SECRET, payment_network_address=channels[0].payment_network_address
         )
     )
     current_state = make_initiator_manager_state(
@@ -775,17 +900,23 @@ def test_initiator_lock_expired():
     initiator_state = get_transfer_at_index(current_state, 0)
     transfer = initiator_state.transfer
 
+    # pylint: disable=E1101
     assert transfer.lock.secrethash in channels[0].our_state.secrethashes_to_lockedlocks
 
     # Trigger lock expiry
     state_change = Block(
-        block_number=channel.get_sender_expiration_threshold(transfer.lock),
+        block_number=channel.get_sender_expiration_threshold(transfer.lock.expiration),
         gas_limit=1,
         block_hash=factories.make_transaction_hash(),
     )
 
     iteration = initiator_manager.state_transition(
-        current_state, state_change, channels.channel_map, pseudo_random_generator, block_number
+        payment_state=current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
+        pseudo_random_generator=pseudo_random_generator,
+        block_number=block_number,
     )
 
     lock_expired = search_for_item(
@@ -794,6 +925,7 @@ def test_initiator_lock_expired():
         {
             "balance_proof": {"nonce": 2, "transferred_amount": 0, "locked_amount": 0},
             "secrethash": transfer.lock.secrethash,
+            # pylint: disable=E1101
             "recipient": channels[0].partner_state.address,
         },
     )
@@ -808,8 +940,8 @@ def test_initiator_lock_expired():
         iteration.events,
         EventPaymentSentFailed,
         {
-            "payment_network_identifier": channels[0].payment_network_identifier,
-            "token_network_identifier": channels[0].token_network_identifier,
+            "payment_network_address": channels[0].payment_network_address,
+            "token_network_address": channels[0].token_network_address,
             "identifier": UNIT_TRANSFER_IDENTIFIER,
             "target": transfer.target,
             "reason": "lock expired",
@@ -845,7 +977,7 @@ def test_initiator_lock_expired():
 
     assert transfer2_lock.secrethash in channels[0].our_state.secrethashes_to_lockedlocks
 
-    expiration_block_number = channel.get_sender_expiration_threshold(transfer2_lock)
+    expiration_block_number = channel.get_sender_expiration_threshold(transfer2_lock.expiration)
 
     block = Block(
         block_number=expiration_block_number,
@@ -853,11 +985,12 @@ def test_initiator_lock_expired():
         block_hash=factories.make_transaction_hash(),
     )
     iteration = initiator_manager.state_transition(
-        transfer2_state,
-        block,
-        channels.channel_map,
-        pseudo_random_generator,
-        expiration_block_number,
+        payment_state=transfer2_state,
+        state_change=block,
+        channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
+        pseudo_random_generator=pseudo_random_generator,
+        block_number=expiration_block_number,
     )
 
     # Transfer 2 expired
@@ -874,6 +1007,7 @@ def test_initiator_lock_expired_must_not_be_sent_if_channel_is_closed():
     """
     block_number = 10
     block_hash = factories.make_block_hash()
+    pseudo_random_generator = random.Random()
     setup = setup_initiator_tests(amount=UNIT_TRANSFER_AMOUNT * 2, block_number=block_number)
 
     channel_closed = ContractReceiveChannelClosed(
@@ -881,7 +1015,7 @@ def test_initiator_lock_expired_must_not_be_sent_if_channel_is_closed():
         transaction_from=factories.make_address(),
         canonical_identifier=factories.make_canonical_identifier(
             chain_identifier=setup.channel.chain_id,
-            token_network_address=setup.channel.token_network_identifier,
+            token_network_address=setup.channel.token_network_address,
             channel_identifier=setup.channel.identifier,
         ),
         block_number=block_number,
@@ -892,16 +1026,22 @@ def test_initiator_lock_expired_must_not_be_sent_if_channel_is_closed():
         state_change=channel_closed,
         block_number=block_number,
         block_hash=block_hash,
+        pseudo_random_generator=pseudo_random_generator,
     )
     channel_state = channel_close_transition.new_state
 
-    expiration_block_number = channel.get_sender_expiration_threshold(setup.lock)
+    expiration_block_number = channel.get_sender_expiration_threshold(setup.lock.expiration)
     block = Block(
         block_number=expiration_block_number, gas_limit=1, block_hash=factories.make_block_hash()
     )
     channel_map = {channel_state.identifier: channel_state}
     iteration = initiator_manager.state_transition(
-        setup.current_state, block, channel_map, setup.prng, expiration_block_number
+        payment_state=setup.current_state,
+        state_change=block,
+        channelidentifiers_to_channels=channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=expiration_block_number,
     )
     assert search_for_item(iteration.events, SendLockExpired, {}) is None
     # The lock expired, so the route failed
@@ -916,6 +1056,7 @@ def test_initiator_handle_contract_receive_secret_reveal():
 
     initiator_state = get_transfer_at_index(setup.current_state, 0)
     transfer = initiator_state.transfer
+    # pylint: disable=E1101
     assert transfer.lock.secrethash in setup.channel.our_state.secrethashes_to_lockedlocks
 
     state_change = ContractReceiveSecretReveal(
@@ -933,6 +1074,7 @@ def test_initiator_handle_contract_receive_secret_reveal():
         payment_state=setup.current_state,
         state_change=state_change,
         channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
         pseudo_random_generator=setup.prng,
         block_number=transfer.lock.expiration,
     )
@@ -947,7 +1089,7 @@ def test_initiator_handle_contract_receive_secret_reveal():
 
 
 def test_initiator_handle_contract_receive_emptyhash_secret_reveal():
-    """ Initiator must not accept contract receive secret reveal with emptyhash
+    """ Initiator must accept contract receive secret reveal with emptyhash
     """
     setup = setup_initiator_tests(amount=UNIT_TRANSFER_AMOUNT * 2, block_number=10)
 
@@ -970,9 +1112,10 @@ def test_initiator_handle_contract_receive_emptyhash_secret_reveal():
         channelidentifiers_to_channels=setup.channel_map,
         pseudo_random_generator=setup.prng,
     )
-    assert len(iteration.events) == 0
-    # make sure the original lock wasn't moved
-    assert transfer.lock.secrethash in setup.channel.our_state.secrethashes_to_lockedlocks
+
+    assert len(iteration.events) == 3
+    assert search_for_item(iteration.events, EventUnlockSuccess, {})
+    assert transfer.lock.secrethash not in setup.channel.our_state.secrethashes_to_lockedlocks
 
 
 def test_initiator_handle_contract_receive_secret_reveal_expired():
@@ -1013,6 +1156,7 @@ def test_initiator_handle_contract_receive_after_channel_closed():
     """
     block_number = 10
     block_hash = factories.make_block_hash()
+    pseudo_random_generator = random.Random()
     setup = setup_initiator_tests(amount=UNIT_TRANSFER_AMOUNT * 2, block_number=block_number)
 
     initiator_task = get_transfer_at_index(setup.current_state, 0)
@@ -1024,7 +1168,7 @@ def test_initiator_handle_contract_receive_after_channel_closed():
         transaction_from=factories.make_address(),
         canonical_identifier=factories.make_canonical_identifier(
             chain_identifier=setup.channel.chain_id,
-            token_network_address=setup.channel.token_network_identifier,
+            token_network_address=setup.channel.token_network_address,
             channel_identifier=setup.channel.identifier,
         ),
         block_number=block_number,
@@ -1036,6 +1180,7 @@ def test_initiator_handle_contract_receive_after_channel_closed():
         state_change=channel_closed,
         block_number=block_number,
         block_hash=block_hash,
+        pseudo_random_generator=pseudo_random_generator,
     )
     channel_state = channel_close_transition.new_state
 
@@ -1074,13 +1219,18 @@ def test_lock_expiry_updates_balance_proof():
 
     # Trigger lock expiry
     state_change = Block(
-        block_number=channel.get_sender_expiration_threshold(transfer.lock),
+        block_number=channel.get_sender_expiration_threshold(transfer.lock.expiration),
         gas_limit=1,
         block_hash=factories.make_transaction_hash(),
     )
 
     initiator_manager.state_transition(
-        setup.current_state, state_change, setup.channel_map, setup.prng, setup.block_number
+        payment_state=setup.current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     balance_proof = setup.channel.our_state.balance_proof
@@ -1122,16 +1272,21 @@ def test_secret_reveal_cancel_other_transfers():
             pkey=refund_pkey,
         )
     )
+    # pylint: disable=E1101
     assert channels[0].partner_state.address == refund_address
 
     state_change = ReceiveTransferRefundCancelRoute(
-        routes=channels.get_routes(), transfer=refund_transfer, secret=random_secret()
+        transfer=refund_transfer,
+        secret=random_secret(),
+        balance_proof=refund_transfer.balance_proof,
+        sender=refund_transfer.balance_proof.sender,  # pylint: disable=no-member
     )
 
     iteration = initiator_manager.state_transition(
         payment_state=current_state,
         state_change=state_change,
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=prng,
         block_number=block_number,
     )
@@ -1147,13 +1302,16 @@ def test_secret_reveal_cancel_other_transfers():
 
     # A secretreveal for a pending transfer should succeed
     secret_reveal = ReceiveSecretReveal(
-        secret=UNIT_SECRET, sender=channels[0].partner_state.address
+        secret=UNIT_SECRET,
+        # pylint: disable=E1101
+        sender=channels[0].partner_state.address,
     )
 
     iteration = initiator_manager.state_transition(
         payment_state=iteration.new_state,
         state_change=secret_reveal,
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=prng,
         block_number=block_number,
     )
@@ -1168,6 +1326,7 @@ def test_secret_reveal_cancel_other_transfers():
 
     secret_reveal = ReceiveSecretReveal(
         secret=rerouted_transfer.transfer_description.secret,
+        # pylint: disable=E1101
         sender=channels[0].partner_state.address,
     )
 
@@ -1178,6 +1337,7 @@ def test_secret_reveal_cancel_other_transfers():
             payment_state=iteration.new_state,
             state_change=secret_reveal,
             channelidentifiers_to_channels=channels.channel_map,
+            nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
             pseudo_random_generator=prng,
             block_number=block_number,
         )
@@ -1211,6 +1371,7 @@ def test_refund_after_secret_request():
         payment_state=setup.current_state,
         state_change=secret_request,
         channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
         pseudo_random_generator=setup.prng,
         block_number=setup.block_number,
     )
@@ -1231,11 +1392,19 @@ def test_refund_after_secret_request():
     )
 
     state_change = ReceiveTransferRefundCancelRoute(
-        routes=setup.available_routes, transfer=refund_transfer, secret=random_secret()
+        transfer=refund_transfer,
+        secret=random_secret(),
+        balance_proof=refund_transfer.balance_proof,
+        sender=refund_transfer.balance_proof.sender,  # pylint: disable=no-member
     )
 
     iteration = initiator_manager.state_transition(
-        setup.current_state, state_change, setup.channel_map, setup.prng, setup.block_number
+        payment_state=setup.current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
     current_state = iteration.new_state
     assert current_state is not None
@@ -1290,13 +1459,17 @@ def test_clearing_payment_state_on_lock_expires_with_refunded_transfers():
     )
 
     state_change = ReceiveTransferRefundCancelRoute(
-        routes=channels.get_routes(), transfer=refund_transfer, secret=random_secret()
+        transfer=refund_transfer,
+        secret=random_secret(),
+        balance_proof=refund_transfer.balance_proof,
+        sender=refund_transfer.balance_proof.sender,  # pylint: disable=no-member
     )
 
     iteration = initiator_manager.state_transition(
         payment_state=current_state,
         state_change=state_change,
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=pseudo_random_generator,
         block_number=block_number + 10,
     )
@@ -1327,14 +1500,18 @@ def test_clearing_payment_state_on_lock_expires_with_refunded_transfers():
         )
     )
     lock_expired_state_change = ReceiveLockExpired(
-        balance_proof, secrethash=initial_transfer.lock.secrethash, message_identifier=5
+        balance_proof=balance_proof,
+        sender=balance_proof.sender,  # pylint: disable=no-member
+        secrethash=initial_transfer.lock.secrethash,
+        message_identifier=5,
     )
 
-    expiry_block = channel.get_sender_expiration_threshold(initial_transfer.lock)
+    expiry_block = channel.get_sender_expiration_threshold(initial_transfer.lock.expiration)
     iteration = initiator_manager.state_transition(
         payment_state=iteration.new_state,
         state_change=lock_expired_state_change,
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=pseudo_random_generator,
         block_number=expiry_block,
     )
@@ -1348,6 +1525,7 @@ def test_clearing_payment_state_on_lock_expires_with_refunded_transfers():
         payment_state=iteration.new_state,
         state_change=initial_transfer_expiry_block_state_change,
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=pseudo_random_generator,
         block_number=expiry_block,
     )
@@ -1358,7 +1536,7 @@ def test_clearing_payment_state_on_lock_expires_with_refunded_transfers():
     # the rerouted transfer and it's refund to check if the payment state
     # is cleared as expected.
     ##
-    expiry_block = channel.get_sender_expiration_threshold(rerouted_transfer.lock)
+    expiry_block = channel.get_sender_expiration_threshold(rerouted_transfer.lock.expiration)
     rerouted_transfer_expiry_block_state_change = Block(
         block_number=expiry_block, gas_limit=1, block_hash=factories.make_transaction_hash()
     )
@@ -1367,6 +1545,7 @@ def test_clearing_payment_state_on_lock_expires_with_refunded_transfers():
         payment_state=iteration.new_state,
         state_change=rerouted_transfer_expiry_block_state_change,
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=pseudo_random_generator,
         block_number=expiry_block,
     )
@@ -1379,15 +1558,20 @@ def test_state_wait_secretrequest_valid_amount_and_fee():
     setup = setup_initiator_tests(allocated_fee=fee_amount)
 
     state_change = ReceiveSecretRequest(
-        UNIT_TRANSFER_IDENTIFIER,
-        setup.lock.amount - 1,  # Assuming 1 is the fee amount that was deducted
-        setup.lock.expiration,
-        setup.lock.secrethash,
-        UNIT_TRANSFER_TARGET,
+        payment_identifier=UNIT_TRANSFER_IDENTIFIER,
+        amount=setup.lock.amount - 1,  # Assuming 1 is the fee amount that was deducted
+        expiration=setup.lock.expiration,
+        secrethash=setup.lock.secrethash,
+        sender=UNIT_TRANSFER_TARGET,
     )
 
     iteration = initiator_manager.state_transition(
-        setup.current_state, state_change, setup.channel_map, setup.prng, setup.block_number
+        payment_state=setup.current_state,
+        state_change=state_change,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=dict(),
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     assert search_for_item(iteration.events, SendSecretReveal, {}) is not None
@@ -1398,15 +1582,20 @@ def test_state_wait_secretrequest_valid_amount_and_fee():
     initiator_state.received_secret_request = False
 
     state_change_2 = ReceiveSecretRequest(
-        UNIT_TRANSFER_IDENTIFIER,
-        setup.lock.amount - fee_amount - 1,
-        setup.lock.expiration,
-        setup.lock.secrethash,
-        UNIT_TRANSFER_TARGET,
+        payment_identifier=UNIT_TRANSFER_IDENTIFIER,
+        amount=setup.lock.amount - fee_amount - 1,
+        expiration=setup.lock.expiration,
+        secrethash=setup.lock.secrethash,
+        sender=UNIT_TRANSFER_TARGET,
     )
 
     iteration2 = initiator_manager.state_transition(
-        iteration.new_state, state_change_2, setup.channel_map, setup.prng, setup.block_number
+        payment_state=iteration.new_state,
+        state_change=state_change_2,
+        channelidentifiers_to_channels=setup.channel_map,
+        nodeaddresses_to_networkstates=setup.nodeaddresses_to_networkstates,
+        pseudo_random_generator=setup.prng,
+        block_number=setup.block_number,
     )
 
     assert len(iteration2.events) == 0
@@ -1416,36 +1605,71 @@ def test_initiator_manager_drops_invalid_state_changes():
     channels = factories.make_channel_set_from_amounts([10])
     transfer = factories.create(factories.LockedTransferSignedStateProperties())
     secret = factories.UNIT_SECRET
-    cancel_route = ReceiveTransferRefundCancelRoute(channels.get_routes(), transfer, secret)
+    cancel_route = ReceiveTransferRefundCancelRoute(
+        transfer=transfer,
+        secret=secret,
+        balance_proof=transfer.balance_proof,
+        # pylint: disable=no-member
+        sender=transfer.balance_proof.sender,
+    )
 
     balance_proof = factories.create(factories.BalanceProofSignedStateProperties())
-    lock_expired = ReceiveLockExpired(balance_proof, factories.UNIT_SECRETHASH, 1)
+    lock_expired = ReceiveLockExpired(
+        balance_proof=balance_proof,
+        sender=balance_proof.sender,
+        secrethash=factories.UNIT_SECRETHASH,
+        message_identifier=1,
+    )
 
     prng = random.Random()
 
     for state_change in (cancel_route, lock_expired):
-        state = InitiatorPaymentState(initiator_transfers=dict())
+        state = InitiatorPaymentState(routes=[], initiator_transfers=dict())
         iteration = initiator_manager.state_transition(
-            state, state_change, channels.channel_map, prng, 1
+            payment_state=state,
+            state_change=state_change,
+            channelidentifiers_to_channels=channels.channel_map,
+            nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
+            pseudo_random_generator=prng,
+            block_number=1,
         )
         assert_dropped(iteration, state, "no matching initiator_state")
 
         initiator_state = InitiatorTransferState(
-            factories.UNIT_TRANSFER_DESCRIPTION,
-            channels[0].canonical_identifier.channel_identifier,
-            transfer,
-            revealsecret=None,
+            route=factories.make_route_from_channel(channels[0]),
+            transfer_description=factories.UNIT_TRANSFER_DESCRIPTION,
+            channel_identifier=channels[0].canonical_identifier.channel_identifier,
+            transfer=transfer,
         )
         state = InitiatorPaymentState(
-            initiator_transfers={factories.UNIT_SECRETHASH: initiator_state}
+            routes=[], initiator_transfers={factories.UNIT_SECRETHASH: initiator_state}
         )
-        iteration = initiator_manager.state_transition(state, state_change, dict(), prng, 1)
+
+        iteration = initiator_manager.state_transition(
+            payment_state=state,
+            state_change=state_change,
+            channelidentifiers_to_channels=dict(),
+            nodeaddresses_to_networkstates=dict(),
+            pseudo_random_generator=prng,
+            block_number=1,
+        )
         assert_dropped(iteration, state, "unknown channel identifier")
 
     transfer2 = factories.create(factories.LockedTransferSignedStateProperties(amount=2))
-    cancel_route2 = ReceiveTransferRefundCancelRoute(channels.get_routes(), transfer2, secret)
+    cancel_route2 = ReceiveTransferRefundCancelRoute(
+        transfer=transfer2,
+        balance_proof=transfer2.balance_proof,
+        # pylint: disable=no-member
+        sender=transfer2.balance_proof.sender,
+        secret=secret,
+    )
     iteration = initiator_manager.state_transition(
-        state, cancel_route2, channels.channel_map, prng, 1
+        payment_state=state,
+        state_change=cancel_route2,
+        channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
+        pseudo_random_generator=prng,
+        block_number=1,
     )
     assert_dropped(iteration, state, "invalid lock")
 
@@ -1455,9 +1679,6 @@ def test_regression_payment_unlock_failed_event_must_be_emitted_only_once():
     our_address = factories.ADDR
     refund_pkey, refund_address = factories.make_privkey_address()
     pseudo_random_generator = random.Random()
-
-    our_state = factories.NettingChannelEndStateProperties(balance=amount, address=our_address)
-    partner_state = factories.replace(our_state, address=refund_address)
 
     our_state = factories.NettingChannelEndStateProperties(balance=amount, address=our_address)
     partner_state = factories.replace(our_state, address=refund_address)
@@ -1493,13 +1714,18 @@ def test_regression_payment_unlock_failed_event_must_be_emitted_only_once():
     )
 
     state_change = ReceiveTransferRefundCancelRoute(
-        routes=channels.get_routes(), transfer=refund_transfer, secret=random_secret()
+        transfer=refund_transfer,
+        secret=random_secret(),
+        balance_proof=refund_transfer.balance_proof,
+        # pylint: disable=no-member
+        sender=refund_transfer.balance_proof.sender,
     )
 
     iteration = initiator_manager.state_transition(
         payment_state=current_state,
         state_change=state_change,
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=pseudo_random_generator,
         block_number=block_number + 10,
     )
@@ -1507,7 +1733,7 @@ def test_regression_payment_unlock_failed_event_must_be_emitted_only_once():
 
     initial_transfer_state = get_transfer_at_index(iteration.new_state, 0)
     initial_transfer = initial_transfer_state.transfer
-    expiry_block = channel.get_sender_expiration_threshold(initial_transfer.lock)
+    expiry_block = channel.get_sender_expiration_threshold(initial_transfer.lock.expiration)
 
     initial_transfer_expiry_block_state_change = Block(
         block_number=expiry_block, gas_limit=1, block_hash=factories.make_transaction_hash()
@@ -1517,6 +1743,7 @@ def test_regression_payment_unlock_failed_event_must_be_emitted_only_once():
         payment_state=iteration.new_state,
         state_change=initial_transfer_expiry_block_state_change,
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=pseudo_random_generator,
         block_number=expiry_block,
     )
@@ -1530,9 +1757,44 @@ def test_regression_payment_unlock_failed_event_must_be_emitted_only_once():
         payment_state=iteration.new_state,
         state_change=initial_transfer_expiry_block_state_change,
         channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=pseudo_random_generator,
         block_number=next_block_after_expiry,
     )
     msg = "failed event must not be emitted twice"
     assert search_for_item(iteration.events, EventPaymentSentFailed, {}) is None, msg
     assert search_for_item(iteration.events, EventUnlockFailed, {}) is None, msg
+
+
+def test_initiator_init():
+    secret = factories.make_secret()
+    service = MockRaidenService()
+
+    route_states = [
+        RouteState(
+            route=[factories.make_address(), factories.make_address()], forward_channel_id=1
+        )
+    ]
+    feedback_token = uuid.uuid4()
+
+    with patch(
+        "raiden.routing.get_best_routes", return_value=(route_states, feedback_token)
+    ) as best_routes:
+        assert len(service.route_to_feedback_token) == 0
+
+        state = initiator_init(
+            raiden=service,
+            transfer_identifier=1,
+            transfer_amount=PaymentAmount(100),
+            transfer_secret=secret,
+            transfer_secrethash=sha3(secret),
+            transfer_fee=FeeAmount(0),
+            token_network_address=factories.make_token_network_address(),
+            target_address=factories.make_address(),
+        )
+
+        assert best_routes.called
+        assert len(service.route_to_feedback_token) == 1
+        assert service.route_to_feedback_token[tuple(route_states[0].route)] == feedback_token
+
+        assert state.routes == route_states

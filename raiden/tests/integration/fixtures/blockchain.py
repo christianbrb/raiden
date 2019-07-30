@@ -3,12 +3,11 @@ import os
 import pytest
 from web3 import HTTPProvider, Web3
 
-from raiden.constants import Environment, EthClient
+from raiden.constants import EthClient
 from raiden.network.blockchain_service import BlockChainService
-from raiden.network.discovery import ContractDiscovery
 from raiden.network.rpc.client import JSONRPCClient
-from raiden.settings import DEVELOPMENT_CONTRACT_VERSION, RED_EYES_CONTRACT_VERSION
 from raiden.tests.utils.eth_node import (
+    AccountDescription,
     EthNodeDescription,
     GenesisDescription,
     run_private_blockchain,
@@ -16,19 +15,8 @@ from raiden.tests.utils.eth_node import (
 from raiden.tests.utils.network import jsonrpc_services
 from raiden.tests.utils.tests import cleanup_tasks
 from raiden.utils import privatekey_to_address
-from raiden_contracts.contract_manager import ContractManager, contracts_precompiled_path
 
 # pylint: disable=redefined-outer-name,too-many-arguments,unused-argument,too-many-locals
-
-_ETH_LOGDIR = os.environ.get("RAIDEN_TESTS_ETH_LOGSDIR")
-
-
-@pytest.fixture
-def endpoint_discovery_services(blockchain_services, endpoint_registry_address):
-    return [
-        ContractDiscovery(chain.node_address, chain.discovery(endpoint_registry_address))
-        for chain in blockchain_services.blockchain_services
-    ]
 
 
 @pytest.fixture
@@ -40,10 +28,12 @@ def web3(
     blockchain_extra_config,
     deploy_key,
     private_keys,
+    account_genesis_eth_balance,
     random_marker,
     request,
     tmpdir,
     chain_id,
+    logs_storage,
 ):
     """ Starts a private chain with accounts funded. """
     # include the deploy key in the list of funded accounts
@@ -76,14 +66,16 @@ def web3(
         )
     ]
 
-    accounts_to_fund = [privatekey_to_address(key) for key in keys_to_fund]
+    accounts_to_fund = [
+        AccountDescription(privatekey_to_address(key), account_genesis_eth_balance)
+        for key in keys_to_fund
+    ]
 
+    # The private chain data is always discarded on the CI
     base_datadir = str(tmpdir)
 
-    if _ETH_LOGDIR:
-        base_logdir = os.path.join(_ETH_LOGDIR, request.node.name, blockchain_type)
-    else:
-        base_logdir = os.path.join(base_datadir, "logs")
+    # Save the Ethereum node's log for debugging
+    base_logdir = os.path.join(logs_storage, blockchain_type)
 
     genesis_description = GenesisDescription(
         prefunded_accounts=accounts_to_fund, chain_id=chain_id, random_marker=random_marker
@@ -107,20 +99,6 @@ def deploy_client(blockchain_rpc_ports, deploy_key, web3, blockchain_type):
     if blockchain_type == "parity":
         return JSONRPCClient(web3, deploy_key, gas_estimate_correction=lambda gas: 2 * gas)
     return JSONRPCClient(web3, deploy_key)
-
-
-@pytest.fixture
-def contracts_path(environment_type):
-    version = RED_EYES_CONTRACT_VERSION
-    if environment_type == Environment.DEVELOPMENT:
-        version = DEVELOPMENT_CONTRACT_VERSION
-
-    return contracts_precompiled_path(version)
-
-
-@pytest.fixture
-def contract_manager(contracts_path):
-    return ContractManager(contracts_path)
 
 
 @pytest.fixture

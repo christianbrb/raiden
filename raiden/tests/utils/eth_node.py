@@ -12,13 +12,23 @@ from eth_keyfile import create_keyfile_json
 from eth_utils import encode_hex, remove_0x_prefix, to_checksum_address, to_normalized_address
 from web3 import Web3
 
-from raiden.tests.fixtures.constants import DEFAULT_BALANCE_BIN, DEFAULT_PASSPHRASE
+from raiden.tests.fixtures.constants import DEFAULT_PASSPHRASE
 from raiden.tests.utils.genesis import GENESIS_STUB, PARITY_CHAIN_SPEC_STUB
 from raiden.utils import privatekey_to_address, privatekey_to_publickey
 from raiden.utils.http import JSONRPCExecutor
-from raiden.utils.typing import Address, Any, ChainID, Dict, List, NamedTuple, Port, PrivateKey
+from raiden.utils.typing import (
+    Address,
+    Any,
+    ChainID,
+    Dict,
+    List,
+    NamedTuple,
+    Port,
+    PrivateKey,
+    TokenAmount,
+)
 
-log = structlog.get_logger(__name__)  # pylint: disable=invalid-name
+log = structlog.get_logger(__name__)
 
 
 Command = List[str]
@@ -34,6 +44,11 @@ class EthNodeDescription(NamedTuple):
     blockchain_type: str = "geth"
 
 
+class AccountDescription(NamedTuple):
+    address: Address
+    balance: TokenAmount
+
+
 class GenesisDescription(NamedTuple):
     """Genesis configuration for a geth PoA private chain.
 
@@ -47,7 +62,7 @@ class GenesisDescription(NamedTuple):
         chain_id: The id of the private chain.
     """
 
-    prefunded_accounts: List[Address]
+    prefunded_accounts: List[AccountDescription]
     random_marker: str
     chain_id: ChainID
 
@@ -60,7 +75,7 @@ def geth_clique_extradata(extra_vanity: str, extra_seal: str) -> str:
     # https://github.com/ethereum/EIPs/issues/225
     # - First EXTRA_VANITY bytes (fixed) may contain arbitrary signer vanity data
     # - Last EXTRA_SEAL bytes (fixed) is the signer's signature sealing the header
-    return "0x{:0<64}{:0<170}".format(extra_vanity, extra_seal)
+    return f"0x{extra_vanity:0<64}{extra_seal:0<170}"
 
 
 def parity_extradata(random_marker: str) -> str:
@@ -199,8 +214,8 @@ def parity_generate_chain_spec(
     genesis_path: str, genesis_description: GenesisDescription, seal_account: Address
 ) -> None:
     alloc = {
-        to_checksum_address(address): {"balance": 1000000000000000000}
-        for address in genesis_description.prefunded_accounts
+        to_checksum_address(account.address): {"balance": str(account.balance)}
+        for account in genesis_description.prefunded_accounts
     }
     validators = {"list": [to_checksum_address(seal_account)]}
     extra_data = parity_extradata(genesis_description.random_marker)
@@ -220,8 +235,8 @@ def geth_generate_poa_genesis(
     """Writes a bare genesis to `genesis_path`."""
 
     alloc = {
-        to_normalized_address(address): {"balance": DEFAULT_BALANCE_BIN}
-        for address in genesis_description.prefunded_accounts
+        to_normalized_address(account.address): {"balance": str(account.balance)}
+        for account in genesis_description.prefunded_accounts
     }
     seal_address_normalized = remove_0x_prefix(to_normalized_address(seal_account))
     extra_data = geth_clique_extradata(genesis_description.random_marker, seal_address_normalized)
@@ -330,7 +345,7 @@ def eth_node_to_logpath(node_config: Dict[str, Any], base_logdir: str) -> str:
 def geth_prepare_datadir(datadir: str, genesis_file: str) -> None:
     node_genesis_path = os.path.join(datadir, "custom_genesis.json")
     ipc_path = datadir + "/geth.ipc"
-    assert len(ipc_path) <= 104, f'geth data path "{ipc_path}" is too large'
+    assert len(ipc_path) < 104, f'geth data path "{ipc_path}" is too large'
 
     os.makedirs(datadir, exist_ok=True)
     shutil.copy(genesis_file, node_genesis_path)
@@ -398,10 +413,14 @@ def eth_run_nodes(
             log_path = eth_node_to_logpath(node_config, logdir)
             logfile = stack.enter_context(open(log_path, "w+"))
 
+            startup_timeout = 10
+            sleep = 0.1
+
             executor = JSONRPCExecutor(
                 command=cmd,
                 url=f'http://127.0.0.1:{node_config["rpcport"]}',
-                timeout=10,
+                timeout=startup_timeout,
+                sleep=sleep,
                 jsonrpc_method="eth_getBlockByNumber",
                 jsonrpc_params=["0x0", False],
                 result_validator=_validate_jsonrpc_result,
@@ -410,6 +429,23 @@ def eth_run_nodes(
 
             stack.enter_context(executor)
             executors.append(executor)
+
+            # The timeout_limit_teardown is necessary to prevent the build
+            # being killed because of the lack of output, at the same time the
+            # timeout must never happen, because if it does, not all finalizers
+            # are executed, leaving dirty state behind and resulting in test
+            # flakiness.
+            #
+            # Because of this, this value is arbitrarily smaller than the
+            # teardown timeout, forcing the subprocess to be killed on a timely
+            # manner, which should allow the teardown to proceed and finish
+            # before the timeout elapses.
+            teardown_timeout = 0.5
+
+            # The timeout values for the startup and teardown must be
+            # different, however the library doesn't support it. So here we
+            # must poke at the private member and overwrite it.
+            executor._timeout = teardown_timeout
 
         yield executors
 
@@ -495,7 +531,7 @@ def run_private_blockchain(
     else:
         raise TypeError(f'Unknown blockchain client type "{blockchain_type}"')
 
-    runner = eth_run_nodes(
+    runner: ContextManager[List[JSONRPCExecutor]] = eth_run_nodes(
         eth_node_descs=eth_nodes,
         nodes_configuration=nodes_configuration,
         base_datadir=base_datadir,
@@ -506,5 +542,7 @@ def run_private_blockchain(
         logdir=log_dir,
     )
     with runner as executors:
-        eth_check_balance(web3, genesis_description.prefunded_accounts)
+        eth_check_balance(
+            web3, [account.address for account in genesis_description.prefunded_accounts]
+        )
         yield executors

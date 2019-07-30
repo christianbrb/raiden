@@ -1,16 +1,19 @@
 import pytest
+from eth_utils import encode_hex
 
-from raiden.constants import EMPTY_HASH, EMPTY_SIGNATURE
+from raiden.constants import EMPTY_BALANCE_HASH, EMPTY_HASH, EMPTY_SIGNATURE, LOCKSROOT_OF_NO_LOCKS
 from raiden.exceptions import (
-    ChannelOutdatedError,
+    BrokenPreconditionError,
     RaidenRecoverableError,
     RaidenUnrecoverableError,
 )
 from raiden.network.blockchain_service import BlockChainService
 from raiden.network.rpc.client import JSONRPCClient
+from raiden.tests.integration.network.proxies import BalanceProof
 from raiden.transfer.identifiers import CanonicalIdentifier
 from raiden.utils import privatekey_to_address
-from raiden_contracts.constants import TEST_SETTLE_TIMEOUT_MIN
+from raiden.utils.signer import LocalSigner
+from raiden_contracts.constants import TEST_SETTLE_TIMEOUT_MIN, MessageTypeId
 
 
 def test_payment_channel_proxy_basics(
@@ -52,11 +55,24 @@ def test_payment_channel_proxy_basics(
     assert len(channel_filter.get_all_entries()) == 2  # ChannelOpened, ChannelNewDeposit
     block_before_close = web3.eth.blockNumber
 
+    empty_balance_proof = BalanceProof(
+        channel_identifier=channel_proxy_1.channel_identifier,
+        token_network_address=token_network_address,
+        balance_hash=encode_hex(EMPTY_BALANCE_HASH),
+        nonce=0,
+        chain_id=chain_id,
+        transferred_amount=0,
+    )
+    closing_data = (
+        empty_balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF_UPDATE)
+        + EMPTY_SIGNATURE
+    )
     channel_proxy_1.close(
         nonce=0,
         balance_hash=EMPTY_HASH,
         additional_hash=EMPTY_HASH,
-        signature=EMPTY_SIGNATURE,
+        non_closing_signature=EMPTY_SIGNATURE,
+        closing_signature=LocalSigner(private_keys[1]).sign(data=closing_data),
         block_identifier="latest",
     )
     assert channel_proxy_1.closed("latest") is True
@@ -74,10 +90,10 @@ def test_payment_channel_proxy_basics(
     channel_proxy_1.settle(
         transferred_amount=0,
         locked_amount=0,
-        locksroot=EMPTY_HASH,
+        locksroot=LOCKSROOT_OF_NO_LOCKS,
         partner_transferred_amount=0,
         partner_locked_amount=0,
-        partner_locksroot=EMPTY_HASH,
+        partner_locksroot=LOCKSROOT_OF_NO_LOCKS,
         block_identifier="latest",
     )
     assert channel_proxy_1.settled("latest") is True
@@ -106,7 +122,8 @@ def test_payment_channel_proxy_basics(
             nonce=0,
             balance_hash=EMPTY_HASH,
             additional_hash=EMPTY_HASH,
-            signature=EMPTY_SIGNATURE,
+            non_closing_signature=EMPTY_SIGNATURE,
+            closing_signature=LocalSigner(private_keys[1]).sign(data=closing_data),
             block_identifier=block_before_close,
         )
 
@@ -116,10 +133,14 @@ def test_payment_channel_proxy_basics(
             nonce=0,
             balance_hash=EMPTY_HASH,
             additional_hash=EMPTY_HASH,
-            signature=EMPTY_SIGNATURE,
+            non_closing_signature=EMPTY_SIGNATURE,
+            closing_signature=LocalSigner(private_keys[1]).sign(data=closing_data),
             block_identifier="latest",
         )
 
-    msg = "The channel is closed, set total deposit must fail"
-    with pytest.raises(ChannelOutdatedError, message=msg):
+    msg = (
+        "The channel was not opened at the provided block (latest). "
+        "This call should never have been attempted."
+    )
+    with pytest.raises(BrokenPreconditionError, message=msg):
         channel_proxy_1.set_total_deposit(total_deposit=20, block_identifier="latest")

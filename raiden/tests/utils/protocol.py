@@ -2,17 +2,18 @@ from collections import defaultdict
 from unittest.mock import patch
 
 import structlog
+from eth_utils import to_checksum_address
 from gevent.event import AsyncResult
 
 from raiden.message_handler import MessageHandler
-from raiden.messages import Message
+from raiden.messages.abstract import Message
 from raiden.raiden_event_handler import EventHandler
 from raiden.raiden_service import RaidenService
 from raiden.tests.utils.events import check_nested_attrs
 from raiden.transfer.architecture import Event as RaidenEvent, TransitionResult
 from raiden.transfer.mediated_transfer.events import SendBalanceProof, SendSecretRequest
 from raiden.transfer.state import ChainState
-from raiden.utils import pex, typing
+from raiden.utils import typing
 
 log = structlog.get_logger(__name__)
 
@@ -75,10 +76,11 @@ class HoldRaidenEventHandler(EventHandler):
         for pos, hold in enumerate(holds):
             if check_nested_attrs(event, hold.attributes):
                 msg = (
-                    "Same event emitted twice, should not happen. "
-                    "Either there is a bug in the state machine or "
-                    "the hold.attributes is too generic and multiple "
-                    "different events are matching."
+                    f"Matching event of type {event.__class__.__name__} emitted "
+                    f"twice, this should not happen. Either there is a bug in the "
+                    f"state machine or the hold.attributes is too generic and "
+                    f"multiple different events are matching. Event: {event} "
+                    f"Attributes: {hold.attributes}"
                 )
                 assert hold.event is None, msg
 
@@ -123,7 +125,7 @@ class HoldRaidenEventHandler(EventHandler):
 
         hold = holds.pop(found[0])
         self.wrapped.on_raiden_event(raiden, hold.chain_state, event)
-        log.debug(f"{event} released.", node=pex(raiden.address))
+        log.debug(f"{event} released.", node=to_checksum_address(raiden.address))
 
     def hold_secretrequest_for(self, secrethash: typing.SecretHash) -> AsyncResult:
         return self.hold(SendSecretRequest, {"secrethash": secrethash})

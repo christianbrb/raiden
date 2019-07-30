@@ -2,27 +2,21 @@ from copy import deepcopy
 from typing import Any, Dict
 
 import pytest
-from gevent import server
 
 from raiden.app import App
 from raiden.constants import Environment, RoutingMode
-from raiden.network.transport import UDPTransport
 from raiden.tests.utils.factories import make_address
 from raiden.tests.utils.mocks import MockChain, MockWeb3, patched_get_for_succesful_pfs_info
 from raiden.ui.checks import check_ethereum_network_id
-from raiden.ui.startup import (
-    setup_contracts_or_exit,
-    setup_environment,
-    setup_proxies_or_exit,
-    setup_udp_or_exit,
-)
+from raiden.ui.startup import setup_contracts_or_exit, setup_environment, setup_proxies_or_exit
 from raiden_contracts.constants import (
-    CONTRACT_ENDPOINT_REGISTRY,
     CONTRACT_SECRET_REGISTRY,
     CONTRACT_SERVICE_REGISTRY,
     CONTRACT_TOKEN_NETWORK_REGISTRY,
     CONTRACT_USER_DEPOSIT,
 )
+
+token_network_registry_address_test_default = "0xB9633dd9a9a71F22C933bF121d7a22008f66B908"
 
 
 def test_check_network_id_raises_with_mismatching_ids():
@@ -52,11 +46,7 @@ def test_setup_environment():
 
 
 def raiden_contracts_in_data(contracts: Dict[str, Any]) -> bool:
-    return (
-        CONTRACT_SECRET_REGISTRY in contracts
-        and CONTRACT_TOKEN_NETWORK_REGISTRY in contracts
-        and CONTRACT_ENDPOINT_REGISTRY in contracts
-    )
+    return CONTRACT_SECRET_REGISTRY in contracts and CONTRACT_TOKEN_NETWORK_REGISTRY in contracts
 
 
 def service_contracts_in_data(contracts: Dict[str, Any]) -> bool:
@@ -64,11 +54,11 @@ def service_contracts_in_data(contracts: Dict[str, Any]) -> bool:
 
 
 def test_setup_contracts():
-    # Mainnet production
+    # Mainnet production: contracts are not deployed
     config = {"environment_type": Environment.PRODUCTION}
     contracts = setup_contracts_or_exit(config, 1)
     assert "contracts_path" in config
-    assert raiden_contracts_in_data(contracts)
+    assert not raiden_contracts_in_data(contracts)
     assert not service_contracts_in_data(contracts)
 
     # Mainnet development -- NOT allowed
@@ -81,7 +71,7 @@ def test_setup_contracts():
     contracts = setup_contracts_or_exit(config, 3)
     assert "contracts_path" in config
     assert raiden_contracts_in_data(contracts)
-    assert not service_contracts_in_data(contracts)
+    assert service_contracts_in_data(contracts)
 
     # Ropsten development
     config = {"environment_type": Environment.DEVELOPMENT}
@@ -95,7 +85,7 @@ def test_setup_contracts():
     contracts = setup_contracts_or_exit(config, 4)
     assert "contracts_path" in config
     assert raiden_contracts_in_data(contracts)
-    assert not service_contracts_in_data(contracts)
+    assert service_contracts_in_data(contracts)
 
     # Rinkeby development
     config = {"environment_type": Environment.DEVELOPMENT}
@@ -104,12 +94,12 @@ def test_setup_contracts():
     assert raiden_contracts_in_data(contracts)
     assert service_contracts_in_data(contracts)
 
-    # Goerli production TODO: Uncomment when production contracts are deployed in Goerli
-    # config = {'environment_type': Environment.PRODUCTION}
-    # contracts = setup_contracts_or_exit(config, 5)
-    # assert 'contracts_path' in config
-    # assert raiden_contracts_in_data(contracts)
-    # assert not service_contracts_in_data(contracts)
+    # Goerli production
+    config = {"environment_type": Environment.PRODUCTION}
+    contracts = setup_contracts_or_exit(config, 5)
+    assert "contracts_path" in config
+    assert raiden_contracts_in_data(contracts)
+    assert service_contracts_in_data(contracts)
 
     # Goerli development
     config = {"environment_type": Environment.DEVELOPMENT}
@@ -123,7 +113,7 @@ def test_setup_contracts():
     contracts = setup_contracts_or_exit(config, 42)
     assert "contracts_path" in config
     assert raiden_contracts_in_data(contracts)
-    assert not service_contracts_in_data(contracts)
+    assert service_contracts_in_data(contracts)
 
     # Kovan development
     config = {"environment_type": Environment.DEVELOPMENT}
@@ -149,7 +139,7 @@ def test_setup_contracts():
 
 def test_setup_proxies_raiden_addresses_are_given():
     """
-    Test that startup for proxies works fine if only raiden addresses only are given
+    Test that startup for proxies works fine if only raiden addresses are given
     """
 
     network_id = 42
@@ -159,14 +149,13 @@ def test_setup_proxies_raiden_addresses_are_given():
 
     proxies = setup_proxies_or_exit(
         config=config,
-        tokennetwork_registry_contract_address=make_address(),
+        tokennetwork_registry_contract_address=token_network_registry_address_test_default,
         secret_registry_contract_address=make_address(),
-        endpoint_registry_contract_address=make_address(),
         user_deposit_contract_address=None,
         service_registry_contract_address=None,
         blockchain_service=blockchain_service,
         contracts=contracts,
-        routing_mode=RoutingMode.BASIC,
+        routing_mode=RoutingMode.LOCAL,
         pathfinding_service_address=None,
     )
     assert proxies
@@ -176,8 +165,7 @@ def test_setup_proxies_raiden_addresses_are_given():
     assert not proxies.service_registry
 
 
-@pytest.mark.parametrize("routing_mode", [RoutingMode.PFS, RoutingMode.BASIC])
-def test_setup_proxies_all_addresses_are_given(routing_mode):
+def test_setup_proxies_all_addresses_are_given():
     """
     Test that startup for proxies works fine if all addresses are given and routing is basic
     """
@@ -190,14 +178,13 @@ def test_setup_proxies_all_addresses_are_given(routing_mode):
     with patched_get_for_succesful_pfs_info():
         proxies = setup_proxies_or_exit(
             config=config,
-            tokennetwork_registry_contract_address=make_address(),
+            tokennetwork_registry_contract_address=token_network_registry_address_test_default,
             secret_registry_contract_address=make_address(),
-            endpoint_registry_contract_address=make_address(),
             user_deposit_contract_address=make_address(),
             service_registry_contract_address=make_address(),
             blockchain_service=blockchain_service,
             contracts=contracts,
-            routing_mode=routing_mode,
+            routing_mode=RoutingMode.LOCAL,
             pathfinding_service_address="my-pfs",
         )
     assert proxies
@@ -207,8 +194,7 @@ def test_setup_proxies_all_addresses_are_given(routing_mode):
     assert proxies.service_registry
 
 
-@pytest.mark.parametrize("routing_mode", [RoutingMode.PFS, RoutingMode.BASIC])
-def test_setup_proxies_all_addresses_are_known(routing_mode):
+def test_setup_proxies_all_addresses_are_known():
     """
     Test that startup for proxies works fine if all addresses are given and routing is basic
     """
@@ -223,12 +209,11 @@ def test_setup_proxies_all_addresses_are_known(routing_mode):
             config=config,
             tokennetwork_registry_contract_address=None,
             secret_registry_contract_address=None,
-            endpoint_registry_contract_address=None,
             user_deposit_contract_address=None,
             service_registry_contract_address=None,
             blockchain_service=blockchain_service,
             contracts=contracts,
-            routing_mode=routing_mode,
+            routing_mode=RoutingMode.LOCAL,
             pathfinding_service_address="my-pfs",
         )
     assert proxies
@@ -247,16 +232,21 @@ def test_setup_proxies_no_service_registry_but_pfs():
     """
 
     network_id = 42
-    config = {"environment_type": Environment.DEVELOPMENT, "chain_id": network_id, "services": {}}
+    config = {
+        "environment_type": Environment.DEVELOPMENT,
+        "chain_id": network_id,
+        "services": dict(
+            pathfinding_max_fee=100, pathfinding_iou_timeout=500, pathfinding_max_paths=5
+        ),
+    }
     contracts = {}
     blockchain_service = MockChain(network_id=network_id, node_address=make_address())
 
     with patched_get_for_succesful_pfs_info():
         proxies = setup_proxies_or_exit(
             config=config,
-            tokennetwork_registry_contract_address=make_address(),
+            tokennetwork_registry_contract_address=token_network_registry_address_test_default,
             secret_registry_contract_address=make_address(),
-            endpoint_registry_contract_address=make_address(),
             user_deposit_contract_address=make_address(),
             service_registry_contract_address=None,
             blockchain_service=blockchain_service,
@@ -284,7 +274,6 @@ def test_setup_proxies_no_service_registry_and_no_pfs_address_but_requesting_pfs
                 config=config,
                 tokennetwork_registry_contract_address=make_address(),
                 secret_registry_contract_address=make_address(),
-                endpoint_registry_contract_address=make_address(),
                 user_deposit_contract_address=make_address(),
                 service_registry_contract_address=None,
                 blockchain_service=blockchain_service,
@@ -292,47 +281,3 @@ def test_setup_proxies_no_service_registry_and_no_pfs_address_but_requesting_pfs
                 routing_mode=RoutingMode.PFS,
                 pathfinding_service_address=None,
             )
-
-
-def test_setup_udp_or_exit(raiden_udp_ports):
-    network_id = 42
-    config = deepcopy(App.DEFAULT_CONFIG)
-    config["network_id"] = network_id
-    config["environment_type"] = Environment.DEVELOPMENT
-    host = "127.0.0.1"
-    port = raiden_udp_ports[0]
-    config["socket"] = server._udp_socket((host, port))  # pylint: disable=protected-access
-    contracts = {}
-    our_address = make_address()
-    blockchain_service = MockChain(network_id=network_id, node_address=make_address())
-    # set a big fake balance for us, to pass the test of sufficient gas for discovery transaction
-    blockchain_service.client.balances_mapping[our_address] = 99999999999999999
-    transport, discovery = setup_udp_or_exit(
-        config=config,
-        blockchain_service=blockchain_service,
-        address=our_address,
-        contracts=contracts,
-        endpoint_registry_contract_address=make_address(),
-    )
-    assert isinstance(transport, UDPTransport)
-    assert discovery
-
-
-def test_setup_udp_or_exit_insufficient_balance():
-    network_id = 42
-    config = deepcopy(App.DEFAULT_CONFIG)
-    config["network_id"] = network_id
-    config["environment_type"] = Environment.DEVELOPMENT
-    contracts = {}
-    our_address = make_address()
-    blockchain_service = MockChain(network_id=network_id, node_address=make_address())
-    # we don't have sufficient balance, so client should exit with a message
-    blockchain_service.client.balances_mapping[our_address] = 1
-    with pytest.raises(SystemExit):
-        setup_udp_or_exit(
-            config=config,
-            blockchain_service=blockchain_service,
-            address=our_address,
-            contracts=contracts,
-            endpoint_registry_contract_address=make_address(),
-        )

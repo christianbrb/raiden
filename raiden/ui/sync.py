@@ -1,3 +1,4 @@
+import json
 import sys
 from itertools import count
 
@@ -10,15 +11,19 @@ from raiden.network.blockchain_service import BlockChainService
 
 
 def etherscan_query_with_retries(url: str, sleep: float, retries: int = 3) -> int:
+    def get_result():
+        response = requests.get(url)
+        return json.loads(response.content)["result"]
+
     for _ in range(retries - 1):
         try:
-            etherscan_block = to_int(hexstr=requests.get(url).json()["result"])
+            etherscan_block = to_int(hexstr=get_result())
         except (RequestException, ValueError, KeyError):
             gevent.sleep(sleep)
         else:
             return etherscan_block
 
-    etherscan_block = to_int(hexstr=requests.get(url).json()["result"])
+    etherscan_block = to_int(hexstr=get_result())
     return etherscan_block
 
 
@@ -85,7 +90,7 @@ def wait_for_sync(
     try:
         wait_for_sync_etherscan(blockchain_service, url, tolerance, sleep)
     except (RequestException, ValueError, KeyError):
-        print("Cannot use {}. Request failed".format(url))
+        print(f"Cannot use {url}. Request failed")
         print("Falling back to eth_sync api.")
 
         wait_for_sync_rpc_api(blockchain_service, sleep)

@@ -4,42 +4,40 @@ from unittest.mock import MagicMock
 
 import gevent
 import pytest
+from eth_utils import to_checksum_address
 from gevent import Timeout
 from matrix_client.errors import MatrixRequestError
 
 import raiden
 from raiden.constants import (
+    EMPTY_SIGNATURE,
     MONITORING_BROADCASTING_ROOM,
     PATH_FINDING_BROADCASTING_ROOM,
     UINT64_MAX,
+    RoutingMode,
 )
 from raiden.exceptions import InsufficientFunds
-from raiden.messages import Delivered, Processed, SecretRequest, ToDevice
+from raiden.messages.matrix import ToDevice
+from raiden.messages.path_finding_service import PFSFeeUpdate
+from raiden.messages.synchronization import Delivered, Processed
+from raiden.messages.transfers import SecretRequest
 from raiden.network.transport.matrix import AddressReachability, MatrixTransport, _RetryQueue
 from raiden.network.transport.matrix.client import Room
 from raiden.network.transport.matrix.utils import make_room_alias
-from raiden.raiden_service import (
-    update_monitoring_service_from_balance_proof,
-    update_path_finding_service_from_balance_proof,
-)
+from raiden.services import send_pfs_update, update_monitoring_service_from_balance_proof
+from raiden.storage.serialization import JSONSerializer
 from raiden.tests.utils import factories
 from raiden.tests.utils.client import burn_eth
 from raiden.tests.utils.mocks import MockRaidenService
 from raiden.transfer import views
-from raiden.transfer.identifiers import QueueIdentifier
-from raiden.transfer.mediated_transfer.events import CHANNEL_IDENTIFIER_GLOBAL_QUEUE
+from raiden.transfer.identifiers import CANONICAL_IDENTIFIER_GLOBAL_QUEUE, QueueIdentifier
 from raiden.transfer.state_change import ActionChannelClose, ActionUpdateTransportAuthData
-from raiden.utils import pex
 from raiden.utils.signer import LocalSigner
 from raiden.utils.typing import Address, List, Optional, Union
 
 USERID0 = "@Arthur:RestaurantAtTheEndOfTheUniverse"
 USERID1 = "@Alice:Wonderland"
 HOP1_BALANCE_PROOF = factories.BalanceProofSignedStateProperties(pkey=factories.HOP1_KEY)
-
-
-# All tests in this module require matrix
-pytestmark = pytest.mark.usefixtures("skip_if_not_matrix")
 
 
 class MessageHandler:
@@ -110,12 +108,12 @@ def mock_matrix(
 def ping_pong_message_success(transport0, transport1):
     queueid0 = QueueIdentifier(
         recipient=transport0._raiden_service.address,
-        channel_identifier=CHANNEL_IDENTIFIER_GLOBAL_QUEUE,
+        canonical_identifier=CANONICAL_IDENTIFIER_GLOBAL_QUEUE,
     )
 
     queueid1 = QueueIdentifier(
         recipient=transport1._raiden_service.address,
-        channel_identifier=CHANNEL_IDENTIFIER_GLOBAL_QUEUE,
+        canonical_identifier=CANONICAL_IDENTIFIER_GLOBAL_QUEUE,
     )
 
     received_messages0 = transport0._raiden_service.message_handler.bag
@@ -123,14 +121,14 @@ def ping_pong_message_success(transport0, transport1):
 
     msg_id = random.randint(1e5, 9e5)
 
-    ping_message = Processed(message_identifier=msg_id)
-    pong_message = Delivered(delivered_message_identifier=msg_id)
+    ping_message = Processed(message_identifier=msg_id, signature=EMPTY_SIGNATURE)
+    pong_message = Delivered(delivered_message_identifier=msg_id, signature=EMPTY_SIGNATURE)
 
     transport0._raiden_service.sign(ping_message)
     transport1._raiden_service.sign(pong_message)
     transport0.send_async(queueid1, ping_message)
 
-    with Timeout(20, exception=False):
+    with Timeout(40, exception=False):
         all_messages_received = False
         while not all_messages_received:
             all_messages_received = (
@@ -144,7 +142,7 @@ def ping_pong_message_success(transport0, transport1):
     transport1._raiden_service.sign(ping_message)
     transport1.send_async(queueid0, ping_message)
 
-    with Timeout(20, exception=False):
+    with Timeout(40, exception=False):
         all_messages_received = False
         while not all_messages_received:
             all_messages_received = (
@@ -189,7 +187,7 @@ def skip_userid_validation(monkeypatch):
     )
 
 
-def make_message(convert_to_hex: bool = False, overwrite_data=None):
+def make_message(overwrite_data=None):
     room = Room(None, "!roomID:server")
     if not overwrite_data:
         message = SecretRequest(
@@ -198,13 +196,10 @@ def make_message(convert_to_hex: bool = False, overwrite_data=None):
             secrethash=factories.UNIT_SECRETHASH,
             amount=1,
             expiration=10,
+            signature=EMPTY_SIGNATURE,
         )
         message.sign(LocalSigner(factories.HOP1_KEY))
-        data = message.encode()
-        if convert_to_hex:
-            data = "0x" + data.hex()
-        else:
-            data = json.dumps(message.to_dict())
+        data = JSONSerializer.serialize(message)
     else:
         data = overwrite_data
 
@@ -214,19 +209,11 @@ def make_message(convert_to_hex: bool = False, overwrite_data=None):
     return room, event
 
 
-def test_normal_processing_hex(  # pylint: disable=unused-argument
-    mock_matrix, skip_userid_validation
-):
-    m = mock_matrix
-    room, event = make_message(convert_to_hex=True)
-    assert m._handle_message(room, event)
-
-
 def test_normal_processing_json(  # pylint: disable=unused-argument
     mock_matrix, skip_userid_validation
 ):
     m = mock_matrix
-    room, event = make_message(convert_to_hex=False)
+    room, event = make_message()
     assert m._handle_message(room, event)
 
 
@@ -235,7 +222,7 @@ def test_processing_invalid_json(  # pylint: disable=unused-argument
 ):
     m = mock_matrix
     invalid_json = '{"foo": 1,'
-    room, event = make_message(convert_to_hex=False, overwrite_data=invalid_json)
+    room, event = make_message(overwrite_data=invalid_json)
     assert not m._handle_message(room, event)
 
 
@@ -247,51 +234,23 @@ def test_sending_nonstring_body(  # pylint: disable=unused-argument
     assert not m._handle_message(room, event)
 
 
+@pytest.mark.parametrize(
+    "message_input", ['{"this": 1, "message": 5, "is": 3, "not_valid": 5}', "["]
+)
 def test_processing_invalid_message_json(  # pylint: disable=unused-argument
-    mock_matrix, skip_userid_validation
+    mock_matrix, skip_userid_validation, message_input
 ):
     m = mock_matrix
-    invalid_message = '{"this": 1, "message": 5, "is": 3, "not_valid": 5}'
-    room, event = make_message(convert_to_hex=False, overwrite_data=invalid_message)
+    room, event = make_message(overwrite_data=message_input)
     assert not m._handle_message(room, event)
 
 
-def test_processing_invalid_message_cmdid_json(  # pylint: disable=unused-argument
+def test_processing_invalid_message_type_json(  # pylint: disable=unused-argument
     mock_matrix, skip_userid_validation
 ):
     m = mock_matrix
-    invalid_message = '{"type": "NonExistentMessage", "is": 3, "not_valid": 5}'
-    room, event = make_message(convert_to_hex=False, overwrite_data=invalid_message)
-    assert not m._handle_message(room, event)
-
-
-def test_processing_invalid_hex(  # pylint: disable=unused-argument
-    mock_matrix, skip_userid_validation
-):
-    m = mock_matrix
-    room, event = make_message(convert_to_hex=True)
-    old_data = event["content"]["body"]
-    event["content"]["body"] = old_data[:-1]
-    assert not m._handle_message(room, event)
-
-
-def test_processing_invalid_message_hex(  # pylint: disable=unused-argument
-    mock_matrix, skip_userid_validation
-):
-    m = mock_matrix
-    room, event = make_message(convert_to_hex=True)
-    old_data = event["content"]["body"]
-    event["content"]["body"] = old_data[:-4]
-    assert not m._handle_message(room, event)
-
-
-def test_processing_invalid_message_cmdid_hex(  # pylint: disable=unused-argument
-    mock_matrix, skip_userid_validation
-):
-    m = mock_matrix
-    room, event = make_message(convert_to_hex=True)
-    old_data = event["content"]["body"]
-    event["content"]["body"] = "0xff" + old_data[4:]
+    invalid_message = '{"_type": "NonExistentMessage", "is": 3, "not_valid": 5}'
+    room, event = make_message(overwrite_data=invalid_message)
     assert not m._handle_message(room, event)
 
 
@@ -307,7 +266,7 @@ def test_matrix_message_sync(matrix_transports):
     raiden_service0 = MockRaidenService(message_handler)
     raiden_service1 = MockRaidenService(message_handler)
 
-    raiden_service1.handle_and_track_state_change = MagicMock()
+    raiden_service1.handle_and_track_state_changes = MagicMock()
 
     transport0.start(raiden_service0, message_handler, None)
     transport1.start(raiden_service1, message_handler, None)
@@ -316,17 +275,18 @@ def test_matrix_message_sync(matrix_transports):
 
     latest_auth_data = f"{transport1._user_id}/{transport1._client.api.token}"
     update_transport_auth_data = ActionUpdateTransportAuthData(latest_auth_data)
-    raiden_service1.handle_and_track_state_change.assert_called_with(update_transport_auth_data)
+    raiden_service1.handle_and_track_state_changes.assert_called_with([update_transport_auth_data])
 
     transport0.start_health_check(transport1._raiden_service.address)
     transport1.start_health_check(transport0._raiden_service.address)
 
     queue_identifier = QueueIdentifier(
-        recipient=transport1._raiden_service.address, channel_identifier=1
+        recipient=transport1._raiden_service.address,
+        canonical_identifier=factories.UNIT_CANONICAL_ID,
     )
 
     for i in range(5):
-        message = Processed(message_identifier=i)
+        message = Processed(message_identifier=i, signature=EMPTY_SIGNATURE)
         transport0._raiden_service.sign(message)
         transport0.send_async(queue_identifier, message)
     with Timeout(40):
@@ -344,7 +304,7 @@ def test_matrix_message_sync(matrix_transports):
 
     # Send more messages while the other end is offline
     for i in range(10, 15):
-        message = Processed(message_identifier=i)
+        message = Processed(message_identifier=i, signature=EMPTY_SIGNATURE)
         transport0._raiden_service.sign(message)
         transport0.send_async(queue_identifier, message)
 
@@ -363,7 +323,7 @@ def test_matrix_message_sync(matrix_transports):
 @pytest.mark.parametrize("channels_per_node", [1])
 @pytest.mark.parametrize("number_of_tokens", [1])
 def test_matrix_tx_error_handling(  # pylint: disable=unused-argument
-    skip_if_not_matrix, raiden_chain, token_addresses
+    raiden_chain, token_addresses
 ):
     """Proxies exceptions must be forwarded by the transport."""
     app0, app1 = raiden_chain
@@ -371,15 +331,15 @@ def test_matrix_tx_error_handling(  # pylint: disable=unused-argument
 
     channel_state = views.get_channelstate_for(
         chain_state=views.state_from_app(app0),
-        payment_network_id=app0.raiden.default_registry.address,
+        payment_network_address=app0.raiden.default_registry.address,
         token_address=token_address,
         partner_address=app1.raiden.address,
     )
-    burn_eth(app0.raiden)
+    burn_eth(app0.raiden.chain.client)
 
     def make_tx(*args, **kwargs):  # pylint: disable=unused-argument
         close_channel = ActionChannelClose(canonical_identifier=channel_state.canonical_identifier)
-        app0.raiden.handle_and_track_state_change(close_channel)
+        app0.raiden.handle_and_track_state_changes([close_channel])
 
     app0.raiden.transport._client.add_presence_listener(make_tx)
 
@@ -424,7 +384,7 @@ def test_matrix_message_retry(
     ] = AddressReachability.REACHABLE
 
     queueid = QueueIdentifier(
-        recipient=partner_address, channel_identifier=CHANNEL_IDENTIFIER_GLOBAL_QUEUE
+        recipient=partner_address, canonical_identifier=CANONICAL_IDENTIFIER_GLOBAL_QUEUE
     )
     chain_state = raiden_service.wal.state_manager.current_state
 
@@ -432,7 +392,7 @@ def test_matrix_message_retry(
     assert bool(retry_queue), "retry_queue not running"
 
     # Send the initial message
-    message = Processed(message_identifier=0)
+    message = Processed(message_identifier=0, signature=EMPTY_SIGNATURE)
     transport._raiden_service.sign(message)
     chain_state.queueids_to_queues[queueid] = [message]
     retry_queue.enqueue_global(message)
@@ -450,7 +410,7 @@ def test_matrix_message_retry(
 
     transport.log.debug.assert_called_with(
         "Partner not reachable. Skipping.",
-        partner=pex(partner_address),
+        partner=to_checksum_address(partner_address),
         status=AddressReachability.UNREACHABLE,
     )
 
@@ -506,6 +466,7 @@ def test_join_invalid_discovery(
 
 @pytest.mark.parametrize("matrix_server_count", [2])
 @pytest.mark.parametrize("number_of_transports", [3])
+@pytest.mark.skip("Issue: #4337")
 def test_matrix_cross_server_with_load_balance(matrix_transports):
     transport0, transport1, transport2 = matrix_transports
     received_messages0 = set()
@@ -590,7 +551,7 @@ def test_matrix_send_global(
     ms_room.send_text = MagicMock(spec=ms_room.send_text)
 
     for i in range(5):
-        message = Processed(message_identifier=i)
+        message = Processed(message_identifier=i, signature=EMPTY_SIGNATURE)
         transport._raiden_service.sign(message)
         transport.send_global(MONITORING_BROADCASTING_ROOM, message)
     transport._spawn(transport._global_send_worker)
@@ -601,7 +562,7 @@ def test_matrix_send_global(
     # messages could have been bundled
     call_args_str = " ".join(str(arg) for arg in ms_room.send_text.call_args_list)
     for i in range(5):
-        assert f'"message_identifier": {i}' in call_args_str
+        assert f'"message_identifier": "{i}"' in call_args_str
 
     transport.stop()
     transport.get()
@@ -658,7 +619,10 @@ def test_monitoring_global_messages(
     raiden_service.user_deposit.effective_balance.return_value = 100
 
     update_monitoring_service_from_balance_proof(
-        raiden=raiden_service, chain_state=None, new_balance_proof=balance_proof
+        raiden=raiden_service,
+        chain_state=None,
+        new_balance_proof=balance_proof,
+        monitoring_service_contract_address=bytes([1] * 20),
     )
     gevent.idle()
 
@@ -669,6 +633,7 @@ def test_monitoring_global_messages(
 
 
 @pytest.mark.parametrize("matrix_server_count", [1])
+@pytest.mark.parametrize("route_mode", [RoutingMode.LOCAL, RoutingMode.PFS])
 def test_pfs_global_messages(
     local_matrix_servers,
     private_rooms,
@@ -676,14 +641,15 @@ def test_pfs_global_messages(
     retries_before_backoff,
     monkeypatch,
     global_rooms,
+    route_mode,
 ):
     """
-    Test that RaidenService sends UpdatePFS messages to global
+    Test that RaidenService sends PFSCapacityUpdate messages to global
     PATH_FINDING_BROADCASTING_ROOM room on newly received balance proofs.
     """
     transport = MatrixTransport(
         {
-            "global_rooms": global_rooms,  # FIXME: #3735
+            "global_rooms": global_rooms + [PATH_FINDING_BROADCASTING_ROOM],
             "retries_before_backoff": retries_before_backoff,
             "retry_interval": retry_interval,
             "server": local_matrix_servers[0],
@@ -696,6 +662,7 @@ def test_pfs_global_messages(
     transport._send_raw = MagicMock()
     raiden_service = MockRaidenService(None)
     raiden_service.config = dict(services=dict(monitoring_enabled=True))
+    raiden_service.routing_mode = route_mode
 
     transport.start(raiden_service, raiden_service.message_handler, None)
 
@@ -707,6 +674,7 @@ def test_pfs_global_messages(
     raiden_service.transport = transport
     transport.log = MagicMock()
 
+    # send PFSCapacityUpdate
     balance_proof = factories.create(HOP1_BALANCE_PROOF)
     channel_state = factories.create(factories.NettingChannelStateProperties())
     channel_state.our_state.balance_proof = balance_proof
@@ -716,15 +684,25 @@ def test_pfs_global_messages(
         "get_channelstate_by_canonical_identifier",
         lambda *a, **kw: channel_state,
     )
-    update_path_finding_service_from_balance_proof(
-        raiden=raiden_service, chain_state=None, new_balance_proof=balance_proof
-    )
+    send_pfs_update(raiden=raiden_service, canonical_identifier=balance_proof.canonical_identifier)
     gevent.idle()
-
     with gevent.Timeout(2):
         while pfs_room.send_text.call_count < 1:
             gevent.idle()
     assert pfs_room.send_text.call_count == 1
+
+    # send PFSFeeUpdate
+    channel_state = factories.create(factories.NettingChannelStateProperties())
+    fee_update = PFSFeeUpdate.from_channel_state(channel_state)
+    fee_update.sign(raiden_service.signer)
+    raiden_service.transport.send_global(PATH_FINDING_BROADCASTING_ROOM, fee_update)
+    with gevent.Timeout(2):
+        while pfs_room.send_text.call_count < 2:
+            gevent.idle()
+    assert pfs_room.send_text.call_count == 2
+    msg_data = json.loads(pfs_room.send_text.call_args[0][0])
+    assert msg_data["_type"] == "raiden.messages.path_finding_service.PFSFeeUpdate"
+
     transport.stop()
     transport.get()
 
@@ -740,6 +718,7 @@ def test_pfs_global_messages(
 )
 @pytest.mark.parametrize("number_of_transports", [2])
 @pytest.mark.parametrize("matrix_server_count", [2])
+@pytest.mark.skip("Issue: #4338")
 def test_matrix_invite_private_room_happy_case(matrix_transports, expected_join_rule):
     raiden_service0 = MockRaidenService(None)
     raiden_service1 = MockRaidenService(None)
@@ -856,6 +835,7 @@ def test_matrix_invite_private_room_unhappy_case1(
 )
 @pytest.mark.parametrize("matrix_server_count", [2])
 @pytest.mark.parametrize("number_of_transports", [2])
+@pytest.mark.skip("Issue: #4336")
 def test_matrix_invite_private_room_unhappy_case_2(
     matrix_transports, expected_join_rule0, expected_join_rule1
 ):
@@ -1121,6 +1101,7 @@ def test_matrix_multi_user_roaming(matrix_transports):
 @pytest.mark.parametrize("private_rooms", [[True, True]])
 @pytest.mark.parametrize("matrix_server_count", [2])
 @pytest.mark.parametrize("number_of_transports", [2])
+@pytest.mark.skip("Issue: #4379")
 def test_reproduce_handle_invite_send_race_issue_3588(matrix_transports):
     transport0, transport1 = matrix_transports
     received_messages0 = set()
@@ -1159,12 +1140,12 @@ def test_send_to_device(matrix_transports):
 
     transport0.start_health_check(raiden_service1.address)
     transport1.start_health_check(raiden_service0.address)
-    message = Processed(message_identifier=1)
+    message = Processed(message_identifier=1, signature=EMPTY_SIGNATURE)
     transport0._raiden_service.sign(message)
     transport0.send_to_device(raiden_service1.address, message)
     gevent.sleep(0.5)
     transport1._receive_to_device.assert_not_called()
-    message = ToDevice(message_identifier=1)
+    message = ToDevice(message_identifier=1, signature=EMPTY_SIGNATURE)
     transport0._raiden_service.sign(message)
     transport0.send_to_device(raiden_service1.address, message)
     gevent.sleep(0.5)
