@@ -1,8 +1,7 @@
 import json
 import random
-from unittest.mock import Mock, PropertyMock, patch
-
-import requests
+from collections import defaultdict
+from unittest.mock import Mock, PropertyMock
 
 from raiden.constants import RoutingMode
 from raiden.storage.serialization import JSONSerializer
@@ -21,8 +20,8 @@ from raiden.utils.typing import (
     ChannelID,
     Dict,
     Optional,
-    PaymentNetworkAddress,
     TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
 )
 
 
@@ -101,14 +100,14 @@ class MockTokenNetwork:
         self.partneraddresses_to_channelidentifiers = {}
 
 
-class MockPaymentNetwork:
+class MockTokenNetworkRegistry:
     def __init__(self):
         self.tokennetworkaddresses_to_tokennetworks = {}
 
 
 class MockChainState:
     def __init__(self):
-        self.identifiers_to_paymentnetworks = {}
+        self.identifiers_to_tokennetworkregistries = {}
 
 
 class MockRaidenService:
@@ -130,7 +129,9 @@ class MockRaidenService:
         self.default_registry = Mock()
         self.default_registry.address = factories.make_address()
         self.default_one_to_n_address = factories.make_address()
+        self.default_msc_address = factories.make_address()
 
+        self.targets_to_identifiers_to_statuses = defaultdict(dict)
         self.route_to_feedback_token = {}
 
         if state_transition is None:
@@ -166,12 +167,12 @@ class MockRaidenService:
 
 
 def make_raiden_service_mock(
-    payment_network_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_network_address: TokenNetworkAddress,
     channel_identifier: ChannelID,
     partner: Address,
 ):
-    raiden_service = MockRaidenService()
+    raiden_service = MockRaidenService(config={})
     chain_state = MockChainState()
     wal = Mock()
     wal.state_manager.current_state = chain_state
@@ -181,11 +182,16 @@ def make_raiden_service_mock(
     token_network.channelidentifiers_to_channels[channel_identifier] = MockChannelState()
     token_network.partneraddresses_to_channelidentifiers[partner] = [channel_identifier]
 
-    payment_network = MockPaymentNetwork()
-    tokennetworkaddresses_to_tokennetworks = payment_network.tokennetworkaddresses_to_tokennetworks
+    token_network_registry = MockTokenNetworkRegistry()
+    tokennetworkaddresses_to_tokennetworks = (
+        token_network_registry.tokennetworkaddresses_to_tokennetworks
+    )
     tokennetworkaddresses_to_tokennetworks[token_network_address] = token_network
 
-    chain_state.identifiers_to_paymentnetworks = {payment_network_address: payment_network}
+    chain_state.identifiers_to_tokennetworkregistries = {
+        token_network_registry_address: token_network_registry
+    }
+
     return raiden_service
 
 
@@ -199,28 +205,6 @@ def mocked_failed_response(error: Exception, status_code: int = 200) -> Mock:
 def mocked_json_response(response_data: Optional[Dict] = None, status_code: int = 200) -> Mock:
     data = response_data or {}
     return Mock(json=Mock(return_value=data), content=json.dumps(data), status_code=status_code)
-
-
-def patched_get_for_succesful_pfs_info():
-    token_network_registry_address_test_default = "0xB9633dd9a9a71F22C933bF121d7a22008f66B908"
-    json_data = {
-        "price_info": 5,
-        "network_info": {
-            "chain_id": 42,
-            "registry_address": token_network_registry_address_test_default,
-        },
-        "message": "This is your favorite pathfinding service",
-        "operator": "John Doe",
-        "version": "0.0.1",
-        "payment_address": "0x2222222222222222222222222222222222222222",
-        "settings": "",
-    }
-
-    response = Mock()
-    response.configure_mock(status_code=200, content=json.dumps(json_data))
-    response.json = Mock(return_value=json_data)
-    type(response).content = PropertyMock(return_value=json.dumps(json_data))
-    return patch.object(requests, "get", return_value=response)
 
 
 class MockEth:

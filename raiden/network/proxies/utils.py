@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING
 from eth_utils import decode_hex, to_hex
 from structlog import BoundLoggerBase
 
+from raiden.blockchain.filters import decode_event, get_filter_args_for_specific_event_from_channel
 from raiden.constants import GENESIS_BLOCK_NUMBER
 from raiden.exceptions import RaidenUnrecoverableError
 from raiden.transfer.identifiers import CanonicalIdentifier
-from raiden.utils.filters import decode_event, get_filter_args_for_specific_event_from_channel
 from raiden.utils.typing import (
     Address,
     Any,
@@ -116,15 +116,14 @@ def get_onchain_locksroots(
 
 @contextmanager
 def log_transaction(log: BoundLoggerBase, description: str, details: Dict[Any, Any]) -> Generator:
+    bound_log = log.bind(description=description, **details)
     try:
-        log.debug("Entered", description=description, **details)
+        bound_log.debug("Entered")
         yield
     except:  # noqa
-        log.critical("Failed", description=description, **details)
-        log.exception("Failed because of")
+        bound_log.critical("Failed", exc_info=True)
         raise
-    else:
-        log.debug("Exited", description=description, **details)
+    bound_log.debug("Exited")
 
 
 def raise_on_call_returned_empty(given_block_identifier: BlockSpecification) -> NoReturn:

@@ -7,13 +7,13 @@ from raiden import constants
 from raiden.constants import RoutingMode
 from raiden.messages.monitoring_service import RequestMonitoring
 from raiden.messages.path_finding_service import PFSCapacityUpdate, PFSFeeUpdate
-from raiden.settings import MONITORING_MIN_CAPACITY, MONITORING_REWARD
-from raiden.transfer import channel, views
+from raiden.settings import MONITORING_REWARD
+from raiden.transfer import views
 from raiden.transfer.architecture import BalanceProofSignedState, BalanceProofUnsignedState
 from raiden.transfer.identifiers import CanonicalIdentifier
 from raiden.transfer.state import ChainState
 from raiden.utils import to_rdn
-from raiden.utils.typing import TYPE_CHECKING, Address
+from raiden.utils.typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from raiden.raiden_service import RaidenService
@@ -30,10 +30,7 @@ def update_services_from_balance_proof(
     send_pfs_update(raiden=raiden, canonical_identifier=balance_proof.canonical_identifier)
     if isinstance(balance_proof, BalanceProofSignedState):
         update_monitoring_service_from_balance_proof(
-            raiden=raiden,
-            chain_state=chain_state,
-            new_balance_proof=balance_proof,
-            monitoring_service_contract_address=raiden.default_msc_address,
+            raiden=raiden, chain_state=chain_state, new_balance_proof=balance_proof
         )
 
 
@@ -66,10 +63,7 @@ def send_pfs_update(
 
 
 def update_monitoring_service_from_balance_proof(
-    raiden: "RaidenService",
-    chain_state: ChainState,
-    new_balance_proof: BalanceProofSignedState,
-    monitoring_service_contract_address: Address,
+    raiden: "RaidenService", chain_state: ChainState, new_balance_proof: BalanceProofSignedState
 ) -> None:
     if raiden.config["services"]["monitoring_enabled"] is False:
         return
@@ -84,18 +78,6 @@ def update_monitoring_service_from_balance_proof(
         f"token_network_address: {to_checksum_address(new_balance_proof.token_network_address)}."
     )
     assert channel_state, msg
-
-    balance = channel.get_balance(
-        sender=channel_state.our_state, receiver=channel_state.partner_state
-    )
-
-    if balance < MONITORING_MIN_CAPACITY:
-        log.warn(
-            f"Skipping update to Monitoring service. "
-            f"Available balance of {balance} is less than configured "
-            f"minimum capacity of {MONITORING_MIN_CAPACITY}"
-        )
-        return
 
     assert raiden.user_deposit is not None
     rei_balance = raiden.user_deposit.effective_balance(raiden.address, "latest")
@@ -115,7 +97,9 @@ def update_monitoring_service_from_balance_proof(
     )
 
     monitoring_message = RequestMonitoring.from_balance_proof_signed_state(
-        new_balance_proof, MONITORING_REWARD, monitoring_service_contract_address
+        balance_proof=new_balance_proof,
+        reward_amount=MONITORING_REWARD,
+        monitoring_service_contract_address=raiden.default_msc_address,
     )
     monitoring_message.sign(raiden.signer)
     raiden.transport.send_global(constants.MONITORING_BROADCASTING_ROOM, monitoring_message)

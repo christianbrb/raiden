@@ -5,10 +5,12 @@ import gevent
 from raiden.raiden_service import RaidenService
 from raiden.storage.sqlite import RANGE_ALL_STATE_CHANGES
 from raiden.transfer.architecture import Event, StateChange
-from raiden.utils.typing import Any, Iterable, List, Optional, Type, TypeVar
+from raiden.transfer.mediated_transfer.events import EventUnlockClaimFailed, EventUnlockFailed
+from raiden.utils.typing import Any, Iterable, List, Optional, Tuple, Type, TypeVar
 
 NOVALUE = object()
 T = TypeVar("T")
+SC = TypeVar("SC", bound=StateChange)
 TM = TypeVar("TM", bound=Mapping)
 
 
@@ -95,8 +97,8 @@ def raiden_events_search_for_item(
 
 
 def raiden_state_changes_search_for_item(
-    raiden: RaidenService, item_type: Type[StateChange], attributes: Mapping
-) -> Optional[StateChange]:
+    raiden: RaidenService, item_type: Type[SC], attributes: Mapping
+) -> Optional[SC]:
     """ Search for the first event of type `item_type` with `attributes` in the
     `raiden` database.
 
@@ -104,11 +106,11 @@ def raiden_state_changes_search_for_item(
     """
     assert raiden.wal, "RaidenService must be started"
 
-    return search_for_item(
-        raiden.wal.storage.get_statechanges_by_range(RANGE_ALL_STATE_CHANGES),
-        item_type,
-        attributes,
-    )
+    for item in raiden.wal.storage.get_statechanges_by_range(RANGE_ALL_STATE_CHANGES):
+        if isinstance(item, item_type) and check_nested_attrs(item, attributes):
+            return item
+
+    return None
 
 
 def must_have_event(event_list: Iterable[TM], dict_data: TM) -> Optional[TM]:
@@ -125,6 +127,20 @@ def must_have_events(event_list: List[TM], *args) -> bool:
             return False
 
     return True
+
+
+def has_event_of_types(events: List[Event], event_types: Tuple[Type, ...]) -> bool:
+    for event in events:
+        for event_type in event_types:
+            if isinstance(event, event_type):
+                return True
+    else:
+        return False
+
+
+def has_unlock_failure(raiden: RaidenService) -> bool:
+    events = raiden.wal.storage.get_events()  # type: ignore
+    return has_event_of_types(events, (EventUnlockFailed, EventUnlockClaimFailed))
 
 
 def wait_for_raiden_event(

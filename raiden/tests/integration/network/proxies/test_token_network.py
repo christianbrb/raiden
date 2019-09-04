@@ -12,7 +12,6 @@ from raiden.constants import (
 )
 from raiden.exceptions import (
     BrokenPreconditionError,
-    InvalidAddress,
     InvalidChannelID,
     InvalidSettleTimeout,
     RaidenRecoverableError,
@@ -125,74 +124,81 @@ def test_token_network_proxy(
     )
 
     msg = "Hex encoded addresses are not supported, an exception must be raised"
-    with pytest.raises(InvalidAddress):
+    with pytest.raises(ValueError):
         c1_token_network_proxy.get_channel_identifier(
             participant1=to_checksum_address(c1_client.address),
             participant2=to_checksum_address(c2_client.address),
             block_identifier="latest",
         )
+        pytest.fail(msg)
 
     msg = "Zero is not a valid channel_identifier identifier, an exception must be raised."
-    with pytest.raises(InvalidChannelID, message=msg):
+    with pytest.raises(InvalidChannelID):
         assert c1_token_network_proxy.channel_is_opened(
             participant1=c1_client.address,
             participant2=c2_client.address,
             block_identifier="latest",
             channel_identifier=0,
         )
+        pytest.fail(msg)
 
     msg = "Zero is not a valid channel_identifier identifier. an exception must be raised."
-    with pytest.raises(InvalidChannelID, message=msg):
+    with pytest.raises(InvalidChannelID):
         assert c1_token_network_proxy.channel_is_closed(
             participant1=c1_client.address,
             participant2=c2_client.address,
             block_identifier="latest",
             channel_identifier=0,
         )
+        pytest.fail(msg)
 
     msg = (
         "Opening a channel with a settle_timeout lower then token "
         "network's minimum will fail. This must be validated and the "
         "transaction must not be sent."
     )
-    with pytest.raises(InvalidSettleTimeout, message=msg):
+    with pytest.raises(InvalidSettleTimeout):
         c1_token_network_proxy.new_netting_channel(
             partner=c2_client.address,
             settle_timeout=TEST_SETTLE_TIMEOUT_MIN - 1,
             given_block_identifier="latest",
         )
+        pytest.fail(msg)
 
     msg = (
         "Opening a channel with a settle_timeout larger then token "
         "network's maximum will fail. This must be validated and the "
         "transaction must not be sent."
     )
-    with pytest.raises(InvalidSettleTimeout, message=msg):
+    with pytest.raises(InvalidSettleTimeout):
         c1_token_network_proxy.new_netting_channel(
             partner=c2_client.address,
             settle_timeout=TEST_SETTLE_TIMEOUT_MAX + 1,
             given_block_identifier="latest",
         )
+        pytest.fail(msg)
 
     msg = (
         "Opening a channel with itself is not allow. This must be validated and "
         "the transaction must not be sent."
     )
-    with pytest.raises(SamePeerAddress, message=msg):
+    with pytest.raises(SamePeerAddress):
         c1_token_network_proxy.new_netting_channel(
             partner=c1_client.address,
             settle_timeout=TEST_SETTLE_TIMEOUT_MIN,
             given_block_identifier="latest",
         )
+        pytest.fail(msg)
 
     msg = "Trying a deposit to an inexisting channel must fail."
-    with pytest.raises(BrokenPreconditionError, message=msg):
+    with pytest.raises(BrokenPreconditionError):
         c1_token_network_proxy.set_total_deposit(
             given_block_identifier="latest",
             channel_identifier=1,
             total_deposit=1,
             partner=c2_client.address,
         )
+        pytest.fail(msg)
 
     empty_balance_proof = BalanceProof(
         channel_identifier=1,
@@ -203,13 +209,12 @@ def test_token_network_proxy(
         transferred_amount=0,
     )
     closing_data = (
-        empty_balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF_UPDATE)
-        + EMPTY_SIGNATURE
+        empty_balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF) + EMPTY_SIGNATURE
     )
 
     msg = "Trying to close an inexisting channel must fail."
     match = "The channel was not open at the provided block"
-    with pytest.raises(RaidenUnrecoverableError, message=msg, match=match):
+    with pytest.raises(RaidenUnrecoverableError, match=match):
         c1_token_network_proxy.close(
             channel_identifier=1,
             partner=c2_client.address,
@@ -220,6 +225,7 @@ def test_token_network_proxy(
             closing_signature=c1_signer.sign(data=closing_data),
             given_block_identifier="latest",
         )
+        pytest.fail(msg)
 
     channel_identifier = c1_token_network_proxy.new_netting_channel(
         partner=c2_client.address,
@@ -230,12 +236,13 @@ def test_token_network_proxy(
     assert isinstance(channel_identifier, T_ChannelID), msg
 
     msg = "multiple channels with the same peer are not allowed"
-    with pytest.raises(BrokenPreconditionError, message=msg):
+    with pytest.raises(BrokenPreconditionError):
         c1_token_network_proxy.new_netting_channel(
             partner=c2_client.address,
             settle_timeout=TEST_SETTLE_TIMEOUT_MIN,
             given_block_identifier="latest",
         )
+        pytest.fail(msg)
 
     assert (
         c1_token_network_proxy.get_channel_identifier_or_none(
@@ -257,13 +264,14 @@ def test_token_network_proxy(
     )
 
     msg = "set_total_deposit must fail if the amount exceed the account's balance"
-    with pytest.raises(BrokenPreconditionError, message=msg):
+    with pytest.raises(BrokenPreconditionError):
         c1_token_network_proxy.set_total_deposit(
             given_block_identifier="latest",
             channel_identifier=channel_identifier,
             total_deposit=initial_token_balance + 1,
             partner=c2_client.address,
         )
+        pytest.fail(msg)
 
     msg = "set_total_deposit must fail with a negative amount"
     with pytest.raises(BrokenPreconditionError):
@@ -273,6 +281,7 @@ def test_token_network_proxy(
             total_deposit=-1,
             partner=c2_client.address,
         )
+        pytest.fail(msg)
 
     msg = "set_total_deposit must fail with a zero amount"
     with pytest.raises(BrokenPreconditionError):
@@ -282,6 +291,7 @@ def test_token_network_proxy(
             total_deposit=0,
             partner=c2_client.address,
         )
+        pytest.fail(msg)
 
     c1_token_network_proxy.set_total_deposit(
         given_block_identifier="latest",
@@ -314,10 +324,9 @@ def test_token_network_proxy(
     msg = "close must fail if the closing_signature is invalid"
     for invalid_signature in invalid_signatures:
         closing_data = (
-            balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF_UPDATE)
-            + invalid_signature
+            balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF) + invalid_signature
         )
-        with pytest.raises(RaidenUnrecoverableError, message=msg):
+        with pytest.raises(RaidenUnrecoverableError):
             c2_token_network_proxy.close(
                 channel_identifier=channel_identifier,
                 partner=c1_client.address,
@@ -328,12 +337,13 @@ def test_token_network_proxy(
                 closing_signature=c2_signer.sign(data=closing_data),
                 given_block_identifier="latest",
             )
+            pytest.fail(msg)
 
     blocknumber_prior_to_close = c2_client.block_number()
 
-    closing_data = balance_proof.serialize_bin(
-        msg_type=MessageTypeId.BALANCE_PROOF_UPDATE
-    ) + decode_hex(balance_proof.signature)
+    closing_data = balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF) + decode_hex(
+        balance_proof.signature
+    )
     c2_token_network_proxy.close(
         channel_identifier=channel_identifier,
         partner=c1_client.address,
@@ -367,7 +377,7 @@ def test_token_network_proxy(
         "sent. If the channel is already closed at that block the client code  "
         "has a programming error. An exception is raised for that."
     )
-    with pytest.raises(RaidenUnrecoverableError, message=msg):
+    with pytest.raises(RaidenUnrecoverableError):
         c2_token_network_proxy.close(
             channel_identifier=channel_identifier,
             partner=c1_client.address,
@@ -378,13 +388,14 @@ def test_token_network_proxy(
             closing_signature=c2_signer.sign(data=closing_data),
             given_block_identifier="latest",
         )
+        pytest.fail(msg)
 
     msg = (
         "The channel cannot be closed two times. If it was not closed at "
         "given_block_identifier but it is closed at the time the proxy is "
         "called an exception must be raised."
     )
-    with pytest.raises(RaidenRecoverableError, message=msg):
+    with pytest.raises(RaidenRecoverableError):
         c2_token_network_proxy.close(
             channel_identifier=channel_identifier,
             partner=c1_client.address,
@@ -395,16 +406,18 @@ def test_token_network_proxy(
             closing_signature=c2_signer.sign(data=closing_data),
             given_block_identifier=blocknumber_prior_to_close,
         )
+        pytest.fail(msg)
 
     msg = "depositing to a closed channel must fail"
     match = "Channel is already closed"
-    with pytest.raises(RaidenRecoverableError, message=msg, match=match):
+    with pytest.raises(RaidenRecoverableError, match=match):
         c2_token_network_proxy.set_total_deposit(
             given_block_identifier=blocknumber_prior_to_close,
             channel_identifier=channel_identifier,
             total_deposit=20,
             partner=c1_client.address,
         )
+        pytest.fail(msg)
 
     c1_chain.wait_until_block(
         target_block_number=c1_chain.block_number() + TEST_SETTLE_TIMEOUT_MIN
@@ -412,7 +425,7 @@ def test_token_network_proxy(
 
     invalid_transferred_amount = 1
     msg = "settle with invalid transferred_amount data must fail"
-    with pytest.raises(BrokenPreconditionError, message=msg):
+    with pytest.raises(BrokenPreconditionError):
         c2_token_network_proxy.settle(
             channel_identifier=channel_identifier,
             transferred_amount=invalid_transferred_amount,
@@ -424,6 +437,7 @@ def test_token_network_proxy(
             partner_locksroot=LOCKSROOT_OF_NO_LOCKS,
             given_block_identifier="latest",
         )
+        pytest.fail(msg)
 
     c2_token_network_proxy.settle(
         channel_identifier=channel_identifier,
@@ -449,13 +463,14 @@ def test_token_network_proxy(
 
     msg = "depositing to a settled channel must fail"
     match = "The channel was not opened"
-    with pytest.raises(BrokenPreconditionError, message=msg, match=match):
+    with pytest.raises(BrokenPreconditionError, match=match):
         c1_token_network_proxy.set_total_deposit(
             given_block_identifier="latest",
             channel_identifier=channel_identifier,
             total_deposit=10,
             partner=c2_client.address,
         )
+        pytest.fail(msg)
 
 
 def test_token_network_proxy_update_transfer(
@@ -551,7 +566,7 @@ def test_token_network_proxy_update_transfer(
 
     # close by c1
     closing_data = balance_proof_c2.serialize_bin(
-        msg_type=MessageTypeId.BALANCE_PROOF_UPDATE
+        msg_type=MessageTypeId.BALANCE_PROOF
     ) + decode_hex(balance_proof_c2.signature)
     c1_token_network_proxy.close(
         channel_identifier=channel_identifier,
@@ -783,8 +798,7 @@ def test_token_network_actions_at_pruned_blocks(
         transferred_amount=0,
     )
     closing_data = (
-        empty_balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF_UPDATE)
-        + EMPTY_SIGNATURE
+        empty_balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF) + EMPTY_SIGNATURE
     )
     c1_token_network_proxy.close(
         channel_identifier=channel_identifier,

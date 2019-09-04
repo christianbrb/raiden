@@ -4,17 +4,19 @@ import shutil
 import subprocess
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
-from typing import ContextManager
+from typing import ContextManager, Iterator
 
 import gevent
 import structlog
 from eth_keyfile import create_keyfile_json
 from eth_utils import encode_hex, remove_0x_prefix, to_checksum_address, to_normalized_address
+from pkg_resources import parse_version
 from web3 import Web3
 
 from raiden.tests.fixtures.constants import DEFAULT_PASSPHRASE
 from raiden.tests.utils.genesis import GENESIS_STUB, PARITY_CHAIN_SPEC_STUB
 from raiden.utils import privatekey_to_address, privatekey_to_publickey
+from raiden.utils.ethereum_clients import parse_geth_version
 from raiden.utils.http import JSONRPCExecutor
 from raiden.utils.typing import (
     Address,
@@ -111,7 +113,27 @@ def geth_to_cmd(node: Dict, datadir: str, chain_id: ChainID, verbosity: str) -> 
             value = node[config]
             cmd.extend([f"--{config}", str(value)])
 
-    # dont use the '--dev' flag
+    # Add parameters that are only required in newer versions
+    geth_version_string, _ = subprocess.Popen(
+        ["geth", "version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    ).communicate()
+
+    geth_version_parse = parse_geth_version(geth_version_string.decode())
+
+    if geth_version_parse is None:
+        raise RuntimeError(
+            "Couldn't parse geth version, please double check the binary is "
+            "working properly, otherwise open a bug report to update the "
+            "version format."
+        )
+
+    if geth_version_parse >= parse_version("1.9.0"):
+        # Geth does not normally allow running an unlocked account
+        # with the http interface. But since this a test blockchain we
+        # can override that.
+        cmd.append("--allow-insecure-unlock")
+
+    # don't use the '--dev' flag
     cmd.extend(
         [
             "--nodiscover",
@@ -192,9 +214,9 @@ def geth_keyfile(datadir: str, address: Address) -> str:
     keystore = geth_keystore(datadir)
     os.makedirs(keystore, exist_ok=True)
 
-    address = remove_0x_prefix(to_normalized_address(address))
+    address_hex = remove_0x_prefix(to_normalized_address(address))
     broken_iso_8601 = datetime.now().isoformat().replace(":", "-")
-    account = f"UTC--{broken_iso_8601}000Z--{address}"
+    account = f"UTC--{broken_iso_8601}000Z--{address_hex}"
 
     return os.path.join(keystore, account)
 
@@ -220,7 +242,7 @@ def parity_generate_chain_spec(
     validators = {"list": [to_checksum_address(seal_account)]}
     extra_data = parity_extradata(genesis_description.random_marker)
 
-    chain_spec = PARITY_CHAIN_SPEC_STUB.copy()
+    chain_spec: dict = PARITY_CHAIN_SPEC_STUB.copy()
     chain_spec["params"]["networkID"] = genesis_description.chain_id
     chain_spec["accounts"].update(alloc)
     chain_spec["engine"]["authorityRound"]["params"]["validators"] = validators
@@ -294,7 +316,7 @@ def eth_check_balance(web3: Web3, accounts_addresses: List[Address], retries: in
 
 
 def eth_node_config(
-    miner_pkey: PrivateKey, p2p_port: Port, rpc_port: Port, **extra_config: Dict[str, Any]
+    miner_pkey: PrivateKey, p2p_port: Port, rpc_port: Port, **extra_config: Any
 ) -> Dict[str, Any]:
     address = privatekey_to_address(miner_pkey)
     pub = privatekey_to_publickey(miner_pkey).hex()
@@ -371,7 +393,7 @@ def eth_nodes_to_cmds(
             commandline = parity_to_cmd(config, datadir, chain_id, genesis_file, verbosity)
 
         else:
-            assert False, f"Invalid blockchain type {config.blockchain_type}"
+            assert False, f"Invalid blockchain type {config['blockchain_type']}"
 
         cmds.append(commandline)
 
@@ -388,7 +410,7 @@ def eth_run_nodes(
     random_marker: str,
     verbosity: str,
     logdir: str,
-) -> ContextManager[List[JSONRPCExecutor]]:
+) -> Iterator[List[JSONRPCExecutor]]:
     def _validate_jsonrpc_result(result):
         running_marker = result["extraData"][2 : len(random_marker) + 2]
         if running_marker != random_marker:
@@ -458,7 +480,7 @@ def run_private_blockchain(
     log_dir: str,
     verbosity: str,
     genesis_description: GenesisDescription,
-) -> ContextManager[List[JSONRPCExecutor]]:
+) -> Iterator[List[JSONRPCExecutor]]:
     """ Starts a private network with private_keys accounts funded.
 
     Args:

@@ -1,4 +1,5 @@
-from typing import Callable, Dict, List, Optional, Union
+import uuid
+from typing import Callable, Dict, Iterator, List, Optional, Union
 
 import pytest
 from eth_utils import to_canonical_address
@@ -28,17 +29,21 @@ class DummyUser:
 class DummyMatrixClient:
     def __init__(self, user_id: str, user_directory_content: Optional[List[DummyUser]] = None):
         self.user_id = user_id
-        self._presence_callback = None
+        self._presence_callback: Optional[Callable] = None
         self._user_directory_content = user_directory_content if user_directory_content else []
         # This is only used in `get_user_presence()`
-        self._user_presence = {}
+        self._user_presence: Dict[str, str] = {}
 
-    def add_presence_listener(self, callback: Callable):
+    def add_presence_listener(self, callback: Callable) -> uuid.UUID:
         if self._presence_callback is not None:
             raise RuntimeError("Callback has already been registered")
         self._presence_callback = callback
+        return uuid.uuid4()
 
-    def search_user_directory(self, term: str) -> List[DummyUser]:
+    def remove_presence_listener(self, uid: uuid.UUID) -> None:  # pylint: disable=unused-argument
+        self._presence_callback = None
+
+    def search_user_directory(self, term: str) -> Iterator[DummyUser]:
         for user in self._user_directory_content:
             if term in user.user_id:
                 yield user
@@ -133,13 +138,17 @@ def address_reachability_callback(address_reachability):
 
 @pytest.fixture
 def user_addr_mgr(dummy_matrix_client, address_reachability_callback, user_presence_callback):
-    return NonValidatingUserAddressManager(
+    address_manager = NonValidatingUserAddressManager(
         client=dummy_matrix_client,
         get_user_callable=dummy_get_user,
         address_reachability_changed_callback=address_reachability_callback,
         user_presence_changed_callback=user_presence_callback,
-        stop_event=None,
     )
+    address_manager.start()
+
+    yield address_manager
+
+    address_manager.stop()
 
 
 def test_user_addr_mgr_basics(
@@ -253,13 +262,12 @@ def test_user_addr_mgr_fetch_presence(
 def test_user_addr_mgr_fetch_presence_error(user_addr_mgr, address_reachability, user_presence):
     user_addr_mgr.add_userid_for_address(ADDR1, USER1_S1_ID)
     # We have not provided or forced any explicit user presence,
-    # therefore the client will be queried
+    # therefore the client will be queried and return a 404 since we haven't setup a presence
     user_addr_mgr.refresh_address_presence(ADDR1)
 
     assert user_addr_mgr.get_address_reachability(ADDR1) is AddressReachability.UNKNOWN
     assert len(user_presence) == 0
-    assert len(address_reachability) == 1
-    assert address_reachability[ADDR1] is AddressReachability.UNKNOWN
+    assert len(address_reachability) == 0
 
 
 def test_user_addr_mgr_fetch_misc(

@@ -37,6 +37,7 @@ from raiden.transfer.mediated_transfer.state_change import (
 )
 from raiden.transfer.state_change import Block, ContractReceiveSecretReveal, ReceiveUnlock
 from raiden.utils import typing
+from raiden.utils.typing import TokenAmount
 
 
 def make_target_transfer(channel, amount=None, expiration=None, initiator=None, block_number=1):
@@ -114,12 +115,18 @@ def make_target_state(
 
 channel_properties = NettingChannelStateProperties(
     our_state=NettingChannelEndStateProperties(address=UNIT_TRANSFER_TARGET),
-    partner_state=NettingChannelEndStateProperties(address=UNIT_TRANSFER_SENDER, balance=3),
+    partner_state=NettingChannelEndStateProperties(
+        address=UNIT_TRANSFER_SENDER, balance=TokenAmount(3)
+    ),
 )
 
 channel_properties2 = NettingChannelStateProperties(
-    our_state=NettingChannelEndStateProperties(address=factories.make_address(), balance=100),
-    partner_state=NettingChannelEndStateProperties(address=UNIT_TRANSFER_SENDER, balance=130),
+    our_state=NettingChannelEndStateProperties(
+        address=factories.make_address(), balance=TokenAmount(100)
+    ),
+    partner_state=NettingChannelEndStateProperties(
+        address=UNIT_TRANSFER_SENDER, balance=TokenAmount(130)
+    ),
 )
 
 
@@ -357,8 +364,14 @@ def test_handle_onchain_secretreveal():
     assert EMPTY_SECRET_SHA256 not in unlocked_onchain
 
     # now let's go for the actual secret
-    onchain_reveal.secret = UNIT_SECRET
-    onchain_reveal.secrethash = UNIT_SECRETHASH
+    onchain_reveal = ContractReceiveSecretReveal(
+        transaction_hash=factories.make_address(),
+        secret_registry_address=factories.make_address(),
+        secrethash=UNIT_SECRETHASH,
+        secret=UNIT_SECRET,
+        block_number=block_number_prior_the_expiration,
+        block_hash=factories.make_block_hash(),
+    )
     onchain_secret_reveal_iteration = target.state_transition(
         target_state=offchain_secret_reveal_iteration.new_state,
         state_change=onchain_reveal,

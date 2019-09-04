@@ -17,6 +17,7 @@ from mirakuru.exceptions import AlreadyRunning, ProcessExitedWithError, TimeoutE
 from mirakuru.http import HTTPConnection, HTTPException, HTTPExecutor as MiHTTPExecutor
 
 T_IO_OR_INT = Union[IO, int]
+EXECUTOR_IO = Union[int, Tuple[T_IO_OR_INT, T_IO_OR_INT, T_IO_OR_INT]]
 
 log = structlog.get_logger(__name__)
 
@@ -30,7 +31,7 @@ class HTTPExecutor(MiHTTPExecutor):
         url: str,
         status: str = r"^2\d\d$",
         method: str = "HEAD",
-        io: Optional[Union[int, Tuple[T_IO_OR_INT, T_IO_OR_INT, T_IO_OR_INT]]] = None,
+        io: Optional[EXECUTOR_IO] = None,
         cwd: Union[str, PathLike] = None,
         verify_tls: bool = True,
         **kwargs,
@@ -127,17 +128,22 @@ class HTTPExecutor(MiHTTPExecutor):
     def kill(self):
         STDOUT = subprocess.STDOUT  # pylint: disable=no-member
 
-        ps_fax = subprocess.check_output(["ps", "fax"], stderr=STDOUT)
+        ps_param = "fax"
+        if platform.system() == "Darwin":
+            # BSD ``ps`` doesn't support the ``f`` flag
+            ps_param = "ax"
+
+        ps_fax = subprocess.check_output(["ps", ps_param], stderr=STDOUT)
 
         log.debug("Executor process: killing process", command=self.command)
-        log.debug("EXecutor process: current processes", ps_fax=ps_fax)
+        log.debug("Executor process: current processes", ps_fax=ps_fax)
 
         super().kill()
 
-        ps_fax = subprocess.check_output(["ps", "fax"], stderr=STDOUT)
+        ps_fax = subprocess.check_output(["ps", ps_param], stderr=STDOUT)
 
         log.debug("Executor process: process killed", command=self.command)
-        log.debug("EXecutor process: current processes", ps_fax=ps_fax)
+        log.debug("Executor process: current processes", ps_fax=ps_fax)
 
     def wait_for(self, wait_for):
         while self.check_timeout():

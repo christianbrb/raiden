@@ -5,13 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import requests
-from eth_utils import (
-    is_checksum_address,
-    is_hex,
-    is_hex_address,
-    to_canonical_address,
-    to_checksum_address,
-)
+from eth_utils import is_checksum_address, is_hex, is_hex_address, to_checksum_address
 
 from raiden.constants import RoutingMode
 from raiden.exceptions import ServiceRequestFailed, ServiceRequestIOURejected
@@ -23,7 +17,6 @@ from raiden.network.pathfinding import (
     PFSError,
     PFSInfo,
     get_last_iou,
-    get_pfs_info,
     make_iou,
     post_pfs_feedback,
     query_paths,
@@ -31,11 +24,7 @@ from raiden.network.pathfinding import (
 )
 from raiden.routing import get_best_routes
 from raiden.tests.utils import factories
-from raiden.tests.utils.mocks import (
-    mocked_failed_response,
-    mocked_json_response,
-    patched_get_for_succesful_pfs_info,
-)
+from raiden.tests.utils.mocks import mocked_failed_response, mocked_json_response
 from raiden.transfer.state import (
     NODE_NETWORK_REACHABLE,
     NODE_NETWORK_UNREACHABLE,
@@ -83,12 +72,23 @@ def create_square_network_topology(
     # (2)  ----- 100 --->  (3) <-------100---
 
     routes = [
-        factories.RouteProperties(address1=our_address, address2=address1, capacity1to2=50),
-        factories.RouteProperties(address1=our_address, address2=address2, capacity1to2=100),
-        factories.RouteProperties(address1=address4, address2=address1, capacity1to2=50),
-        factories.RouteProperties(address1=address2, address2=address3, capacity1to2=100),
         factories.RouteProperties(
-            address1=address3, address2=address4, capacity1to2=100, capacity2to1=100
+            address1=our_address, address2=address1, capacity1to2=TokenAmount(50)
+        ),
+        factories.RouteProperties(
+            address1=our_address, address2=address2, capacity1to2=TokenAmount(100)
+        ),
+        factories.RouteProperties(
+            address1=address4, address2=address1, capacity1to2=TokenAmount(50)
+        ),
+        factories.RouteProperties(
+            address1=address2, address2=address3, capacity1to2=TokenAmount(100)
+        ),
+        factories.RouteProperties(
+            address1=address3,
+            address2=address4,
+            capacity1to2=TokenAmount(100),
+            capacity2to1=TokenAmount(100),
         ),
     ]
 
@@ -107,12 +107,11 @@ PFS_CONFIG = PFSConfig(
         url="abc",
         price=TokenAmount(12),
         chain_id=ChainID(42),
-        token_network_registry_address=factories.make_token_network_address(),
+        token_network_registry_address=factories.make_token_network_registry_address(),
         payment_address=factories.make_address(),
         message="",
         operator="",
         version="",
-        settings="",
     ),
     maximum_fee=TokenAmount(100),
     iou_timeout=BlockNumber(100),
@@ -158,29 +157,6 @@ def get_best_routes_with_iou_request_mocked(
         )
         assert_checksum_address_in_url(patched.call_args[0][0])
         return best_routes, feedback_token
-
-
-def test_get_pfs_info_success():
-    with patched_get_for_succesful_pfs_info():
-        pfs_info = get_pfs_info("url")
-
-        req_registry_address = to_canonical_address("0xB9633dd9a9a71F22C933bF121d7a22008f66B908")
-
-        assert isinstance(pfs_info, PFSInfo)
-        assert pfs_info.price == 5
-        assert pfs_info.chain_id == 42
-        assert pfs_info.token_network_registry_address == req_registry_address
-        assert pfs_info.message == "This is your favorite pathfinding service"
-        assert pfs_info.operator == "John Doe"
-        assert pfs_info.version == "0.0.1"
-        assert pfs_info.settings == ""
-
-
-def test_get_pfs_info_request_error():
-    with patch.object(requests, "get", side_effect=requests.RequestException()):
-        pathfinding_service_info = get_pfs_info("url")
-
-    assert pathfinding_service_info is None
 
 
 @pytest.fixture
@@ -656,7 +632,7 @@ def test_update_iou():
 def assert_failed_pfs_request(
     paths_args: typing.Dict[str, typing.Any],
     responses: typing.List[typing.Dict],
-    status_codes: typing.List[int] = (400, 400),
+    status_codes: typing.Sequence[int] = (400, 400),
     expected_requests: int = MAX_PATHS_QUERY_ATTEMPTS,
     expected_get_iou_requests: int = None,
     expected_success: bool = False,
@@ -870,7 +846,7 @@ def test_post_pfs_feedback(query_paths_args):
             token_network_address=token_network_address,
             route=route,
             token=feedback_token,
-            succesful=True,
+            successful=True,
         )
 
         assert feedback.called
@@ -888,7 +864,7 @@ def test_post_pfs_feedback(query_paths_args):
             token_network_address=token_network_address,
             route=route,
             token=feedback_token,
-            succesful=False,
+            successful=False,
         )
 
         assert feedback.called
@@ -906,7 +882,7 @@ def test_post_pfs_feedback(query_paths_args):
             token_network_address=token_network_address,
             route=route,
             token=feedback_token,
-            succesful=False,
+            successful=False,
         )
 
         assert not feedback.called
@@ -924,7 +900,6 @@ def test_no_iou_when_pfs_price_0(query_paths_args):
             message="",
             operator="",
             version="",
-            settings="",
         ),
         maximum_fee=TokenAmount(100),
         iou_timeout=BlockNumber(100),

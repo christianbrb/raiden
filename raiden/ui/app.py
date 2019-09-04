@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 import click
 import filelock
 import structlog
-from eth_utils import to_canonical_address, to_normalized_address
+from eth_utils import to_canonical_address, to_checksum_address
 from web3 import HTTPProvider, Web3
 
 from raiden.accounts import AccountManager
@@ -26,11 +26,14 @@ from raiden.raiden_event_handler import EventHandler, PFSFeedbackEventHandler, R
 from raiden.settings import (
     DEFAULT_HTTP_SERVER_PORT,
     DEFAULT_MATRIX_KNOWN_SERVERS,
+    DEFAULT_MEDIATION_PROPORTIONAL_FEE,
+    DEFAULT_MEDIATION_PROPORTIONAL_IMBALANCE_FEE,
     DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
+    MediationFeeConfig,
 )
-from raiden.transfer.mediated_transfer.mediation_fee import FeeScheduleState
 from raiden.ui.checks import (
     check_ethereum_client_is_supported,
+    check_ethereum_confirmed_block_is_not_pruned,
     check_ethereum_has_accounts,
     check_ethereum_network_id,
     check_sql_version,
@@ -52,6 +55,9 @@ from raiden.utils.typing import (
     Optional,
     Port,
     PrivateKey,
+    ProportionalFeeAmount,
+    TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
     Tuple,
 )
 from raiden_contracts.constants import (
@@ -96,7 +102,7 @@ def get_account_and_private_key(
     if not address:
         address_hex = prompt_account(account_manager)
     else:
-        address_hex = to_normalized_address(address)
+        address_hex = to_checksum_address(address)
 
     if password_file:
         privatekey_bin = unlock_account_with_passwordfile(
@@ -124,7 +130,7 @@ def run_app(
     keystore_path: str,
     gas_price: Callable,
     eth_rpc_endpoint: str,
-    tokennetwork_registry_contract_address: Address,
+    tokennetwork_registry_contract_address: TokenNetworkRegistryAddress,
     one_to_n_contract_address: Address,
     secret_registry_contract_address: Address,
     service_registry_contract_address: Address,
@@ -148,13 +154,12 @@ def run_app(
     resolver_endpoint: str,
     routing_mode: RoutingMode,
     config: Dict[str, Any],
-    flat_fee: FeeAmount,
-    proportional_fee: int,
-    max_imbalance_fee: FeeAmount,
+    flat_fee: Tuple[Tuple[TokenNetworkAddress, FeeAmount], ...],
+    proportional_fee: ProportionalFeeAmount,
+    proportional_imbalance_fee: ProportionalFeeAmount,
     **kwargs: Any,  # FIXME: not used here, but still receives stuff in smoketest
 ):
     # pylint: disable=too-many-locals,too-many-branches,too-many-statements,unused-argument
-
     from raiden.app import App
 
     if datadir is None:
@@ -168,12 +173,22 @@ def run_app(
     check_ethereum_client_is_supported(web3)
     check_ethereum_network_id(network_id, web3)
 
-    address, privatekey_bin = get_account_and_private_key(account_manager, address, password_file)
+    address, privatekey = get_account_and_private_key(account_manager, address, password_file)
 
     api_host, api_port = split_endpoint(api_address)
 
     if not api_port:
         api_port = Port(DEFAULT_HTTP_SERVER_PORT)
+
+    # Store the flat fee settings for the given token networks
+    token_network_to_flat_fee: Dict[TokenNetworkAddress, FeeAmount] = {
+        address: fee for address, fee in flat_fee
+    }
+    fee_config = MediationFeeConfig(
+        token_network_to_flat_fee=token_network_to_flat_fee,
+        proportional_fee=proportional_fee,
+        proportional_imbalance_fee=proportional_imbalance_fee,
+    )
 
     config["console"] = console
     config["rpc"] = rpc
@@ -187,16 +202,15 @@ def run_app(
     config["services"]["pathfinding_max_paths"] = pathfinding_max_paths
     config["services"]["monitoring_enabled"] = enable_monitoring
     config["chain_id"] = network_id
-    config["default_fee_schedule"] = FeeScheduleState(flat=flat_fee, proportional=proportional_fee)
-    config["max_imbalance_fee"] = max_imbalance_fee
+    config["mediation_fees"] = fee_config
 
     setup_environment(config, environment_type)
 
     contracts = setup_contracts_or_exit(config, network_id)
 
     rpc_client = JSONRPCClient(
-        web3,
-        privatekey_bin,
+        web3=web3,
+        privkey=privatekey,
         gas_price_strategy=gas_price,
         block_num_confirmations=DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
         uses_infura="infura.io" in eth_rpc_endpoint,
@@ -221,6 +235,12 @@ def run_app(
         pathfinding_service_address=pathfinding_service_address,
     )
 
+    check_ethereum_confirmed_block_is_not_pruned(
+        jsonrpc_client=rpc_client,
+        secret_registry=proxies.secret_registry,
+        confirmation_blocks=config["blockchain"]["confirmation_blocks"],
+    )
+
     database_path = os.path.join(
         datadir,
         f"node_{pex(address)}",
@@ -237,13 +257,28 @@ def run_app(
     )
 
     if transport == "matrix":
-        transport = _setup_matrix(config, routing_mode)
+        matrix_transport = _setup_matrix(config, routing_mode)
     else:
         raise RuntimeError(f'Unknown transport type "{transport}" given')
 
     event_handler: EventHandler = RaidenEventHandler()
 
-    # Only send feedback when PFS was used
+    # User should be told how to set fees, if using default fee settings
+    log.debug("Fee Settings", fee_settings=fee_config)
+    has_default_fees = (
+        len(fee_config.token_network_to_flat_fee) == 0
+        and fee_config.proportional_fee == DEFAULT_MEDIATION_PROPORTIONAL_FEE
+        and fee_config.proportional_imbalance_fee == DEFAULT_MEDIATION_PROPORTIONAL_IMBALANCE_FEE
+    )
+    if has_default_fees:
+        click.secho(
+            "Default fee settings are used. "
+            "If you want use Raiden with mediation fees - flat, proportional and imbalance fees - "
+            "see https://raiden-network.readthedocs.io/en/latest/overview_and_guide.html#firing-it-up",  # noqa: E501
+            fg="yellow",
+        )
+
+    # Only send feedback when PFS is used
     if routing_mode == RoutingMode.PFS:
         event_handler = PFSFeedbackEventHandler(event_handler)
 
@@ -268,7 +303,7 @@ def run_app(
                 monitoring_service_contract_address
                 or contracts[CONTRACT_MONITORING_SERVICE]["address"]
             ),
-            transport=transport,
+            transport=matrix_transport,
             raiden_event_handler=event_handler,
             message_handler=message_handler,
             routing_mode=routing_mode,
@@ -287,7 +322,7 @@ def run_app(
         name_or_id = ID_TO_NETWORKNAME.get(network_id, network_id)
         click.secho(
             f"FATAL: Another Raiden instance already running for account "
-            f"{to_normalized_address(address)} on network id {name_or_id}",
+            f"{to_checksum_address(address)} on network id {name_or_id}",
             fg="red",
         )
         sys.exit(1)

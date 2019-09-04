@@ -1,8 +1,9 @@
 from random import shuffle
+from typing import TYPE_CHECKING, List
 
 import gevent
 import structlog
-from eth_utils import decode_hex, to_checksum_address
+from eth_utils import to_canonical_address, to_checksum_address
 from gevent.lock import Semaphore
 
 from raiden import waiting
@@ -18,10 +19,21 @@ from raiden.exceptions import (
     RaidenRecoverableError,
     RaidenUnrecoverableError,
     TransactionThrew,
+    UnexpectedChannelState,
 )
 from raiden.transfer import views
+from raiden.transfer.state import NettingChannelState
 from raiden.utils import typing
-from raiden.utils.typing import Address, TokenAmount, TokenNetworkAddress
+from raiden.utils.typing import (
+    Address,
+    TokenAddress,
+    TokenAmount,
+    TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
+)
+
+if TYPE_CHECKING:
+    from raiden.raiden_service import RaidenService
 
 log = structlog.get_logger(__name__)
 RECOVERABLE_ERRORS = (
@@ -30,14 +42,20 @@ RECOVERABLE_ERRORS = (
     InsufficientFunds,
     RaidenRecoverableError,
     TransactionThrew,
+    UnexpectedChannelState,
 )
 
 
-def log_open_channels(raiden, registry_address, token_address, funds):  # pragma: no unittest
+def log_open_channels(
+    raiden: "RaidenService",
+    registry_address: TokenNetworkRegistryAddress,
+    token_address: TokenAddress,
+    funds: TokenAmount,
+) -> None:  # pragma: no unittest
     chain_state = views.state_from_raiden(raiden)
     open_channels = views.get_channelstate_open(
         chain_state=chain_state,
-        payment_network_address=registry_address,
+        token_network_registry_address=registry_address,
         token_address=token_address,
     )
 
@@ -67,10 +85,10 @@ class ConnectionManager:  # pragma: no unittest
 
     # XXX Hack: for bootstrapping, the first node on a network opens a channel
     # with this address to become visible.
-    BOOTSTRAP_ADDR_HEX = "2" * 40
-    BOOTSTRAP_ADDR = decode_hex(BOOTSTRAP_ADDR_HEX)
+    BOOTSTRAP_ADDR_HEX = to_checksum_address("2" * 40)
+    BOOTSTRAP_ADDR = to_canonical_address(BOOTSTRAP_ADDR_HEX)
 
-    def __init__(self, raiden, token_network_address: TokenNetworkAddress):
+    def __init__(self, raiden: "RaidenService", token_network_address: TokenNetworkAddress):
         self.raiden = raiden
         chain_state = views.state_from_raiden(raiden)
         token_network_state = views.get_token_network_by_address(
@@ -104,7 +122,7 @@ class ConnectionManager:  # pragma: no unittest
         funds: typing.TokenAmount,
         initial_channel_target: int = 3,
         joinable_funds_target: float = 0.4,
-    ):
+    ) -> None:
         """Connect to the network.
 
         Subsequent calls to `connect` are allowed, but will only affect the spendable
@@ -160,7 +178,7 @@ class ConnectionManager:  # pragma: no unittest
             else:
                 self._open_channels()
 
-    def leave(self, registry_address):
+    def leave(self, registry_address: TokenNetworkRegistryAddress) -> List[NettingChannelState]:
         """ Leave the token network.
 
         This implies closing all channels and waiting for all channels to be
@@ -171,7 +189,7 @@ class ConnectionManager:  # pragma: no unittest
 
             channels_to_close = views.get_channelstate_open(
                 chain_state=views.state_from_raiden(self.raiden),
-                payment_network_address=registry_address,
+                token_network_registry_address=registry_address,
                 token_address=self.token_address,
             )
 
@@ -192,7 +210,7 @@ class ConnectionManager:  # pragma: no unittest
 
         return channels_to_close
 
-    def join_channel(self, partner_address, partner_deposit):
+    def join_channel(self, partner_address: Address, partner_deposit: TokenAmount) -> None:
         """Will be called, when we were selected as channel partner by another
         node. It will fund the channel with up to the partners deposit, but
         not more than remaining funds or the initial funding per channel.
@@ -218,10 +236,10 @@ class ConnectionManager:  # pragma: no unittest
         # deciding on the deposit
         with self.lock, token_network_proxy.channel_operations_lock[partner_address]:
             channel_state = views.get_channelstate_for(
-                views.state_from_raiden(self.raiden),
-                self.token_network_address,
-                self.token_address,
-                partner_address,
+                chain_state=views.state_from_raiden(self.raiden),
+                token_network_registry_address=self.registry_address,
+                token_address=self.token_address,
+                partner_address=partner_address,
             )
 
             if not channel_state:
@@ -263,7 +281,7 @@ class ConnectionManager:  # pragma: no unittest
                     funds=joining_funds,
                 )
 
-    def retry_connect(self):
+    def retry_connect(self) -> None:
         """Will be called when new channels in the token network are detected.
         If the minimum number of channels was not yet established, it will try
         to open new channels.
@@ -274,11 +292,11 @@ class ConnectionManager:  # pragma: no unittest
             if self._funds_remaining > 0 and not self._leaving_state:
                 self._open_channels()
 
-    def _find_new_partners(self):
+    def _find_new_partners(self) -> List[Address]:
         """ Search the token network for potential channel partners. """
         open_channels = views.get_channelstate_open(
             chain_state=views.state_from_raiden(self.raiden),
-            payment_network_address=self.registry_address,
+            token_network_registry_address=self.registry_address,
             token_address=self.token_address,
         )
         known = set(channel_state.partner_state.address for channel_state in open_channels)
@@ -301,8 +319,13 @@ class ConnectionManager:  # pragma: no unittest
 
         return new_partners
 
-    def _join_partner(self, partner: Address):
+    def _join_partner(self, partner: Address) -> None:
         """ Ensure a channel exists with partner and is funded in our side """
+        log.info(
+            "Trying to join or fund channel with partner further",
+            node=to_checksum_address(self.raiden.address),
+            partner=to_checksum_address(partner),
+        )
         try:
             self.api.channel_open(self.registry_address, self.token_address, partner)
         except DuplicatedChannelError:
@@ -355,7 +378,7 @@ class ConnectionManager:  # pragma: no unittest
 
         open_channels = views.get_channelstate_open(
             chain_state=views.state_from_raiden(self.raiden),
-            payment_network_address=self.registry_address,
+            token_network_registry_address=self.registry_address,
             token_address=self.token_address,
         )
         open_channels = [
@@ -453,10 +476,10 @@ class ConnectionManager:  # pragma: no unittest
             )
         open_channels = views.get_channelstate_open(
             chain_state=views.state_from_raiden(self.raiden),
-            payment_network_address=self.registry_address,
+            token_network_registry_address=self.registry_address,
             token_address=self.token_address,
         )
         return (
             f"{self.__class__.__name__}(target={self.initial_channel_target} "
-            + f"channels={len(open_channels)}:{open_channels!r})"
+            + f"open_channels={len(open_channels)}:{open_channels!r})"
         )

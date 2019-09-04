@@ -1,5 +1,7 @@
 from typing import *  # NOQA pylint:disable=wildcard-import,unused-wildcard-import
-from typing import TYPE_CHECKING, Any, Dict, List, NewType, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, List, NewType, Tuple, Type, Union
+
+from eth_typing import Address, ChecksumAddress
 
 from raiden_contracts.contract_manager import CompiledContract  # NOQA pylint:disable=unused-import
 from raiden_contracts.utils.type_aliases import (  # NOQA pylint:disable=unused-import
@@ -28,17 +30,15 @@ MYPY_ANNOTATION = "This assert is used to tell mypy what is the type of the vari
 
 def typecheck(value: Any, expected: Type):
     if not isinstance(value, expected):
-        raise ValueError(f"Expected a value of type {expected}")
+        raise ValueError(f"Expected a value of type {expected}, got value of type {type(value)}")
 
 
 ABI = List[Dict[str, Any]]
 BlockchainEvent = Dict[str, Any]
 
 T_Address = bytes
-Address = NewType("Address", T_Address)
 
-T_AddressHex = str
-AddressHex = NewType("AddressHex", T_AddressHex)
+AddressHex = ChecksumAddress
 
 # An absolute number of blocks
 T_BlockExpiration = int
@@ -103,14 +103,19 @@ PublicKey = NewType("PublicKey", T_PublicKey)
 T_FeeAmount = int
 FeeAmount = NewType("FeeAmount", T_FeeAmount)
 
+# A proportional fee, unit is parts-per-million
+# 1_000_000 means 100%, 25_000 is 2.5%
+T_ProportionalFeeAmount = int
+ProportionalFeeAmount = NewType("ProportionalFeeAmount", T_ProportionalFeeAmount)
+
 T_LockedAmount = int
 LockedAmount = NewType("LockedAmount", T_LockedAmount)
 
 T_PaymentWithFeeAmount = int
 PaymentWithFeeAmount = NewType("PaymentWithFeeAmount", T_FeeAmount)
 
-T_PaymentNetworkAddress = bytes
-PaymentNetworkAddress = NewType("PaymentNetworkAddress", T_PaymentNetworkAddress)
+T_TokenNetworkRegistryAddress = bytes
+TokenNetworkRegistryAddress = NewType("TokenNetworkRegistryAddress", T_TokenNetworkRegistryAddress)
 
 T_RaidenProtocolVersion = int
 RaidenProtocolVersion = NewType("RaidenProtocolVersion", T_RaidenProtocolVersion)
@@ -156,9 +161,6 @@ EncodedData = NewType("EncodedData", T_EncodedData)
 
 T_WithdrawAmount = int
 WithdrawAmount = NewType("WithdrawAmount", T_WithdrawAmount)
-
-# This should be changed to `Optional[str]`
-SuccessOrError = Tuple[bool, Optional[str]]
 
 BlockSpecification = Union[str, T_BlockNumber, T_BlockHash]
 

@@ -1,24 +1,37 @@
+from enum import Enum
 from typing import TYPE_CHECKING, List
 
 import gevent
 import structlog
 from eth_utils import to_checksum_address
 
+from raiden.storage.restore import get_state_change_with_transfer_by_secrethash
 from raiden.transfer import channel, views
 from raiden.transfer.events import EventPaymentReceivedSuccess
 from raiden.transfer.identifiers import CanonicalIdentifier
-from raiden.transfer.state import CHANNEL_AFTER_CLOSE_STATES, NODE_NETWORK_REACHABLE, ChannelState
-from raiden.transfer.state_change import ContractReceiveChannelWithdraw
+from raiden.transfer.mediated_transfer.events import EventUnlockClaimFailed
+from raiden.transfer.mediated_transfer.state_change import ActionInitMediator, ActionInitTarget
+from raiden.transfer.state import (
+    CHANNEL_AFTER_CLOSE_STATES,
+    NODE_NETWORK_REACHABLE,
+    ChannelState,
+    NettingChannelEndState,
+)
+from raiden.transfer.state_change import (
+    ContractReceiveChannelWithdraw,
+    ContractReceiveSecretReveal,
+)
 from raiden.utils.typing import (
     Address,
     BlockNumber,
     ChannelID,
     PaymentAmount,
     PaymentID,
-    PaymentNetworkAddress,
+    SecretHash,
     Sequence,
     TokenAddress,
     TokenAmount,
+    TokenNetworkRegistryAddress,
     WithdrawAmount,
 )
 
@@ -51,7 +64,7 @@ def wait_for_block(
 
 def wait_for_newchannel(
     raiden: "RaidenService",
-    payment_network_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_address: TokenAddress,
     partner_address: Address,
     retry_timeout: float,
@@ -62,12 +75,15 @@ def wait_for_newchannel(
         This does not time out, use gevent.Timeout.
     """
     channel_state = views.get_channelstate_for(
-        views.state_from_raiden(raiden), payment_network_address, token_address, partner_address
+        views.state_from_raiden(raiden),
+        token_network_registry_address,
+        token_address,
+        partner_address,
     )
 
     log_details = {
         "node": to_checksum_address(raiden.address),
-        "payment_network_address": to_checksum_address(payment_network_address),
+        "token_network_registry_address": to_checksum_address(token_network_registry_address),
         "token_address": to_checksum_address(token_address),
         "partner_address": to_checksum_address(partner_address),
     }
@@ -79,7 +95,7 @@ def wait_for_newchannel(
         gevent.sleep(retry_timeout)
         channel_state = views.get_channelstate_for(
             views.state_from_raiden(raiden),
-            payment_network_address,
+            token_network_registry_address,
             token_address,
             partner_address,
         )
@@ -87,7 +103,7 @@ def wait_for_newchannel(
 
 def wait_for_participant_deposit(
     raiden: "RaidenService",
-    payment_network_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_address: TokenAddress,
     partner_address: Address,
     target_address: Address,
@@ -107,13 +123,16 @@ def wait_for_participant_deposit(
         raise ValueError("target_address must be one of the channel participants")
 
     channel_state = views.get_channelstate_for(
-        views.state_from_raiden(raiden), payment_network_address, token_address, partner_address
+        views.state_from_raiden(raiden),
+        token_network_registry_address,
+        token_address,
+        partner_address,
     )
     current_balance = balance(channel_state)
 
     log_details = {
         "node": to_checksum_address(raiden.address),
-        "payment_network_address": to_checksum_address(payment_network_address),
+        "token_network_registry_address": to_checksum_address(token_network_registry_address),
         "token_address": to_checksum_address(token_address),
         "partner_address": to_checksum_address(partner_address),
         "target_address": to_checksum_address(target_address),
@@ -127,7 +146,7 @@ def wait_for_participant_deposit(
         gevent.sleep(retry_timeout)
         channel_state = views.get_channelstate_for(
             views.state_from_raiden(raiden),
-            payment_network_address,
+            token_network_registry_address,
             token_address,
             partner_address,
         )
@@ -136,7 +155,7 @@ def wait_for_participant_deposit(
 
 def wait_for_payment_balance(
     raiden: "RaidenService",
-    payment_network_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_address: TokenAddress,
     partner_address: Address,
     target_address: Address,
@@ -149,11 +168,11 @@ def wait_for_payment_balance(
         This does not time out, use gevent.Timeout.
     """
 
-    def get_balance(end_state):
+    def get_balance(end_state: NettingChannelEndState) -> TokenAmount:
         if end_state.balance_proof:
             return end_state.balance_proof.transferred_amount
         else:
-            return 0
+            return TokenAmount(0)
 
     if target_address == raiden.address:
         balance = lambda channel_state: get_balance(channel_state.partner_state)
@@ -163,12 +182,15 @@ def wait_for_payment_balance(
         raise ValueError("target_address must be one of the channel participants")
 
     channel_state = views.get_channelstate_for(
-        views.state_from_raiden(raiden), payment_network_address, token_address, partner_address
+        views.state_from_raiden(raiden),
+        token_network_registry_address,
+        token_address,
+        partner_address,
     )
     current_balance = balance(channel_state)
 
     log_details = {
-        "payment_network_address": to_checksum_address(payment_network_address),
+        "token_network_registry_address": to_checksum_address(token_network_registry_address),
         "token_address": to_checksum_address(token_address),
         "partner_address": to_checksum_address(partner_address),
         "target_address": to_checksum_address(target_address),
@@ -182,7 +204,7 @@ def wait_for_payment_balance(
         gevent.sleep(retry_timeout)
         channel_state = views.get_channelstate_for(
             views.state_from_raiden(raiden),
-            payment_network_address,
+            token_network_registry_address,
             token_address,
             partner_address,
         )
@@ -191,7 +213,7 @@ def wait_for_payment_balance(
 
 def wait_for_channel_in_states(
     raiden: "RaidenService",
-    payment_network_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_address: TokenAddress,
     channel_ids: List[ChannelID],
     retry_timeout: float,
@@ -201,7 +223,7 @@ def wait_for_channel_in_states(
 
     Raises:
         ValueError: If the token_address is not registered in the
-            payment_network.
+            token_network_registry.
 
     Note:
         This does not time out, use gevent.Timeout.
@@ -209,14 +231,14 @@ def wait_for_channel_in_states(
     chain_state = views.state_from_raiden(raiden)
     token_network = views.get_token_network_by_token_address(
         chain_state=chain_state,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
     )
 
     if token_network is None:
         raise ValueError(
             f"The token {token_address} is not registered on "
-            f"the network {payment_network_address}."
+            f"the network {token_network_registry_address}."
         )
 
     token_network_address = token_network.address
@@ -231,7 +253,7 @@ def wait_for_channel_in_states(
     ]
 
     log_details = {
-        "payment_network_address": to_checksum_address(payment_network_address),
+        "token_network_registry_address": to_checksum_address(token_network_registry_address),
         "token_address": to_checksum_address(token_address),
         "list_cannonical_ids": list_cannonical_ids,
         "target_states": target_states,
@@ -261,7 +283,7 @@ def wait_for_channel_in_states(
 
 def wait_for_close(
     raiden: "RaidenService",
-    payment_network_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_address: TokenAddress,
     channel_ids: List[ChannelID],
     retry_timeout: float,
@@ -273,7 +295,7 @@ def wait_for_close(
     """
     return wait_for_channel_in_states(
         raiden=raiden,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
         channel_ids=channel_ids,
         retry_timeout=retry_timeout,
@@ -281,33 +303,38 @@ def wait_for_close(
     )
 
 
-def wait_for_payment_network(
+def wait_for_token_network(
     raiden: "RaidenService",
-    payment_network_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_address: TokenAddress,
     retry_timeout: float,
 ) -> None:  # pragma: no unittest
+    """Wait until the token network is visible to the RaidenService.
+
+    Note:
+        This does not time out, use gevent.Timeout.
+    """
     token_network = views.get_token_network_by_token_address(
-        views.state_from_raiden(raiden), payment_network_address, token_address
+        views.state_from_raiden(raiden), token_network_registry_address, token_address
     )
     log_details = {
-        "payment_network_address": to_checksum_address(payment_network_address),
+        "token_network_registry_address": to_checksum_address(token_network_registry_address),
         "token_address": to_checksum_address(token_address),
     }
     while token_network is None:
         assert raiden, ALARM_TASK_ERROR_MSG
         assert raiden.alarm, ALARM_TASK_ERROR_MSG
 
-        log.debug("wait_for_payment_network", **log_details)
+        log.debug("wait_for_token_network", **log_details)
         gevent.sleep(retry_timeout)
         token_network = views.get_token_network_by_token_address(
-            views.state_from_raiden(raiden), payment_network_address, token_address
+            views.state_from_raiden(raiden), token_network_registry_address, token_address
         )
 
 
 def wait_for_settle(
     raiden: "RaidenService",
-    payment_network_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_address: TokenAddress,
     channel_ids: List[ChannelID],
     retry_timeout: float,
@@ -319,7 +346,7 @@ def wait_for_settle(
     """
     return wait_for_channel_in_states(
         raiden=raiden,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
         channel_ids=channel_ids,
         retry_timeout=retry_timeout,
@@ -364,37 +391,76 @@ def wait_for_healthy(
     wait_for_network_state(raiden, node_address, NODE_NETWORK_REACHABLE, retry_timeout)
 
 
-def wait_for_transfer_success(
+class TransferWaitResult(Enum):
+    SECRET_REGISTERED_ONCHAIN = "secret registered onchain"
+    UNLOCKED = "unlocked"
+    UNLOCK_FAILED = "unlock_failed"
+
+
+def wait_for_received_transfer_result(
     raiden: "RaidenService",
     payment_identifier: PaymentID,
     amount: PaymentAmount,
     retry_timeout: float,
-) -> None:  # pragma: no unittest
-    """Wait until a transfer with a specific identifier and amount
-    is seen in the WAL.
+    secrethash: SecretHash,
+) -> TransferWaitResult:  # pragma: no unittest
+    """Wait for the result of a transfer with the specified identifier
+    and/or secrethash. Possible results are onchain secret registration,
+    successful unlock and failed unlock. For a successful unlock, the
+    amount is also checked.
 
     Note:
         This does not time out, use gevent.Timeout.
     """
     log_details = {"payment_identifier": payment_identifier, "amount": amount}
-    found = False
-    while not found:
+    result = None
+    while result is None:
         assert raiden, TRANSPORT_ERROR_MSG
         assert raiden.wal, TRANSPORT_ERROR_MSG
         assert raiden.transport, TRANSPORT_ERROR_MSG
 
         state_events = raiden.wal.storage.get_events()
         for event in state_events:
-            found = (
+            unlocked = (
                 isinstance(event, EventPaymentReceivedSuccess)
                 and event.identifier == payment_identifier
                 and event.amount == amount
             )
-            if found:
+            if unlocked:
+                result = TransferWaitResult.UNLOCKED
+                break
+            claim_failed = (
+                isinstance(event, EventUnlockClaimFailed)
+                and event.identifier == payment_identifier
+                and event.secrethash == secrethash
+            )
+            if claim_failed:
+                result = TransferWaitResult.UNLOCK_FAILED
                 break
 
-        log.debug("wait_for_transfer_success", **log_details)
+        state_changes = raiden.wal.storage.get_state_changes()
+        for state_change in state_changes:
+            registered_onchain = (
+                isinstance(state_change, ContractReceiveSecretReveal)
+                and state_change.secrethash == secrethash
+            )
+            if registered_onchain:
+                state_change_with_transfer = get_state_change_with_transfer_by_secrethash(
+                    raiden.wal.storage, secrethash
+                )
+                msg = "Expected ActionInitMediator/ActionInitTarget not found in state changes."
+                expected_types = (ActionInitMediator, ActionInitTarget)
+                assert isinstance(state_change_with_transfer, expected_types), msg
+                transfer = state_change_with_transfer.data.transfer
+
+                if raiden.get_block_number() <= transfer.lock.expiration:
+                    result = TransferWaitResult.SECRET_REGISTERED_ONCHAIN
+                    break
+
+        log.debug("wait_for_transfer_result", **log_details)
         gevent.sleep(retry_timeout)
+
+    return result
 
 
 def wait_for_withdraw_complete(
@@ -403,7 +469,7 @@ def wait_for_withdraw_complete(
     total_withdraw: WithdrawAmount,
     retry_timeout: float,
 ) -> None:
-    """Wait until a transfer with a specific identifier and amount
+    """Wait until a withdraw with a specific identifier and amount
     is seen in the WAL.
 
     Note:

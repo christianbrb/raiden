@@ -8,7 +8,13 @@ from random import Random
 import networkx
 from eth_utils import to_checksum_address, to_hex
 
-from raiden.constants import EMPTY_SECRETHASH, LOCKSROOT_OF_NO_LOCKS, UINT64_MAX, UINT256_MAX
+from raiden.constants import (
+    EMPTY_SECRETHASH,
+    LOCKSROOT_OF_NO_LOCKS,
+    NULL_ADDRESS_BYTES,
+    UINT64_MAX,
+    UINT256_MAX,
+)
 from raiden.transfer.architecture import (
     BalanceProofSignedState,
     BalanceProofUnsignedState,
@@ -37,7 +43,6 @@ from raiden.utils.typing import (
     MessageID,
     Nonce,
     Optional,
-    PaymentNetworkAddress,
     PaymentWithFeeAmount,
     Secret,
     SecretHash,
@@ -52,6 +57,7 @@ from raiden.utils.typing import (
     TokenAddress,
     TokenAmount,
     TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
     Tuple,
     Union,
     WithdrawAmount,
@@ -125,11 +131,11 @@ class TokenNetworkGraphState(State):
         repr=False, default_factory=dict
     )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         # pylint: disable=no-member
         return "TokenNetworkGraphState(num_edges:{})".format(len(self.network.edges))
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         return (
             isinstance(other, TokenNetworkGraphState)
             and self.token_network_address == other.token_network_address
@@ -162,7 +168,7 @@ class RouteState(State):
         assert len(self.route) >= 1
         return self.route[1]
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "RouteState ({}), channel_id: {}".format(
             " -> ".join(to_checksum_address(addr) for addr in self.route), self.forward_channel_id
         )
@@ -304,8 +310,8 @@ class NettingChannelEndState(State):
         repr=False, default_factory=dict
     )
     balance_proof: Optional[Union[BalanceProofSignedState, BalanceProofUnsignedState]] = None
-    #: A dictionary that maps secrethashes to lock states.
-    #: Used for calculating the locksroot.
+    #: A list of the pending locks, in order of insertion. Used for calculating
+    #: the locksroot.
     pending_locks: PendingLocksState = field(
         repr=False, default_factory=make_empty_pending_locks_state
     )
@@ -315,6 +321,12 @@ class NettingChannelEndState(State):
     def __post_init__(self) -> None:
         typecheck(self.address, T_Address)
         typecheck(self.contract_balance, T_TokenAmount)
+
+        if self.address == NULL_ADDRESS_BYTES:
+            raise ValueError("address cannot be null.")
+
+        if self.contract_balance < 0:
+            raise ValueError("contract_balance cannot be negative.")
 
     @property
     def offchain_total_withdraw(self) -> WithdrawAmount:
@@ -337,25 +349,28 @@ class NettingChannelState(State):
 
     canonical_identifier: CanonicalIdentifier
     token_address: TokenAddress = field(repr=False)
-    payment_network_address: PaymentNetworkAddress = field(repr=False)
+    token_network_registry_address: TokenNetworkRegistryAddress = field(repr=False)
     reveal_timeout: BlockTimeout = field(repr=False)
     settle_timeout: BlockTimeout = field(repr=False)
     fee_schedule: FeeScheduleState = field(repr=False)
-    our_state: NettingChannelEndState = field(repr=False)
-    partner_state: NettingChannelEndState = field(repr=False)
+    our_state: NettingChannelEndState
+    partner_state: NettingChannelEndState
     open_transaction: TransactionExecutionStatus
     close_transaction: Optional[TransactionExecutionStatus] = None
     settle_transaction: Optional[TransactionExecutionStatus] = None
     update_transaction: Optional[TransactionExecutionStatus] = None
 
     def __post_init__(self) -> None:
-        if self.reveal_timeout >= self.settle_timeout:
-            raise ValueError("reveal_timeout must be smaller than settle_timeout")
-
         typecheck(self.reveal_timeout, int)
         typecheck(self.settle_timeout, int)
         typecheck(self.open_transaction, TransactionExecutionStatus)
         typecheck(self.canonical_identifier.channel_identifier, T_ChannelID)
+
+        if self.reveal_timeout >= self.settle_timeout:
+            raise ValueError("reveal_timeout must be smaller than settle_timeout")
+
+        if self.our_state.address == self.partner_state.address:
+            raise ValueError("it is illegal to open a channel with itself")
 
         if self.reveal_timeout <= 0:
             raise ValueError("reveal_timeout must be a positive integer")
@@ -452,10 +467,10 @@ class TokenNetworkState(State):
 
 
 @dataclass
-class PaymentNetworkState(State):
+class TokenNetworkRegistryState(State):
     """ Corresponds to a registry smart contract. """
 
-    address: PaymentNetworkAddress
+    address: TokenNetworkRegistryAddress
     token_network_list: List[TokenNetworkState]
     tokennetworkaddresses_to_tokennetworks: Dict[TokenNetworkAddress, TokenNetworkState] = field(
         repr=False, default_factory=dict
@@ -483,8 +498,8 @@ class PaymentNetworkState(State):
 @dataclass(repr=False)
 class ChainState(State):
     """ Umbrella object that stores the per blockchain state.
-    For each registry smart contract there must be a payment network. Within the
-    payment network the existing token networks and channels are registered.
+    For each registry smart contract there must be a token network registry. Within the
+    token network registry the existing token networks and channels are registered.
 
     TODO: Split the node specific attributes to a "NodeState" class
     """
@@ -494,16 +509,16 @@ class ChainState(State):
     block_hash: BlockHash
     our_address: Address
     chain_id: ChainID
-    identifiers_to_paymentnetworks: Dict[PaymentNetworkAddress, PaymentNetworkState] = field(
-        repr=False, default_factory=dict
-    )
+    identifiers_to_tokennetworkregistries: Dict[
+        TokenNetworkRegistryAddress, TokenNetworkRegistryState
+    ] = field(repr=False, default_factory=dict)
     nodeaddresses_to_networkstates: Dict[Address, str] = field(repr=False, default_factory=dict)
     payment_mapping: PaymentMappingState = field(repr=False, default_factory=PaymentMappingState)
     pending_transactions: List[ContractSendEvent] = field(repr=False, default_factory=list)
     queueids_to_queues: QueueIdsToQueues = field(repr=False, default_factory=dict)
     last_transport_authdata: Optional[str] = field(repr=False, default=None)
-    tokennetworkaddresses_to_paymentnetworkaddresses: Dict[
-        TokenNetworkAddress, PaymentNetworkAddress
+    tokennetworkaddresses_to_tokennetworkregistryaddresses: Dict[
+        TokenNetworkAddress, TokenNetworkRegistryAddress
     ] = field(repr=False, default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -511,14 +526,14 @@ class ChainState(State):
         typecheck(self.block_hash, T_BlockHash)
         typecheck(self.chain_id, T_ChainID)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
-            "ChainState(block_number={} block_hash={} networks={} " "qty_transfers={} chain_id={})"
+            "ChainState(block_number={} block_hash={} networks={} qty_transfers={} chain_id={})"
         ).format(
             self.block_number,
             to_hex(self.block_hash),
             # pylint: disable=E1101
-            lpex(self.identifiers_to_paymentnetworks.keys()),
+            lpex(self.identifiers_to_tokennetworkregistries.keys()),
             # pylint: disable=E1101
             len(self.payment_mapping.secrethashes_to_task),
             self.chain_id,

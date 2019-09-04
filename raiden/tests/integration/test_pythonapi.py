@@ -16,7 +16,7 @@ from raiden.exceptions import (
     DepositOverLimit,
     InsufficientFunds,
     InsufficientGasReserve,
-    InvalidAddress,
+    InvalidBinaryAddress,
 )
 from raiden.storage.serialization import DictSerializer
 from raiden.tests.utils.client import burn_eth
@@ -184,8 +184,6 @@ def run_test_token_registered_race(raiden_chain, token_amount, retry_timeout, co
         constructor_arguments=(token_amount, 2, "raiden", "Rd"),
     )
 
-    gevent.sleep(1)
-
     registry_address = app0.raiden.default_registry.address
     assert token_address not in api0.get_tokens_list(registry_address)
     assert token_address not in api1.get_tokens_list(registry_address)
@@ -263,15 +261,16 @@ def test_transfer_to_unknownchannel(raiden_network, token_addresses):
 def run_test_transfer_to_unknownchannel(raiden_network, token_addresses):
     app0, _ = raiden_network
     token_address = token_addresses[0]
-    non_existing_address = "\xf0\xef3\x01\xcd\xcfe\x0f4\x9c\xf6d\xa2\x01?X4\x84\xa9\xf1"
+    str_address = "\xf0\xef3\x01\xcd\xcfe\x0f4\x9c\xf6d\xa2\x01?X4\x84\xa9\xf1"
 
-    with pytest.raises(InvalidAddress):
-        # sending to an unknown/non-existant address
+    # Enforce sandwich encoding. Calling `transfer` with a non binary address
+    # raises an exception
+    with pytest.raises(InvalidBinaryAddress):
         RaidenAPI(app0.raiden).transfer(
             app0.raiden.default_registry.address,
             token_address,
             10,
-            target=non_existing_address,
+            target=str_address,
             transfer_timeout=10,
         )
 
@@ -562,10 +561,10 @@ def run_test_create_monitoring_request(raiden_network, token_addresses):
     app0, app1 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
         chain_state=chain_state,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
     )
 

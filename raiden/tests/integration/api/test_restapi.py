@@ -1,3 +1,4 @@
+import datetime
 import json
 from hashlib import sha256
 from http import HTTPStatus
@@ -31,7 +32,11 @@ from raiden.tests.utils.protocol import WaitForMessage
 from raiden.tests.utils.smartcontracts import deploy_contract_web3
 from raiden.transfer import views
 from raiden.transfer.state import ChannelState
-from raiden.waiting import wait_for_transfer_success
+from raiden.waiting import (
+    TransferWaitResult,
+    wait_for_received_transfer_result,
+    wait_for_token_network,
+)
 from raiden_contracts.constants import (
     CONTRACT_CUSTOM_TOKEN,
     CONTRACT_HUMAN_STANDARD_TOKEN,
@@ -152,7 +157,7 @@ def test_payload_with_invalid_addresses(api_server_test_instance, rest_api_port_
     assert_response_with_error(response, HTTPStatus.BAD_REQUEST)
 
     url_without_prefix = (
-        "http://localhost:{port}/api/v1/" "channels/ea674fdde714fd979de3edf0f56aa9716b898ec8"
+        "http://localhost:{port}/api/v1/channels/ea674fdde714fd979de3edf0f56aa9716b898ec8"
     ).format(port=rest_api_port_number)
 
     request = grequests.patch(
@@ -866,6 +871,40 @@ def test_api_payments(api_server_test_instance, raiden_network, token_addresses)
 
 
 @pytest.mark.parametrize("number_of_nodes", [2])
+def test_api_timestamp_format(api_server_test_instance, raiden_network, token_addresses):
+    _, app1 = raiden_network
+    amount = 200
+    identifier = 42
+    token_address = token_addresses[0]
+    target_address = app1.raiden.address
+
+    payment_url = api_url_for(
+        api_server_test_instance,
+        "token_target_paymentresource",
+        token_address=to_checksum_address(token_address),
+        target_address=to_checksum_address(target_address),
+    )
+
+    # Make payment
+    grequests.post(payment_url, json={"amount": amount, "identifier": identifier}).send()
+
+    json_response = get_json_response(grequests.get(payment_url).send().response)
+
+    assert len(json_response) == 1, "payment response had no event record"
+    event_data = json_response[0]
+    assert "log_time" in event_data, "missing log_time attribute from event record"
+    log_timestamp = event_data["log_time"]
+
+    # python (and javascript) can parse strings with either space or T as a separator of date
+    # and time and still treat it as a ISO8601 string
+    log_date = datetime.datetime.fromisoformat(log_timestamp)
+
+    log_timestamp_iso = log_date.isoformat()
+
+    assert log_timestamp_iso == log_timestamp, "log_time is not a valid ISO8601 string"
+
+
+@pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_payments_secret_hash_errors(
     api_server_test_instance, raiden_network, token_addresses
 ):
@@ -1234,7 +1273,9 @@ def test_get_token_network_for_token(
     assert_proper_response(register_response, status_code=HTTPStatus.CREATED)
     token_network_address = get_json_response(register_response)["token_network_address"]
 
-    gevent.sleep(app0.raiden.alarm.sleep_time * 10)
+    wait_for_token_network(
+        app0.raiden, app0.raiden.default_registry.address, new_token_address, 0.1
+    )
 
     # now it should return the token address
     token_request = grequests.get(
@@ -1470,8 +1511,6 @@ def test_api_deposit_limit(api_server_test_instance, token_addresses, reveal_tim
         "total_deposit": balance_working,
     }
 
-    gevent.sleep(2)
-
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
     )
@@ -1519,6 +1558,7 @@ def test_payment_events_endpoints(api_server_test_instance, raiden_network, toke
     app0, app1, app2 = raiden_network
     amount1 = 200
     identifier1 = 42
+    secret1, secrethash1 = factories.make_secret_with_hash()
     token_address = token_addresses[0]
 
     app0_address = app0.raiden.address
@@ -1536,13 +1576,14 @@ def test_payment_events_endpoints(api_server_test_instance, raiden_network, toke
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target1_address),
         ),
-        json={"amount": amount1, "identifier": identifier1},
+        json={"amount": amount1, "identifier": identifier1, "secret": to_hex(secret1)},
     )
     request.send()
 
     # app0 is sending some tokens to target 2
     identifier2 = 43
     amount2 = 123
+    secret2, secrethash2 = factories.make_secret_with_hash()
     request = grequests.post(
         api_url_for(
             api_server_test_instance,
@@ -1550,13 +1591,14 @@ def test_payment_events_endpoints(api_server_test_instance, raiden_network, toke
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target2_address),
         ),
-        json={"amount": amount2, "identifier": identifier2},
+        json={"amount": amount2, "identifier": identifier2, "secret": to_hex(secret2)},
     )
     request.send()
 
     # target1 also sends some tokens to target 2
     identifier3 = 44
     amount3 = 5
+    secret3, secrethash3 = factories.make_secret_with_hash()
     request = grequests.post(
         api_url_for(
             app1_server,
@@ -1564,15 +1606,27 @@ def test_payment_events_endpoints(api_server_test_instance, raiden_network, toke
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target2_address),
         ),
-        json={"amount": amount3, "identifier": identifier3},
+        json={"amount": amount3, "identifier": identifier3, "secret": to_hex(secret3)},
     )
     request.send()
 
     exception = ValueError("Waiting for transfer received success in the WAL timed out")
     with gevent.Timeout(seconds=60, exception=exception):
-        wait_for_transfer_success(app1.raiden, identifier1, amount1, app1.raiden.alarm.sleep_time)
-        wait_for_transfer_success(app2.raiden, identifier2, amount2, app2.raiden.alarm.sleep_time)
-        wait_for_transfer_success(app2.raiden, identifier3, amount3, app2.raiden.alarm.sleep_time)
+        result = wait_for_received_transfer_result(
+            app1.raiden, identifier1, amount1, app1.raiden.alarm.sleep_time, secrethash1
+        )
+        msg = f"Unexpected transfer result: {str(result)}"
+        assert result == TransferWaitResult.UNLOCKED, msg
+        result = wait_for_received_transfer_result(
+            app2.raiden, identifier2, amount2, app2.raiden.alarm.sleep_time, secrethash2
+        )
+        msg = f"Unexpected transfer result: {str(result)}"
+        assert result == TransferWaitResult.UNLOCKED, msg
+        result = wait_for_received_transfer_result(
+            app2.raiden, identifier3, amount3, app2.raiden.alarm.sleep_time, secrethash3
+        )
+        msg = f"Unexpected transfer result: {str(result)}"
+        assert result == TransferWaitResult.UNLOCKED, msg
 
     # test endpoint without (partner and token) for sender
     request = grequests.get(api_url_for(api_server_test_instance, "paymentresource"))
@@ -1642,6 +1696,52 @@ def test_payment_events_endpoints(api_server_test_instance, raiden_network, toke
             "target": to_checksum_address(target2_address),
         },
     )
+
+    # test endpoint without partner for app0 but with limit/offset to get only first
+    request = grequests.get(
+        api_url_for(
+            api_server_test_instance,
+            "token_paymentresource",
+            token_address=token_address,
+            limit=1,
+            offset=0,
+        )
+    )
+    response = request.send().response
+    assert_proper_response(response, HTTPStatus.OK)
+    json_response = get_json_response(response)
+
+    assert must_have_event(
+        json_response,
+        {
+            "event": "EventPaymentSentSuccess",
+            "identifier": identifier1,
+            "target": to_checksum_address(target1_address),
+        },
+    )
+    assert len(json_response) == 1
+    # test endpoint without partner for app0 but with limit/offset to get only second
+    request = grequests.get(
+        api_url_for(
+            api_server_test_instance,
+            "token_paymentresource",
+            token_address=token_address,
+            limit=1,
+            offset=1,
+        )
+    )
+    response = request.send().response
+    assert_proper_response(response, HTTPStatus.OK)
+    json_response = get_json_response(response)
+    assert must_have_event(
+        json_response,
+        {
+            "event": "EventPaymentSentSuccess",
+            "identifier": identifier2,
+            "target": to_checksum_address(target2_address),
+        },
+    )
+
     # test endpoint without partner for target1
     request = grequests.get(
         api_url_for(app1_server, "token_paymentresource", token_address=token_address)
@@ -1892,7 +1992,6 @@ def test_pending_transfers_endpoint(raiden_network, token_addresses):
 
 @pytest.mark.parametrize("number_of_nodes", [2])
 @pytest.mark.parametrize("deposit", [1000])
-@pytest.mark.skip("Issue: #4344")
 def test_api_withdraw(api_server_test_instance, raiden_network, token_addresses):
     _, app1 = raiden_network
     token_address = token_addresses[0]

@@ -32,8 +32,8 @@ from raiden.transfer.mediated_transfer.state_change import ReceiveLockExpired
 from raiden.transfer.mediated_transfer.tasks import MediatorTask, TargetTask
 from raiden.transfer.node import (
     handle_delivered,
-    handle_new_payment_network,
     handle_new_token_network,
+    handle_new_token_network_registry,
     handle_node_change_network_state,
     handle_processed,
     inplace_delete_message_queue,
@@ -51,10 +51,10 @@ from raiden.transfer.state import (
     BalanceProofSignedState,
     ChannelState,
     HopState,
-    PaymentNetworkState,
     PendingLocksState,
     RouteState,
     TokenNetworkGraphState,
+    TokenNetworkRegistryState,
     TokenNetworkState,
 )
 from raiden.transfer.state_change import (
@@ -64,7 +64,7 @@ from raiden.transfer.state_change import (
     Block,
     ContractReceiveChannelBatchUnlock,
     ContractReceiveChannelSettled,
-    ContractReceiveNewPaymentNetwork,
+    ContractReceiveNewTokenNetworkRegistry,
     ReceiveDelivered,
     ReceiveProcessed,
 )
@@ -96,12 +96,31 @@ def test_is_transaction_effect_satisfied(
     assert not is_transaction_effect_satisfied(chain_state, transaction, state_change)
 
     # now call normally with us being the partner and not the participant
-    state_change.sender = netting_channel_state.partner_state.address
-    state_change.receiver = netting_channel_state.our_state.address
+    state_change = ContractReceiveChannelBatchUnlock(
+        transaction_hash=UNIT_SECRETHASH,
+        canonical_identifier=canonical_identifier,
+        receiver=netting_channel_state.our_state.address,
+        sender=netting_channel_state.partner_state.address,
+        locksroot=LOCKSROOT_OF_NO_LOCKS,
+        unlocked_amount=0,
+        returned_tokens=0,
+        block_number=1,
+        block_hash=make_block_hash(),
+    )
     assert not is_transaction_effect_satisfied(chain_state, transaction, state_change)
+
     # finally call with us being the participant and not the partner which should check out
-    state_change.receiver = netting_channel_state.partner_state.address
-    state_change.sender = netting_channel_state.our_state.address
+    state_change = ContractReceiveChannelBatchUnlock(
+        transaction_hash=UNIT_SECRETHASH,
+        canonical_identifier=canonical_identifier,
+        receiver=netting_channel_state.partner_state.address,
+        sender=netting_channel_state.our_state.address,
+        locksroot=LOCKSROOT_OF_NO_LOCKS,
+        unlocked_amount=0,
+        returned_tokens=0,
+        block_number=1,
+        block_hash=make_block_hash(),
+    )
 
     # ContractSendChannelBatchUnlock would only be satisfied if both sides are unlocked
     # and if the channel was cleared
@@ -204,24 +223,28 @@ def test_subdispatch_to_paymenttask_target(chain_state, netting_channel_state):
     assert transition_result.new_state == chain_state
 
 
-def test_maybe_add_tokennetwork_unknown_payment_network(chain_state, token_network_address):
-    payment_network_address = factories.make_address()
+def test_maybe_add_tokennetwork_unknown_token_network_registry(chain_state, token_network_address):
+    token_network_registry_address = factories.make_address()
     token_address = factories.make_address()
     token_network = TokenNetworkState(
         address=token_network_address,
         token_address=token_address,
         network_graph=TokenNetworkGraphState(token_network_address=token_network_address),
     )
-    msg = "test state invalid, payment_network already in chain_state"
-    assert payment_network_address not in chain_state.identifiers_to_paymentnetworks, msg
+    msg = "test state invalid, token_network_registry already in chain_state"
+    assert (
+        token_network_registry_address not in chain_state.identifiers_to_tokennetworkregistries
+    ), msg
     maybe_add_tokennetwork(
         chain_state=chain_state,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_network_state=token_network,
     )
-    # new payment network should have been added to chain_state
-    payment_network_state = chain_state.identifiers_to_paymentnetworks[payment_network_address]
-    assert payment_network_state.address == payment_network_address
+    # new token network registry should have been added to chain_state
+    token_network_registry_state = chain_state.identifiers_to_tokennetworkregistries[
+        token_network_registry_address
+    ]
+    assert token_network_registry_state.address == token_network_registry_address
 
 
 def test_handle_new_token_network(chain_state, token_network_address):
@@ -231,22 +254,24 @@ def test_handle_new_token_network(chain_state, token_network_address):
         token_address=token_address,
         network_graph=TokenNetworkGraphState(token_network_address=token_network_address),
     )
-    payment_network_address = factories.make_address()
+    token_network_registry_address = factories.make_address()
     state_change = ActionNewTokenNetwork(
-        payment_network_address=payment_network_address, token_network=token_network
+        token_network_registry_address=token_network_registry_address, token_network=token_network
     )
     transition_result = handle_new_token_network(
         chain_state=chain_state, state_change=state_change
     )
     new_chain_state = transition_result.new_state
-    payment_network = new_chain_state.identifiers_to_paymentnetworks[payment_network_address]
-    assert payment_network.address == payment_network_address
+    token_network_registry = new_chain_state.identifiers_to_tokennetworkregistries[
+        token_network_registry_address
+    ]
+    assert token_network_registry.address == token_network_registry_address
     assert not transition_result.events
     assert get_networks(
         chain_state=chain_state,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
-    ) == (payment_network, token_network)
+    ) == (token_network_registry, token_network)
 
 
 def test_is_transaction_expired():
@@ -293,13 +318,15 @@ def test_subdispatch_by_canonical_id(chain_state):
     token_network.channelidentifiers_to_channels[
         canonical_identifier.channel_identifier
     ] = channel_state
-    payment_network = PaymentNetworkState(
+    token_network_registry = TokenNetworkRegistryState(
         address=factories.make_address(), token_network_list=[token_network]
     )
-    chain_state.identifiers_to_paymentnetworks[payment_network.address] = payment_network
-    chain_state.tokennetworkaddresses_to_paymentnetworkaddresses[
+    chain_state.identifiers_to_tokennetworkregistries[
+        token_network_registry.address
+    ] = token_network_registry
+    chain_state.tokennetworkaddresses_to_tokennetworkregistryaddresses[
         canonical_identifier.token_network_address
-    ] = payment_network.address
+    ] = token_network_registry.address
     # dispatching a Block will be ignored
     previous_state = copy.deepcopy(chain_state)
     state_change = Block(
@@ -378,27 +405,27 @@ def test_handle_node_change_network_state(chain_state, netting_channel_state, mo
     assert transition_result.events == [result]
 
 
-def test_handle_new_payment_network(chain_state, token_network_address):
+def test_handle_new_token_network_registry(chain_state, token_network_address):
     token_address = factories.make_address()
     token_network = TokenNetworkState(
         address=token_network_address,
         token_address=token_address,
         network_graph=TokenNetworkGraphState(token_network_address=token_network_address),
     )
-    payment_network = PaymentNetworkState(
+    token_network_registry = TokenNetworkRegistryState(
         address=factories.make_address(), token_network_list=[token_network]
     )
-    state_change = ContractReceiveNewPaymentNetwork(
+    state_change = ContractReceiveNewTokenNetworkRegistry(
         transaction_hash=factories.make_transaction_hash(),
-        payment_network=payment_network,
+        token_network_registry=token_network_registry,
         block_hash=make_block_hash(),
         block_number=1,
     )
-    assert payment_network.address not in chain_state.identifiers_to_paymentnetworks
-    transition_result = handle_new_payment_network(chain_state, state_change)
+    assert token_network_registry.address not in chain_state.identifiers_to_tokennetworkregistries
+    transition_result = handle_new_token_network_registry(chain_state, state_change)
     assert transition_result.new_state == chain_state
-    msg = "handle_new_payment_network did not add to chain_state mapping"
-    assert payment_network.address in chain_state.identifiers_to_paymentnetworks, msg
+    msg = "handle_new_token_network_registry did not add to chain_state mapping"
+    assert token_network_registry.address in chain_state.identifiers_to_tokennetworkregistries, msg
 
 
 def test_inplace_delete_message_queue(chain_state):

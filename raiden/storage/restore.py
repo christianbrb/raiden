@@ -22,6 +22,7 @@ from raiden.utils.typing import (
     List,
     Locksroot,
     Optional,
+    SecretHash,
 )
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ def channel_state_until_state_change(
         transition_function=node.state_transition,
         storage=raiden.wal.storage,
         state_change_identifier=state_change_identifier,
+        node_address=raiden.address,
     )
 
     msg = "There is a state change, therefore the state must not be None"
@@ -203,6 +205,16 @@ def get_event_with_balance_proof_by_locksroot(
     )
     event = storage.get_latest_event_by_data_field(query)
     return event
+
+
+def get_state_change_with_transfer_by_secrethash(
+    storage: SerializedSQLiteStorage, secrethash: SecretHash
+) -> Optional[StateChangeRecord]:
+    filters = [{"transfer.lock.secrethash": to_hex(secrethash)}]
+    query = FilteredDBQuery(
+        filters=filters, main_operator=Operator.NONE, inner_operator=Operator.NONE
+    )
+    return storage.get_latest_state_change_by_data_field(query)
 
 
 def balance_proof_query_from_keys(prefix: str, filters: Dict[str, Any]) -> Dict[str, Any]:

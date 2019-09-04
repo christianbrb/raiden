@@ -121,12 +121,10 @@ class Event:
 
 @dataclass
 class TransferTask(State):
-    # TODO: When we turn these into dataclasses it would be a good time to move common attributes
-    # of all transfer tasks like the `token_network_address` into the common subclass
-    pass
+    token_network_address: TokenNetworkAddress
 
 
-@dataclass
+@dataclass(frozen=True)
 class SendMessageEvent(Event):
     """ Marker used for events which represent off-chain protocol messages tied
     to a channel.
@@ -141,19 +139,20 @@ class SendMessageEvent(Event):
     queue_identifier: QueueIdentifier = field(init=False)
 
     def __post_init__(self) -> None:
-        self.queue_identifier = QueueIdentifier(
+        queue_identifier = QueueIdentifier(
             recipient=self.recipient, canonical_identifier=self.canonical_identifier
         )
+        object.__setattr__(self, "queue_identifier", queue_identifier)
 
 
-@dataclass
+@dataclass(frozen=True)
 class AuthenticatedSenderStateChange(StateChange):
     """ Marker used for state changes for which the sender has been verified. """
 
     sender: Address
 
 
-@dataclass
+@dataclass(frozen=True)
 class ContractSendEvent(Event):
     """ Marker used for events which represent on-chain transactions. """
 
@@ -163,7 +162,7 @@ class ContractSendEvent(Event):
         typecheck(self.triggered_by_block_hash, T_BlockHash)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ContractSendExpirableEvent(ContractSendEvent):
     """ Marker used for events which represent on-chain transactions which are
     time dependent.
@@ -172,7 +171,7 @@ class ContractSendExpirableEvent(ContractSendEvent):
     expiration: BlockExpiration
 
 
-@dataclass
+@dataclass(frozen=True)
 class ContractReceiveStateChange(StateChange):
     """ Marker used for state changes which represent on-chain logs. """
 
@@ -402,3 +401,30 @@ class BalanceProofSignedState(State):
     @property
     def channel_identifier(self) -> ChannelID:
         return self.canonical_identifier.channel_identifier
+
+
+class SuccessOrError:
+    """Helper class to be used when you want to test a boolean
+
+    and also collect feedback when the test fails. Initialize with any
+    number of "error message" strings. The object will be considered
+    truthy if there are no error messages.
+    """
+
+    def __init__(self, *error_messages: str) -> None:
+        self.error_messages: List[str] = [msg for msg in error_messages]
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    @property
+    def ok(self) -> bool:
+        return not bool(self.error_messages)
+
+    @property
+    def fail(self) -> bool:
+        return not self.ok
+
+    @property
+    def as_error_message(self) -> str:
+        return " / ".join(self.error_messages)

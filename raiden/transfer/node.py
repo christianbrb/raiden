@@ -1,3 +1,5 @@
+import copy
+
 from raiden.transfer import channel, token_network, views
 from raiden.transfer.architecture import (
     ContractReceiveStateChange,
@@ -12,6 +14,7 @@ from raiden.transfer.events import (
     ContractSendChannelClose,
     ContractSendChannelSettle,
     ContractSendChannelUpdateTransfer,
+    ContractSendChannelWithdraw,
     ContractSendSecretReveal,
     SendWithdrawRequest,
 )
@@ -30,14 +33,15 @@ from raiden.transfer.mediated_transfer.state_change import (
     ActionInitInitiator,
     ActionInitMediator,
     ActionInitTarget,
+    ActionTransferReroute,
     ReceiveLockExpired,
     ReceiveSecretRequest,
     ReceiveSecretReveal,
+    ReceiveTransferCancelRoute,
     ReceiveTransferRefund,
-    ReceiveTransferRefundCancelRoute,
 )
 from raiden.transfer.mediated_transfer.tasks import InitiatorTask, MediatorTask, TargetTask
-from raiden.transfer.state import ChainState, PaymentNetworkState, TokenNetworkState
+from raiden.transfer.state import ChainState, TokenNetworkRegistryState, TokenNetworkState
 from raiden.transfer.state_change import (
     ActionChangeNodeNetworkState,
     ActionChannelClose,
@@ -53,8 +57,8 @@ from raiden.transfer.state_change import (
     ContractReceiveChannelNew,
     ContractReceiveChannelSettled,
     ContractReceiveChannelWithdraw,
-    ContractReceiveNewPaymentNetwork,
     ContractReceiveNewTokenNetwork,
+    ContractReceiveNewTokenNetworkRegistry,
     ContractReceiveRouteClosed,
     ContractReceiveRouteNew,
     ContractReceiveSecretReveal,
@@ -73,9 +77,9 @@ from raiden.utils.typing import (
     ChannelID,
     List,
     Optional,
-    PaymentNetworkAddress,
     SecretHash,
     TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
     Union,
 )
 
@@ -97,19 +101,19 @@ TokenNetworkStateChange = Union[
 def get_token_network_by_address(
     chain_state: ChainState, token_network_address: TokenNetworkAddress
 ) -> Optional[TokenNetworkState]:
-    payment_network_address = chain_state.tokennetworkaddresses_to_paymentnetworkaddresses.get(
+    tn_registry_address = chain_state.tokennetworkaddresses_to_tokennetworkregistryaddresses.get(
         token_network_address
     )
 
-    payment_network_state = None
-    if payment_network_address:
-        payment_network_state = chain_state.identifiers_to_paymentnetworks.get(
-            payment_network_address
+    tn_registry_state = None
+    if tn_registry_address:
+        tn_registry_state = chain_state.identifiers_to_tokennetworkregistries.get(
+            tn_registry_address
         )
 
     token_network_state = None
-    if payment_network_state:
-        token_network_state = payment_network_state.tokennetworkaddresses_to_tokennetworks.get(
+    if tn_registry_state:
+        token_network_state = tn_registry_state.tokennetworkaddresses_to_tokennetworks.get(
             token_network_address
         )
 
@@ -124,8 +128,10 @@ def subdispatch_to_all_channels(
 ) -> TransitionResult[ChainState]:
     events = list()
 
-    for payment_network in chain_state.identifiers_to_paymentnetworks.values():
-        for token_network_state in payment_network.tokennetworkaddresses_to_tokennetworks.values():
+    for token_network_registry in chain_state.identifiers_to_tokennetworkregistries.values():
+        for (
+            token_network_state
+        ) in token_network_registry.tokennetworkaddresses_to_tokennetworks.values():
             for channel_state in token_network_state.channelidentifiers_to_channels.values():
                 result = channel.state_transition(
                     channel_state=channel_state,
@@ -410,31 +416,33 @@ def subdispatch_targettask(
 
 def maybe_add_tokennetwork(
     chain_state: ChainState,
-    payment_network_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_network_state: TokenNetworkState,
 ) -> None:
     token_network_address = token_network_state.address
     token_address = token_network_state.token_address
 
-    payment_network_state, token_network_state_previous = views.get_networks(
-        chain_state, payment_network_address, token_address
+    token_network_registry_state, token_network_state_previous = views.get_networks(
+        chain_state, token_network_registry_address, token_address
     )
 
-    if payment_network_state is None:
-        payment_network_state = PaymentNetworkState(payment_network_address, [token_network_state])
+    if token_network_registry_state is None:
+        token_network_registry_state = TokenNetworkRegistryState(
+            token_network_registry_address, [token_network_state]
+        )
 
-        ids_to_payments = chain_state.identifiers_to_paymentnetworks
-        ids_to_payments[payment_network_address] = payment_network_state
+        ids_to_payments = chain_state.identifiers_to_tokennetworkregistries
+        ids_to_payments[token_network_registry_address] = token_network_registry_state
 
     if token_network_state_previous is None:
-        ids_to_tokens = payment_network_state.tokennetworkaddresses_to_tokennetworks
-        addresses_to_ids = payment_network_state.tokenaddresses_to_tokennetworkaddresses
+        ids_to_tokens = token_network_registry_state.tokennetworkaddresses_to_tokennetworks
+        addresses_to_ids = token_network_registry_state.tokenaddresses_to_tokennetworkaddresses
 
         ids_to_tokens[token_network_address] = token_network_state
         addresses_to_ids[token_address] = token_network_address
 
-        mapping = chain_state.tokennetworkaddresses_to_paymentnetworkaddresses
-        mapping[token_network_address] = payment_network_address
+        mapping = chain_state.tokennetworkaddresses_to_tokennetworkregistryaddresses
+        mapping[token_network_address] = token_network_registry_address
 
 
 def sanity_check(iteration: TransitionResult[ChainState]) -> None:
@@ -577,9 +585,9 @@ def handle_new_token_network(
     chain_state: ChainState, state_change: ActionNewTokenNetwork
 ) -> TransitionResult[ChainState]:
     token_network_state = state_change.token_network
-    payment_network_address = state_change.payment_network_address
+    token_network_registry_address = state_change.token_network_registry_address
 
-    maybe_add_tokennetwork(chain_state, payment_network_address, token_network_state)
+    maybe_add_tokennetwork(chain_state, token_network_registry_address, token_network_state)
 
     events: List[Event] = list()
     return TransitionResult(chain_state, events)
@@ -609,15 +617,17 @@ def handle_node_change_network_state(
     return TransitionResult(chain_state, events)
 
 
-def handle_new_payment_network(
-    chain_state: ChainState, state_change: ContractReceiveNewPaymentNetwork
+def handle_new_token_network_registry(
+    chain_state: ChainState, state_change: ContractReceiveNewTokenNetworkRegistry
 ) -> TransitionResult[ChainState]:
     events: List[Event] = list()
 
-    payment_network = state_change.payment_network
-    payment_network_address = PaymentNetworkAddress(payment_network.address)
-    if payment_network_address not in chain_state.identifiers_to_paymentnetworks:
-        chain_state.identifiers_to_paymentnetworks[payment_network_address] = payment_network
+    token_network_registry = state_change.token_network_registry
+    token_network_registry_address = TokenNetworkRegistryAddress(token_network_registry.address)
+    if token_network_registry_address not in chain_state.identifiers_to_tokennetworkregistries:
+        chain_state.identifiers_to_tokennetworkregistries[
+            token_network_registry_address
+        ] = token_network_registry
 
     return TransitionResult(chain_state, events)
 
@@ -627,7 +637,7 @@ def handle_tokenadded(
 ) -> TransitionResult[ChainState]:
     events: List[Event] = list()
     maybe_add_tokennetwork(
-        chain_state, state_change.payment_network_address, state_change.token_network
+        chain_state, state_change.token_network_registry_address, state_change.token_network
     )
 
     return TransitionResult(chain_state, events)
@@ -679,6 +689,21 @@ def handle_init_target(
     )
 
 
+def handle_transfer_reroute(
+    chain_state: ChainState, state_change: ActionTransferReroute
+) -> TransitionResult[ChainState]:
+
+    new_secrethash = state_change.secrethash
+    current_payment_task = chain_state.payment_mapping.secrethashes_to_task[
+        state_change.transfer.lock.secrethash
+    ]
+    chain_state.payment_mapping.secrethashes_to_task.update(
+        {new_secrethash: copy.deepcopy(current_payment_task)}
+    )
+
+    return subdispatch_to_paymenttask(chain_state, state_change, new_secrethash)
+
+
 def handle_receive_withdraw_request(
     chain_state: ChainState, state_change: ReceiveWithdrawRequest
 ) -> TransitionResult[ChainState]:
@@ -728,8 +753,8 @@ def handle_receive_transfer_refund(
     )
 
 
-def handle_receive_transfer_refund_cancel_route(
-    chain_state: ChainState, state_change: ReceiveTransferRefundCancelRoute
+def handle_receive_transfer_cancelroute(
+    chain_state: ChainState, state_change: ReceiveTransferCancelRoute
 ) -> TransitionResult[ChainState]:
     return subdispatch_to_paymenttask(
         chain_state, state_change, state_change.transfer.lock.secrethash
@@ -816,9 +841,17 @@ def handle_state_change(
         elif type(state_change) == ActionUpdateTransportAuthData:
             assert isinstance(state_change, ActionUpdateTransportAuthData), MYPY_ANNOTATION
             iteration = handle_update_transport_authdata(chain_state, state_change)
-        elif type(state_change) == ContractReceiveNewPaymentNetwork:
-            assert isinstance(state_change, ContractReceiveNewPaymentNetwork), MYPY_ANNOTATION
-            iteration = handle_new_payment_network(chain_state, state_change)
+        elif type(state_change) == ReceiveTransferCancelRoute:
+            assert isinstance(state_change, ReceiveTransferCancelRoute), MYPY_ANNOTATION
+            iteration = handle_receive_transfer_cancelroute(chain_state, state_change)
+        elif type(state_change) == ActionTransferReroute:
+            assert isinstance(state_change, ActionTransferReroute), MYPY_ANNOTATION
+            iteration = handle_transfer_reroute(chain_state, state_change)
+        elif type(state_change) == ContractReceiveNewTokenNetworkRegistry:
+            assert isinstance(
+                state_change, ContractReceiveNewTokenNetworkRegistry
+            ), MYPY_ANNOTATION
+            iteration = handle_new_token_network_registry(chain_state, state_change)
         elif type(state_change) == ContractReceiveNewTokenNetwork:
             assert isinstance(state_change, ContractReceiveNewTokenNetwork), MYPY_ANNOTATION
             iteration = handle_tokenadded(chain_state, state_change)
@@ -858,9 +891,6 @@ def handle_state_change(
         elif type(state_change) == ReceiveSecretReveal:
             assert isinstance(state_change, ReceiveSecretReveal), MYPY_ANNOTATION
             iteration = handle_secret_reveal(chain_state, state_change)
-        elif type(state_change) == ReceiveTransferRefundCancelRoute:
-            assert isinstance(state_change, ReceiveTransferRefundCancelRoute), MYPY_ANNOTATION
-            iteration = handle_receive_transfer_refund_cancel_route(chain_state, state_change)
         elif type(state_change) == ReceiveTransferRefund:
             assert isinstance(state_change, ReceiveTransferRefund), MYPY_ANNOTATION
             iteration = handle_receive_transfer_refund(chain_state, state_change)
@@ -929,7 +959,7 @@ def is_transaction_effect_satisfied(
     #
     #  - ContractReceiveChannelNew
     #  - ContractReceiveChannelDeposit
-    #  - ContractReceiveNewPaymentNetwork
+    #  - ContractReceiveNewTokenNetworkRegistry
     #  - ContractReceiveNewTokenNetwork
     #  - ContractReceiveRouteNew
     #
@@ -1073,6 +1103,15 @@ def is_transaction_invalidated(transaction: ContractSendEvent, state_change: Sta
         and state_change.channel_identifier == transaction.channel_identifier
     )
     if is_our_failed_update_transfer:
+        return True
+
+    is_our_failed_withdraw = (
+        isinstance(state_change, ContractReceiveChannelClosed)
+        and isinstance(transaction, ContractSendChannelWithdraw)
+        and state_change.token_network_address == transaction.token_network_address
+        and state_change.channel_identifier == transaction.channel_identifier
+    )
+    if is_our_failed_withdraw:
         return True
 
     return False

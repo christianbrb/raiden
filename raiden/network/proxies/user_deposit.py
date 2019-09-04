@@ -1,16 +1,10 @@
 import structlog
-from eth_utils import (
-    is_binary_address,
-    to_bytes,
-    to_canonical_address,
-    to_checksum_address,
-    to_normalized_address,
-)
+from eth_utils import decode_hex, is_binary_address, to_canonical_address, to_checksum_address
 from gevent.lock import RLock
 from web3.exceptions import BadFunctionCallOutput
 
 from raiden.constants import UINT256_MAX
-from raiden.exceptions import BrokenPreconditionError, InvalidAddress, RaidenRecoverableError
+from raiden.exceptions import BrokenPreconditionError, RaidenRecoverableError
 from raiden.network.proxies.token import Token
 from raiden.network.proxies.utils import log_transaction, raise_on_call_returned_empty
 from raiden.network.rpc.client import JSONRPCClient, check_address_has_code
@@ -44,17 +38,15 @@ class UserDeposit:
         user_deposit_address: Address,
         contract_manager: ContractManager,
         blockchain_service: "BlockChainService",
-    ):
+    ) -> None:
         if not is_binary_address(user_deposit_address):
-            raise InvalidAddress("Expected binary address format for token nework")
+            raise ValueError("Expected binary address format for token nework")
 
         check_address_has_code(
-            jsonrpc_client,
-            Address(user_deposit_address),
-            CONTRACT_USER_DEPOSIT,
-            expected_code=to_bytes(
-                hexstr=contract_manager.get_runtime_hexcode(CONTRACT_USER_DEPOSIT)
-            ),
+            client=jsonrpc_client,
+            address=Address(user_deposit_address),
+            contract_name=CONTRACT_USER_DEPOSIT,
+            expected_code=decode_hex(contract_manager.get_runtime_hexcode(CONTRACT_USER_DEPOSIT)),
         )
 
         self.client = jsonrpc_client
@@ -67,15 +59,17 @@ class UserDeposit:
         self.blockchain_service = blockchain_service
 
         self.proxy = jsonrpc_client.new_contract_proxy(
-            self.contract_manager.get_contract_abi(CONTRACT_USER_DEPOSIT),
-            to_normalized_address(user_deposit_address),
+            abi=self.contract_manager.get_contract_abi(CONTRACT_USER_DEPOSIT),
+            contract_address=user_deposit_address,
         )
 
         self.deposit_lock = RLock()
 
     def token_address(self, block_identifier: BlockSpecification) -> TokenAddress:
-        return to_canonical_address(
-            self.proxy.contract.functions.token().call(block_identifier=block_identifier)
+        return TokenAddress(
+            to_canonical_address(
+                self.proxy.contract.functions.token().call(block_identifier=block_identifier)
+            )
         )
 
     def get_total_deposit(
@@ -204,7 +198,7 @@ class UserDeposit:
         total_deposit: TokenAmount,
         amount_to_deposit: TokenAmount,
         log_details: Dict[str, Any],
-    ):
+    ) -> None:
         token.approve(allowed_address=Address(self.address), allowance=amount_to_deposit)
 
         checking_block = self.client.get_checking_block()
@@ -276,8 +270,8 @@ class UserDeposit:
                 "deposit", gas_limit, to_checksum_address(beneficiary), total_deposit
             )
 
-            self.client.poll(transaction_hash)
-            failed_receipt = check_transaction_threw(self.client, transaction_hash)
+            receipt = self.client.poll(transaction_hash)
+            failed_receipt = check_transaction_threw(receipt=receipt)
 
             if failed_receipt:
                 failed_at_blocknumber = failed_receipt["blockNumber"]

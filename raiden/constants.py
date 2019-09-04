@@ -1,9 +1,9 @@
 import math
 from enum import Enum
-from hashlib import sha256
 
 from eth_utils import keccak, to_checksum_address
 
+from raiden.utils.secrethash import sha256_secrethash
 from raiden.utils.typing import (
     AdditionalHash,
     BalanceHash,
@@ -50,9 +50,9 @@ EMPTY_TRANSACTION_HASH = TransactionHash(bytes(32))
 EMPTY_BALANCE_HASH = BalanceHash(bytes(32))
 EMPTY_MESSAGE_HASH = AdditionalHash(bytes(32))
 EMPTY_SIGNATURE = Signature(bytes(65))
-EMPTY_SECRETHASH = SecretHash(bytes(32))
 EMPTY_SECRET = Secret(bytes(32))
-EMPTY_SECRET_SHA256 = SecretHash(sha256(EMPTY_SECRET).digest())
+EMPTY_SECRETHASH = SecretHash(bytes(32))
+EMPTY_SECRET_SHA256 = sha256_secrethash(EMPTY_SECRET)
 LOCKSROOT_OF_NO_LOCKS = Locksroot(keccak(b""))
 ZERO_TOKENS = TokenAmount(0)
 
@@ -124,7 +124,7 @@ EMPTY_ADDRESS = b"\0" * 20
 
 
 # Keep in sync with .circleci/config.yaml
-HIGHEST_SUPPORTED_GETH_VERSION = "1.8.27"
+HIGHEST_SUPPORTED_GETH_VERSION = "1.9.2"
 LOWEST_SUPPORTED_GETH_VERSION = "1.7.2"
 # this is the last stable version as of this comment
 HIGHEST_SUPPORTED_PARITY_VERSION = "2.5.5"

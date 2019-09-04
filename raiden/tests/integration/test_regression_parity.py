@@ -1,6 +1,7 @@
 import pytest
 
 from raiden import waiting
+from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS
 from raiden.tests.utils.detect_failure import raise_on_failure
 from raiden.tests.utils.events import wait_for_state_change
 from raiden.tests.utils.smartcontracts import deploy_rpc_test_contract
@@ -9,13 +10,18 @@ from raiden.transfer import views
 from raiden.transfer.state_change import ContractReceiveChannelSettled
 from raiden.utils import safe_gas_limit
 from raiden.utils.packing import pack_signed_balance_proof
+from raiden_contracts.constants import MessageTypeId
 
 pytestmark = pytest.mark.usefixtures("skip_if_not_parity")
+
+# At least the confirmed block must be kept around, the additional blocks is to
+# given some room for the test to execute
+pruning_history = DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS + 5
 
 # set very low values to force the client to prune old state
 STATE_PRUNING = {
     "pruning": "fast",
-    "pruning-history": 1,
+    "pruning-history": pruning_history,
     "pruning-memory": 1,
     "cache-size-db": 1,
     "cache-size-blocks": 1,
@@ -42,7 +48,7 @@ def run_test_locksroot_loading_during_channel_settle_handling(
     raiden_chain, deploy_client, token_addresses
 ):
     app0, app1 = raiden_chain
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_address = token_addresses[0]
 
     transfer(
@@ -64,7 +70,7 @@ def run_test_locksroot_loading_during_channel_settle_handling(
 
     token_network_address = views.get_token_network_address_by_token_address(
         chain_state=views.state_from_raiden(app0.raiden),
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
     )
     channel_state = get_channelstate(
@@ -76,6 +82,7 @@ def run_test_locksroot_loading_during_channel_settle_handling(
     block_number = app0.raiden.chain.block_number()
 
     closing_data = pack_signed_balance_proof(
+        msg_type=MessageTypeId.BALANCE_PROOF,
         nonce=balance_proof.nonce,
         balance_hash=balance_proof.balance_hash,
         additional_hash=balance_proof.message_hash,
@@ -99,7 +106,7 @@ def run_test_locksroot_loading_during_channel_settle_handling(
 
     waiting.wait_for_settle(
         raiden=app1.raiden,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
         channel_ids=[channel_state.canonical_identifier.channel_identifier],
         retry_timeout=1,
@@ -113,14 +120,14 @@ def run_test_locksroot_loading_during_channel_settle_handling(
         startgas = contract_proxy.estimate_gas(check_block, "waste_storage", iterations)
         startgas = safe_gas_limit(startgas)
         transaction = contract_proxy.transact("waste_storage", startgas, iterations)
-        deploy_client.poll(transaction)
-        return deploy_client.get_transaction_receipt(transaction)
+        return deploy_client.poll(transaction)
 
     for _ in range(10):
         send_transaction()
 
-    # The private chain used for tests has a very low pruning setting
-    pruned_after_blocks = 10
+    # Wait until the target block has be prunned, it has to be larger than
+    # pruning_history
+    pruned_after_blocks = pruning_history * 1.5
 
     waiting.wait_for_block(
         raiden=app1.raiden, block_number=close_block + pruned_after_blocks, retry_timeout=1

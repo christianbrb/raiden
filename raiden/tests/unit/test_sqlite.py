@@ -30,14 +30,22 @@ from raiden.transfer.mediated_transfer.events import (
 from raiden.transfer.mediated_transfer.state_change import (
     ActionInitMediator,
     ActionInitTarget,
+    ActionTransferReroute,
     ReceiveLockExpired,
     ReceiveTransferRefund,
-    ReceiveTransferRefundCancelRoute,
 )
 from raiden.transfer.state import BalanceProofUnsignedState, RouteState
 from raiden.transfer.state_change import Block, ReceiveUnlock
 from raiden.utils import sha3
-from raiden.utils.typing import BlockExpiration, BlockGasLimit, BlockNumber, MessageID, TokenAmount
+from raiden.utils.typing import (
+    AdditionalHash,
+    BlockExpiration,
+    BlockGasLimit,
+    BlockNumber,
+    Locksroot,
+    MessageID,
+    TokenAmount,
+)
 
 
 def make_signed_balance_proof_from_counter(counter):
@@ -54,8 +62,8 @@ def make_signed_balance_proof_from_counter(counter):
             canonical_identifier=factories.make_canonical_identifier(
                 token_network_address=factories.make_address(), channel_identifier=next(counter)
             ),
-            locksroot=sha3(lock.as_bytes),
-            message_hash=sha3(b""),
+            locksroot=Locksroot(sha3(lock.as_bytes)),
+            message_hash=AdditionalHash(sha3(b"")),
             sender=factories.HOP1,
             pkey=factories.HOP1_KEY,
         )
@@ -69,7 +77,7 @@ def make_balance_proof_from_counter(counter) -> BalanceProofUnsignedState:
         nonce=next(counter),
         transferred_amount=next(counter),
         locked_amount=next(counter),
-        locksroot=sha3(next(counter).to_bytes(1, "big")),
+        locksroot=Locksroot(sha3(next(counter).to_bytes(1, "big"))),
         canonical_identifier=factories.make_canonical_identifier(
             chain_identifier=next(counter),
             token_network_address=factories.make_address(),
@@ -187,7 +195,7 @@ def test_get_state_change_with_balance_proof():
         sender=transfer.balance_proof.sender,  # pylint: disable=no-member
     )
     transfer = make_signed_transfer_from_counter(counter)
-    transfer_refund_cancel_route = ReceiveTransferRefundCancelRoute(
+    transfer_reroute = ActionTransferReroute(
         transfer=transfer,
         balance_proof=transfer.balance_proof,
         sender=transfer.balance_proof.sender,  # pylint: disable=no-member
@@ -219,7 +227,7 @@ def test_get_state_change_with_balance_proof():
         (lock_expired, lock_expired.balance_proof),
         (unlock, unlock.balance_proof),
         (transfer_refund, transfer_refund.transfer.balance_proof),
-        (transfer_refund_cancel_route, transfer_refund_cancel_route.transfer.balance_proof),
+        (transfer_reroute, transfer_reroute.transfer.balance_proof),
         (action_init_mediator, action_init_mediator.from_transfer.balance_proof),
         (action_init_target, action_init_target.transfer.balance_proof),
     ]
@@ -349,7 +357,7 @@ def test_get_event_with_balance_proof():
 
         # Checking that balance proof attribute can be accessed for all events.
         # Issue https://github.com/raiden-network/raiden/issues/3179
-        assert event_record.data.balance_proof == event.balance_proof  # type: ignore
+        assert event_record.data.balance_proof == event.balance_proof
 
     storage.close()
 
@@ -423,7 +431,7 @@ def test_batch_query_state_changes():
             # Should be 5 of them
             ("_type", "raiden.transfer.state_change.ContractReceiveChannel%"),
             # Should be only 1
-            ("_type", "raiden.transfer.state_change.ContractReceiveNewPaymentNetwork"),
+            ("_type", "raiden.transfer.state_change.ContractReceiveNewTokenNetworkRegistry"),
         ],
         logical_and=False,
     )

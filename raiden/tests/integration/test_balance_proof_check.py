@@ -48,11 +48,11 @@ def run_test_node_can_settle_if_close_didnt_use_any_balance_proof(
     app0, app1 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
         chain_state=chain_state,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
     )
     channel_identifier = get_channelstate(app0, app1, token_network_address).identifier
@@ -84,8 +84,7 @@ def run_test_node_can_settle_if_close_didnt_use_any_balance_proof(
         transferred_amount=0,
     )
     closing_data = (
-        empty_balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF_UPDATE)
-        + EMPTY_SIGNATURE
+        empty_balance_proof.serialize_bin(msg_type=MessageTypeId.BALANCE_PROOF) + EMPTY_SIGNATURE
     )
     closing_signature = app1.raiden.signer.sign(data=closing_data)
 
@@ -103,7 +102,7 @@ def run_test_node_can_settle_if_close_didnt_use_any_balance_proof(
     )
     waiting.wait_for_settle(
         raiden=app0.raiden,
-        payment_network_address=registry_address,
+        token_network_registry_address=registry_address,
         token_address=token_address,
         channel_ids=[channel_identifier],
         retry_timeout=app0.raiden.alarm.sleep_time,
@@ -149,11 +148,11 @@ def run_test_node_can_settle_if_partner_does_not_call_update_transfer(
     app0, app1 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
         chain_state=chain_state,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
     )
     channel_identifier = get_channelstate(app0, app1, token_network_address).identifier
@@ -178,7 +177,7 @@ def run_test_node_can_settle_if_partner_does_not_call_update_transfer(
 
     waiting.wait_for_settle(
         raiden=app0.raiden,
-        payment_network_address=registry_address,
+        token_network_registry_address=registry_address,
         token_address=token_address,
         channel_ids=[channel_identifier],
         retry_timeout=app0.raiden.alarm.sleep_time,

@@ -16,6 +16,7 @@ from raiden.tests.utils.events import search_for_item
 from raiden.tests.utils.network import CHAIN
 from raiden.tests.utils.protocol import WaitForMessage
 from raiden.tests.utils.transfer import (
+    assert_succeeding_transfer_invariants,
     assert_synced_channel_state,
     transfer,
     transfer_and_assert_path,
@@ -52,9 +53,9 @@ def run_test_mediated_transfer(
     app0, app1, app2 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, payment_network_address, token_address
+        chain_state, token_network_registry_address, token_address
     )
 
     amount = 10
@@ -69,7 +70,7 @@ def run_test_mediated_transfer(
 
     with gevent.Timeout(network_wait):
         wait_assert(
-            assert_synced_channel_state,
+            assert_succeeding_transfer_invariants,
             token_network_address,
             app0,
             deposit - amount,
@@ -80,7 +81,7 @@ def run_test_mediated_transfer(
         )
     with gevent.Timeout(network_wait):
         wait_assert(
-            assert_synced_channel_state,
+            assert_succeeding_transfer_invariants,
             token_network_address,
             app1,
             deposit - amount,
@@ -112,9 +113,9 @@ def run_test_locked_transfer_secret_registered_onchain(
     app0 = raiden_network[0]
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, payment_network_address, token_address
+        chain_state, token_network_registry_address, token_address
     )
 
     amount = 1
@@ -187,9 +188,9 @@ def run_test_mediated_transfer_with_entire_deposit(
     app0, app1, app2 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, payment_network_address, token_address
+        chain_state, token_network_registry_address, token_address
     )
 
     transfer_and_assert_path(
@@ -211,11 +212,25 @@ def run_test_mediated_transfer_with_entire_deposit(
 
     with gevent.Timeout(network_wait):
         wait_assert(
-            assert_synced_channel_state, token_network_address, app0, deposit * 2, [], app1, 0, []
+            assert_succeeding_transfer_invariants,
+            token_network_address,
+            app0,
+            deposit * 2,
+            [],
+            app1,
+            0,
+            [],
         )
     with gevent.Timeout(network_wait):
         wait_assert(
-            assert_synced_channel_state, token_network_address, app1, deposit * 2, [], app2, 0, []
+            assert_succeeding_transfer_invariants,
+            token_network_address,
+            app1,
+            deposit * 2,
+            [],
+            app2,
+            0,
+            [],
         )
 
 
@@ -263,9 +278,9 @@ def run_test_mediated_transfer_messages_out_of_order(
 
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, payment_network_address, token_address
+        chain_state, token_network_registry_address, token_address
     )
 
     amount = 10
@@ -295,7 +310,7 @@ def run_test_mediated_transfer_messages_out_of_order(
     transfer_received.payment_done.wait()
     with gevent.Timeout(network_wait):
         wait_assert(
-            assert_synced_channel_state,
+            assert_succeeding_transfer_invariants,
             token_network_address,
             app0,
             deposit - amount,
@@ -307,7 +322,7 @@ def run_test_mediated_transfer_messages_out_of_order(
 
     with gevent.Timeout(network_wait):
         wait_assert(
-            assert_synced_channel_state,
+            assert_succeeding_transfer_invariants,
             token_network_address,
             app1,
             deposit - amount,
@@ -333,9 +348,9 @@ def run_test_mediated_transfer_calls_pfs(raiden_network, token_addresses):
     app0, = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, payment_network_address, token_address
+        chain_state, token_network_registry_address, token_address
     )
 
     with patch("raiden.routing.query_paths", return_value=([], None)) as patched:
@@ -355,12 +370,11 @@ def run_test_mediated_transfer_calls_pfs(raiden_network, token_addresses):
             info=PFSInfo(
                 url="mock-address",
                 chain_id=app0.raiden.chain.network_id,
-                token_network_registry_address=payment_network_address,
+                token_network_registry_address=token_network_registry_address,
                 payment_address=factories.make_address(),
                 message="",
                 operator="",
                 version="",
-                settings="",
                 price=TokenAmount(0),
             ),
             maximum_fee=TokenAmount(100),
@@ -426,48 +440,43 @@ def test_mediated_transfer_with_allocated_fee(
 def run_test_mediated_transfer_with_allocated_fee(
     raiden_network, number_of_nodes, deposit, token_addresses, network_wait
 ):
-    app0, app1, app2, app3 = raiden_network
+    app0, app1, app2, _ = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, payment_network_address, token_address
+        chain_state, token_network_registry_address, token_address
     )
     fee = FeeAmount(5)
     amount = PaymentAmount(10)
+    timeout = network_wait * number_of_nodes
 
-    transfer(
-        initiator_app=app0,
-        target_app=app3,
+    transfer_and_assert_path(
+        path=raiden_network,
         token_address=token_address,
         amount=amount,
         identifier=1,
         fee=fee,
-        timeout=network_wait * number_of_nodes,
+        timeout=timeout,
     )
-
-    with gevent.Timeout(network_wait):
-        wait_assert(
-            assert_synced_channel_state,
-            token_network_address,
-            app0,
-            deposit - amount - fee,
-            [],
-            app1,
-            deposit + amount + fee,
-            [],
-        )
-    with gevent.Timeout(network_wait):
-        wait_assert(
-            assert_synced_channel_state,
-            token_network_address,
-            app1,
-            deposit - amount - fee,
-            [],
-            app2,
-            deposit + amount + fee,
-            [],
-        )
+    assert_synced_channel_state(
+        token_network_address=token_network_address,
+        app0=app0,
+        balance0=deposit - amount - fee,
+        pending_locks0=[],
+        app1=app1,
+        balance1=deposit + amount + fee,
+        pending_locks1=[],
+    )
+    assert_synced_channel_state(
+        token_network_address=token_network_address,
+        app0=app1,
+        balance0=deposit - amount - fee,
+        pending_locks0=[],
+        app1=app2,
+        balance1=deposit + amount + fee,
+        pending_locks1=[],
+    )
 
     app1_app2_channel_state = views.get_channelstate_by_token_network_and_partner(
         chain_state=views.state_from_raiden(app1.raiden),
@@ -483,29 +492,6 @@ def run_test_mediated_transfer_with_allocated_fee(
 
     app1.raiden.handle_state_changes(state_changes=[action_update_fee])
 
-    transfer(
-        initiator_app=app0,
-        target_app=app3,
-        token_address=token_address,
-        amount=amount,
-        identifier=2,
-        fee=fee,
-        timeout=network_wait * number_of_nodes,
-    )
-
-    # The fees have been consumed exclusively by app1
-    with gevent.Timeout(network_wait):
-        wait_assert(
-            assert_synced_channel_state,
-            token_network_address,
-            app0,
-            deposit - 2 * (amount + fee),
-            [],
-            app1,
-            deposit + 2 * (amount + fee),
-            [],
-        )
-
     # app2's poor soul gets no mediation fees on the second transfer.
     # Only the first transfer had a fee which was paid to app2 though
     # app2 doesn't set its fee but it would still receive the complete
@@ -516,17 +502,32 @@ def run_test_mediated_transfer_with_allocated_fee(
     # any fee (the channel's fee was 0).
     # The second transfer's fee was deducted by
     # app1 (provided we've set the fee of the channel)
-    with gevent.Timeout(network_wait):
-        wait_assert(
-            assert_synced_channel_state,
-            token_network_address,
-            app1,
-            deposit - (amount * 2) - fee,
-            [],
-            app2,
-            deposit + (amount * 2) + fee,
-            [],
-        )
+    transfer_and_assert_path(
+        path=raiden_network,
+        token_address=token_address,
+        amount=amount,
+        identifier=2,
+        fee=fee,
+        timeout=timeout,
+    )
+    assert_synced_channel_state(
+        token_network_address=token_network_address,
+        app0=app0,
+        balance0=deposit - 2 * (amount + fee),
+        pending_locks0=[],
+        app1=app1,
+        balance1=deposit + 2 * (amount + fee),
+        pending_locks1=[],
+    )
+    assert_synced_channel_state(
+        token_network_address=token_network_address,
+        app0=app1,
+        balance0=deposit - (2 * amount) - fee,
+        pending_locks0=[],
+        app1=app2,
+        balance1=deposit + (2 * amount) + fee,
+        pending_locks1=[],
+    )
 
 
 # pylint: disable=unused-argument
@@ -557,9 +558,9 @@ def run_test_mediated_transfer_with_node_consuming_more_than_allocated_fee(
     app0, app1, app2 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, payment_network_address, token_address
+        chain_state, token_network_registry_address, token_address
     )
     fee = FeeAmount(5)
     amount = PaymentAmount(10)

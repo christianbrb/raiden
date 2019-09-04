@@ -6,36 +6,48 @@ from itertools import product
 import gevent
 import structlog
 from eth_utils import to_checksum_address
+from web3 import Web3
 
 from raiden import waiting
 from raiden.app import App
-from raiden.constants import RoutingMode
+from raiden.constants import Environment, RoutingMode
 from raiden.network.blockchain_service import BlockChainService
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.network.transport import MatrixTransport
 from raiden.raiden_event_handler import RaidenEventHandler
-from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS, DEFAULT_RETRY_TIMEOUT
+from raiden.raiden_service import RaidenService
+from raiden.settings import (
+    DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
+    DEFAULT_RETRY_TIMEOUT,
+    MediationFeeConfig,
+)
 from raiden.tests.utils.app import database_from_privatekey
 from raiden.tests.utils.factories import UNIT_CHAIN_ID
 from raiden.tests.utils.protocol import HoldRaidenEventHandler, WaitForMessage
+from raiden.tests.utils.transport import ParsedURL
+from raiden.transfer import views
 from raiden.transfer.identifiers import CanonicalIdentifier
-from raiden.transfer.mediated_transfer.mediation_fee import FeeScheduleState
 from raiden.transfer.views import state_from_raiden
 from raiden.utils import BlockNumber, merge_dict
 from raiden.utils.typing import (
     Address,
+    BlockSpecification,
     BlockTimeout,
+    ChainID,
     ChannelID,
     Iterable,
     List,
     Optional,
-    PaymentNetworkAddress,
+    PrivateKey,
+    SecretRegistryAddress,
     TokenAddress,
     TokenAmount,
     TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
     Tuple,
 )
-from raiden.waiting import wait_for_payment_network
+from raiden.waiting import wait_for_token_network
+from raiden_contracts.contract_manager import ContractManager
 
 AppChannels = Iterable[Tuple[App, App]]
 
@@ -118,44 +130,56 @@ def payment_channel_open_and_deposit(
     """ Open a new channel with app0 and app1 as participants """
     assert token_address
 
-    token_network_address = app0.raiden.default_registry.get_token_network(token_address)
+    block_identifier: BlockSpecification
+    if app0.raiden.wal:
+        block_identifier = views.state_from_raiden(app0.raiden).block_hash
+    else:
+        block_identifier = "latest"
+    token_network_address = app0.raiden.default_registry.get_token_network(
+        token_address=token_address, block_identifier=block_identifier
+    )
     assert token_network_address, "request a channel for an unregistered token"
     token_network_proxy = app0.raiden.chain.token_network(token_network_address)
 
     channel_identifier = token_network_proxy.new_netting_channel(
-        partner=app1.raiden.address, settle_timeout=settle_timeout, given_block_identifier="latest"
+        partner=app1.raiden.address,
+        settle_timeout=settle_timeout,
+        given_block_identifier=block_identifier,
     )
     assert channel_identifier
-    canonical_identifier = CanonicalIdentifier(
-        chain_identifier=state_from_raiden(app0.raiden).chain_id,
-        token_network_address=token_network_proxy.address,
-        channel_identifier=channel_identifier,
-    )
 
-    for app in [app0, app1]:
-        # Use each app's own chain because of the private key / local signing
-        token = app.raiden.chain.token(token_address)
-        payment_channel_proxy = app.raiden.chain.payment_channel(
-            canonical_identifier=canonical_identifier
+    if deposit != 0:
+        canonical_identifier = CanonicalIdentifier(
+            chain_identifier=state_from_raiden(app0.raiden).chain_id,
+            token_network_address=token_network_proxy.address,
+            channel_identifier=channel_identifier,
         )
+        for app in [app0, app1]:
+            # Use each app's own chain because of the private key / local signing
+            token = app.raiden.chain.token(token_address)
+            payment_channel_proxy = app.raiden.chain.payment_channel(
+                canonical_identifier=canonical_identifier
+            )
 
-        # This check can succeed and the deposit still fail, if channels are
-        # openned in parallel
-        previous_balance = token.balance_of(app.raiden.address)
-        assert previous_balance >= deposit
+            # This check can succeed and the deposit still fail, if channels are
+            # openned in parallel
+            previous_balance = token.balance_of(app.raiden.address)
+            assert previous_balance >= deposit
 
-        # the payment channel proxy will call approve
-        # token.approve(token_network_proxy.address, deposit)
-        payment_channel_proxy.set_total_deposit(total_deposit=deposit, block_identifier="latest")
+            # the payment channel proxy will call approve
+            # token.approve(token_network_proxy.address, deposit)
+            payment_channel_proxy.set_total_deposit(
+                total_deposit=deposit, block_identifier="latest"
+            )
 
-        # Balance must decrease by at least but not exactly `deposit` amount,
-        # because channels can be openned in parallel
-        new_balance = token.balance_of(app.raiden.address)
-        assert new_balance <= previous_balance - deposit
+            # Balance must decrease by at least but not exactly `deposit` amount,
+            # because channels can be openned in parallel
+            new_balance = token.balance_of(app.raiden.address)
+            assert new_balance <= previous_balance - deposit
 
-    check_channel(
-        app0, app1, token_network_proxy.address, channel_identifier, settle_timeout, deposit
-    )
+        check_channel(
+            app0, app1, token_network_proxy.address, channel_identifier, settle_timeout, deposit
+        )
 
 
 def create_all_channels_for_network(
@@ -308,26 +332,26 @@ def create_sequential_channels(raiden_apps: List[App], channels_per_node: int) -
 
 
 def create_apps(
-    chain_id,
-    contracts_path,
-    blockchain_services,
-    token_network_registry_address,
+    chain_id: ChainID,
+    contracts_path: str,
+    blockchain_services: BlockchainServices,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     one_to_n_address: Optional[Address],
-    secret_registry_address,
-    service_registry_address,
-    user_deposit_address,
-    monitoring_service_contract_address,
-    reveal_timeout,
-    settle_timeout,
-    database_basedir,
-    retry_interval,
-    retries_before_backoff,
-    environment_type,
-    unrecoverable_error_should_crash,
-    local_matrix_url=None,
-    private_rooms=None,
-    global_rooms=None,
-):
+    secret_registry_address: SecretRegistryAddress,
+    service_registry_address: Optional[Address],
+    user_deposit_address: Address,
+    monitoring_service_contract_address: Address,
+    reveal_timeout: BlockTimeout,
+    settle_timeout: BlockTimeout,
+    database_basedir: str,
+    retry_interval: float,
+    retries_before_backoff: int,
+    environment_type: Environment,
+    unrecoverable_error_should_crash: bool,
+    local_matrix_url: Optional[ParsedURL],
+    private_rooms: bool,
+    global_rooms: List[str],
+) -> List[App]:
     """ Create the apps."""
     # pylint: disable=too-many-locals
     services = blockchain_services
@@ -348,11 +372,10 @@ def create_apps(
             "transport": {},
             "rpc": True,
             "console": False,
-            "default_fee_schedule": FeeScheduleState(),
+            "mediation_fees": MediationFeeConfig(),
         }
 
-        use_matrix = local_matrix_url is not None
-        if use_matrix:
+        if local_matrix_url is not None:
             merge_dict(
                 config,
                 {
@@ -429,14 +452,14 @@ def parallel_start_apps(raiden_apps: List[App]) -> None:
 
 
 def jsonrpc_services(
-    deploy_service,
-    private_keys,
-    secret_registry_address,
-    service_registry_address,
-    token_network_registry_address,
-    web3,
-    contract_manager,
-):
+    deploy_service: BlockChainService,
+    private_keys: List[PrivateKey],
+    secret_registry_address: Address,
+    service_registry_address: Address,
+    token_network_registry_address: TokenNetworkRegistryAddress,
+    web3: Web3,
+    contract_manager: ContractManager,
+) -> BlockchainServices:
     secret_registry = deploy_service.secret_registry(secret_registry_address)
     service_registry = None
     if service_registry_address:
@@ -476,9 +499,9 @@ def wait_for_alarm_start(
 
 
 def wait_for_usable_channel(
-    app0: App,
-    app1: App,
-    registry_address: PaymentNetworkAddress,
+    raiden: RaidenService,
+    partner_address: Address,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_address: TokenAddress,
     our_deposit: TokenAmount,
     partner_deposit: TokenAmount,
@@ -490,48 +513,56 @@ def wait_for_usable_channel(
     is reachable.
     """
     waiting.wait_for_newchannel(
-        app0.raiden, registry_address, token_address, app1.raiden.address, retry_timeout
+        raiden=raiden,
+        token_network_registry_address=token_network_registry_address,
+        token_address=token_address,
+        partner_address=partner_address,
+        retry_timeout=retry_timeout,
     )
 
+    # wait for our deposit
     waiting.wait_for_participant_deposit(
-        app0.raiden,
-        registry_address,
-        token_address,
-        app1.raiden.address,
-        app0.raiden.address,
-        our_deposit,
-        retry_timeout,
+        raiden=raiden,
+        token_network_registry_address=token_network_registry_address,
+        token_address=token_address,
+        partner_address=partner_address,
+        target_address=raiden.address,
+        target_balance=our_deposit,
+        retry_timeout=retry_timeout,
     )
 
+    # wait for the partner deposit
     waiting.wait_for_participant_deposit(
-        app0.raiden,
-        registry_address,
-        token_address,
-        app1.raiden.address,
-        app1.raiden.address,
-        partner_deposit,
-        retry_timeout,
+        raiden=raiden,
+        token_network_registry_address=token_network_registry_address,
+        token_address=token_address,
+        partner_address=partner_address,
+        target_address=partner_address,
+        target_balance=partner_deposit,
+        retry_timeout=retry_timeout,
     )
 
-    waiting.wait_for_healthy(app0.raiden, app1.raiden.address, retry_timeout)
+    waiting.wait_for_healthy(
+        raiden=raiden, node_address=partner_address, retry_timeout=retry_timeout
+    )
 
 
 def wait_for_token_networks(
     raiden_apps: List[App],
-    token_network_registry_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_addresses: List[TokenAddress],
     retry_timeout: float = DEFAULT_RETRY_TIMEOUT,
 ) -> None:
     for token_address in token_addresses:
         for app in raiden_apps:
-            wait_for_payment_network(
+            wait_for_token_network(
                 app.raiden, token_network_registry_address, token_address, retry_timeout
             )
 
 
 def wait_for_channels(
     app_channels: AppChannels,
-    registry_address: PaymentNetworkAddress,
+    token_network_registry_address: TokenNetworkRegistryAddress,
     token_addresses: List[TokenAddress],
     deposit: TokenAmount,
     retry_timeout: float = DEFAULT_RETRY_TIMEOUT,
@@ -539,9 +570,23 @@ def wait_for_channels(
     """ Wait until all channels are usable from both directions. """
     for app0, app1 in app_channels:
         for token_address in token_addresses:
+            # app0 waits for the channel to be usable
             wait_for_usable_channel(
-                app0, app1, registry_address, token_address, deposit, deposit, retry_timeout
+                raiden=app0.raiden,
+                partner_address=app1.raiden.address,
+                token_network_registry_address=token_network_registry_address,
+                token_address=token_address,
+                our_deposit=deposit,
+                partner_deposit=deposit,
+                retry_timeout=retry_timeout,
             )
+            # app1 waits for the channel to be usable
             wait_for_usable_channel(
-                app1, app0, registry_address, token_address, deposit, deposit, retry_timeout
+                raiden=app1.raiden,
+                partner_address=app0.raiden.address,
+                token_network_registry_address=token_network_registry_address,
+                token_address=token_address,
+                our_deposit=deposit,
+                partner_deposit=deposit,
+                retry_timeout=retry_timeout,
             )

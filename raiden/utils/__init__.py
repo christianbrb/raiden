@@ -10,19 +10,18 @@ from typing import Any, Callable
 import gevent
 from eth_keys import keys
 from eth_utils import (
-    add_0x_prefix,
-    decode_hex,
     encode_hex,
     is_0x_prefixed,
     is_checksum_address,
     remove_0x_prefix,
+    to_canonical_address,
     to_checksum_address,
 )
 from web3 import Web3
 
 import raiden
 from raiden import constants
-from raiden.exceptions import InvalidAddress
+from raiden.exceptions import InvalidChecksummedAddress
 from raiden.utils.signing import sha3  # noqa
 from raiden.utils.typing import (
     Address,
@@ -64,24 +63,12 @@ def address_checksum_and_decode(addr: str) -> Address:
         checksummed according to EIP55 specification
     """
     if not is_0x_prefixed(addr):
-        raise InvalidAddress("Address must be 0x prefixed")
+        raise InvalidChecksummedAddress("Address must be 0x prefixed")
 
     if not is_checksum_address(addr):
-        raise InvalidAddress("Address must be EIP55 checksummed")
+        raise InvalidChecksummedAddress("Address must be EIP55 checksummed")
 
-    addr_bytes = decode_hex(addr)
-    assert len(addr_bytes) in (20, 0)
-    return Address(addr_bytes)
-
-
-def data_encoder(data: bytes, length: int = 0) -> str:
-    data = remove_0x_prefix(encode_hex(data))
-    return add_0x_prefix(data.rjust(length * 2, b"0").decode())
-
-
-def data_decoder(data: str) -> bytes:
-    assert is_0x_prefixed(data)
-    return decode_hex(data)
+    return to_canonical_address(addr)
 
 
 def pex(data: bytes) -> str:

@@ -4,7 +4,13 @@ from typing import List, Optional, Sequence, Tuple, TypeVar
 
 from raiden.exceptions import UndefinedMediationFee
 from raiden.transfer.architecture import State
-from raiden.utils.typing import Balance, FeeAmount, PaymentAmount, TokenAmount
+from raiden.utils.typing import (
+    Balance,
+    FeeAmount,
+    PaymentAmount,
+    ProportionalFeeAmount,
+    TokenAmount,
+)
 
 NUM_DISCRETISATION_POINTS = 21
 
@@ -39,14 +45,14 @@ T = TypeVar("T", bound="FeeScheduleState")
 class FeeScheduleState(State):
     # pylint: disable=not-an-iterable
     flat: FeeAmount = FeeAmount(0)
-    proportional: int = 0  # as micros, e.g. 1% = 0.01e6
+    proportional: ProportionalFeeAmount = ProportionalFeeAmount(0)  # as micros, e.g. 1% = 0.01e6
     imbalance_penalty: Optional[List[Tuple[TokenAmount, FeeAmount]]] = None
     _penalty_func: Optional[Interpolate] = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         self._update_penalty_func()
 
-    def _update_penalty_func(self):
+    def _update_penalty_func(self) -> None:
         if self.imbalance_penalty:
             assert isinstance(self.imbalance_penalty, list)
             x_list, y_list = tuple(zip(*self.imbalance_penalty))
@@ -93,17 +99,24 @@ def linspace(start: TokenAmount, stop: TokenAmount, num: int) -> List[TokenAmoun
 
 
 def calculate_imbalance_fees(
-    channel_capacity: TokenAmount, max_imbalance_fee: FeeAmount
+    channel_capacity: TokenAmount, proportional_imbalance_fee: ProportionalFeeAmount
 ) -> Optional[List[Tuple[TokenAmount, FeeAmount]]]:
     """ Calculates a quadratic rebalancing curve.
 
-    The penalty term takes the value `max_imbalance_fee` at the extrema.
+    The penalty term takes the following value at the extrema:
+        channel_capacity * (proportional_imbalance_fee / 1_000_000)
     """
-    if max_imbalance_fee == 0:
+    assert channel_capacity >= 0
+    assert proportional_imbalance_fee >= 0
+
+    if proportional_imbalance_fee == 0:
         return None
 
     if channel_capacity == 0:
         return None
+
+    # calculate the maximum imbalance fee for the channel
+    max_imbalance_fee = round(channel_capacity * proportional_imbalance_fee / int(1e6))
 
     def f(balance: TokenAmount) -> FeeAmount:
         constant = max_imbalance_fee / (channel_capacity / 2) ** 2

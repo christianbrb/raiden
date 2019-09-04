@@ -12,6 +12,7 @@ from raiden.messages.transfers import RevealSecret, SecretRequest
 from raiden.storage.serialization import DictSerializer
 from raiden.tests.utils import factories
 from raiden.tests.utils.tests import fixture_all_combinations
+from raiden.transfer.mediated_transfer.mediation_fee import FeeScheduleState
 from raiden.transfer.mediated_transfer.state_change import (
     ReceiveLockExpired,
     ReceiveSecretRequest,
@@ -21,8 +22,10 @@ from raiden.transfer.state_change import ReceiveDelivered, ReceiveProcessed, Rec
 from raiden.utils import sha3
 from raiden.utils.packing import pack_balance_proof, pack_reward_proof, pack_signed_balance_proof
 from raiden.utils.signer import LocalSigner, recover
+from raiden.utils.typing import Address, TokenAmount
+from raiden_contracts.constants import MessageTypeId
 
-MSC_ADDRESS = bytes([1] * 20)
+MSC_ADDRESS = Address(bytes([1] * 20))
 PARTNER_PRIVKEY, PARTNER_ADDRESS = factories.make_privkey_address()
 PRIVKEY, ADDRESS = factories.make_privkey_address()
 signer = LocalSigner(PRIVKEY)
@@ -42,7 +45,7 @@ def test_request_monitoring() -> None:
     )
     request_monitoring = RequestMonitoring(
         balance_proof=partner_signed_balance_proof,
-        reward_amount=55,
+        reward_amount=TokenAmount(55),
         signature=EMPTY_SIGNATURE,
         monitoring_service_contract_address=MSC_ADDRESS,
     )
@@ -52,7 +55,9 @@ def test_request_monitoring() -> None:
     assert DictSerializer.deserialize(as_dict) == request_monitoring
     # RequestMonitoring can be created directly from BalanceProofSignedState
     direct_created = RequestMonitoring.from_balance_proof_signed_state(
-        balance_proof, reward_amount=55, monitoring_service_contract_address=MSC_ADDRESS
+        balance_proof,
+        reward_amount=TokenAmount(55),
+        monitoring_service_contract_address=MSC_ADDRESS,
     )
     # `direct_created` is not signed while request_monitoring is
     assert DictSerializer().serialize(direct_created) != DictSerializer().serialize(
@@ -64,13 +69,16 @@ def test_request_monitoring() -> None:
     assert direct_created == request_monitoring
     other_balance_proof = factories.create(factories.replace(properties, message_hash=sha3(b"2")))
     other_instance = RequestMonitoring.from_balance_proof_signed_state(
-        other_balance_proof, reward_amount=55, monitoring_service_contract_address=MSC_ADDRESS
+        other_balance_proof,
+        reward_amount=TokenAmount(55),
+        monitoring_service_contract_address=MSC_ADDRESS,
     )
     other_instance.sign(signer)
     # different balance proof ==> non-equality
     assert other_instance != request_monitoring
 
     # test signature verification
+    assert request_monitoring.non_closing_signature
     reward_proof_data = pack_reward_proof(
         chain_id=request_monitoring.balance_proof.chain_id,
         reward_amount=request_monitoring.reward_amount,
@@ -78,9 +86,11 @@ def test_request_monitoring() -> None:
         non_closing_signature=request_monitoring.non_closing_signature,
     )
 
+    assert request_monitoring.reward_proof_signature
     assert recover(reward_proof_data, request_monitoring.reward_proof_signature) == ADDRESS
 
     blinded_data = pack_signed_balance_proof(
+        msg_type=MessageTypeId.BALANCE_PROOF_UPDATE,
         nonce=request_monitoring.balance_proof.nonce,
         balance_hash=request_monitoring.balance_proof.balance_hash,
         additional_hash=request_monitoring.balance_proof.additional_hash,
@@ -133,6 +143,15 @@ def test_fee_update():
     message.sign(signer)
 
     assert message == DictSerializer.deserialize(DictSerializer.serialize(message))
+
+
+def test_fee_schedule_state():
+    """ Don't serialize internal functions
+
+    Regression test for https://github.com/raiden-network/raiden/issues/4367
+    """
+    state = FeeScheduleState(imbalance_penalty=[])
+    assert "_penalty_func" not in DictSerializer.serialize(state)
 
 
 def test_tamper_request_monitoring():

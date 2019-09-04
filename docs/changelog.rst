@@ -2,7 +2,28 @@
 Changelog
 =========
 
+* :feature:`4102` Display progress during syncing the blockchain.
+* :feature:`4654` Define imbalance fees relative to channel balance.
+* :feature:`4653` Allow setting per token network flat mediation fee from CLI.
+* :bug:`4685` Invalidate a withdraw transaction on restart if the channel is closed.
+* :bug:`4560` Formatting of timestamp fields on the API should follow ISO8601.
+* :bug:`4561` Limit and offset should now work properly in the payment API event queries.
+
+* :release:`0.100.5a0 <2019-08-12>`
+* :feature:`-` Update WebUI to version 0.9.2 https://github.com/raiden-network/webui/releases/tag/v0.9.2
+* :bug:`4498` Raiden now waits for synchronization with the blockchain events before finishing its startup and opening the API.
+* :bug:`4348` Fix wrong calculation of ``balance`` field of channel information when tokens are locked in payments
+* :bug:`4502` Fix a Raiden crash related to routing feedback
+
+* :release:`0.100.5-dev0 <2019-07-30>`
+* :feature:`4457` Raiden now checks the version of the ethereum node at startup and if it is not supported quits with an appropriate message.
 * :feature:`-` Update WebUI to version 0.9.1 https://github.com/raiden-network/webui/releases/tag/v0.9.1
+* :bug:`4446` Fix problems with the calculation of mediation fees
+* :bug:`4383` Fix locked transfer not being sent due to global queue handling.
+* :bug:`4378` Fix json decoding error that could lead to a crash.
+* :bug:`4373` Fix a deserialization error for imbalance penalty
+* :bug:`4377` The client now sends proper capacity updates to the PFS.
+* :bug:`4301` Providing an endpoint argument without a port no longer leads to a crash.
 
 * :release:`0.100.4 <2019-06-08>`
 * :feature:`4095` Prevent Raiden from sending IOU to PFS when fee is 0

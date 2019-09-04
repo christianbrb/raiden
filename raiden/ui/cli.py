@@ -23,9 +23,8 @@ from raiden.log_config import configure_logging
 from raiden.network.utils import get_free_port
 from raiden.settings import (
     DEFAULT_HTTP_SERVER_PORT,
-    DEFAULT_MEDIATION_FLAT_FEE,
-    DEFAULT_MEDIATION_MAX_IMBALANCE_FEE,
     DEFAULT_MEDIATION_PROPORTIONAL_FEE,
+    DEFAULT_MEDIATION_PROPORTIONAL_IMBALANCE_FEE,
     DEFAULT_PATHFINDING_IOU_TIMEOUT,
     DEFAULT_PATHFINDING_MAX_FEE,
     DEFAULT_PATHFINDING_MAX_PATHS,
@@ -46,7 +45,6 @@ from raiden.utils.cli import (
     option_group,
     validate_option_dependencies,
 )
-from raiden.utils.typing import FeeAmount
 
 from .runners import EchoNodeRunner, MatrixRunner
 
@@ -327,7 +325,7 @@ def options(func):
             option("--log-json", help="Output log lines in JSON format", is_flag=True),
             option(
                 "--debug-logfile-name",
-                help=("The debug logfile name."),
+                help="The debug logfile name.",
                 type=click.Path(dir_okay=False, writable=True, resolve_path=True),
             ),
             option(
@@ -402,23 +400,28 @@ def options(func):
             "Mediation Fee Options",
             option(
                 "--flat-fee",
-                help=("Flat fee required for every mediation in wei of the mediated token."),
-                default=DEFAULT_MEDIATION_FLAT_FEE,
-                type=FeeAmount,
-                show_default=True,
+                help=(
+                    "Sets the flat fee required for every mediation in wei of the "
+                    "mediated token for a certain token network."
+                ),
+                type=(ADDRESS_TYPE, click.IntRange(min=0)),
+                multiple=True,
             ),
             option(
                 "--proportional-fee",
-                help=("Mediation fee as ratio of mediated amount in parts-per-million (10^-6)."),
+                help="Mediation fee as ratio of mediated amount in parts-per-million (10^-6).",
                 default=DEFAULT_MEDIATION_PROPORTIONAL_FEE,
-                type=int,
+                type=click.IntRange(min=0, max=10 ** 6),
                 show_default=True,
             ),
             option(
-                "--max-imbalance-fee",
-                help="Set the worst-case imbalance fee in wei of the mediated token. (Preview)",
-                default=DEFAULT_MEDIATION_MAX_IMBALANCE_FEE,
-                type=FeeAmount,
+                "--proportional-imbalance-fee",
+                help=(
+                    "Set the worst-case imbalance fee relative to the channels capacity "
+                    "in parts-per-million (10^-6)."
+                ),
+                default=DEFAULT_MEDIATION_PROPORTIONAL_IMBALANCE_FEE,
+                type=click.IntRange(min=0, max=10 ** 6),
                 show_default=True,
             ),
         ),
@@ -655,13 +658,13 @@ def smoketest(ctx, debug: bool, eth_client: EthClient, report_path: Optional[str
 
             port = next(free_port_generator)
 
-            # TODO: Use a routing_mode PRIVATE here, as no updates should be broadcasted
             args["api_address"] = f"localhost:{port}"
             args["config"] = deepcopy(App.DEFAULT_CONFIG)
             args["environment_type"] = environment_type
             args["extra_config"] = {"transport": {"matrix": {"available_servers": server_urls}}}
             args["one_to_n_contract_address"] = "0x" + "1" * 40
             args["routing_mode"] = RoutingMode.PRIVATE
+            args["flat_fee"] = ()
 
             for option_ in run.params:
                 if option_.name in args.keys():

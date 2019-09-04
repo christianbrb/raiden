@@ -1,22 +1,43 @@
 from copy import deepcopy
 from typing import Any, Dict
+from unittest.mock import patch
 
 import pytest
+from eth_utils import to_canonical_address
 
 from raiden.app import App
 from raiden.constants import Environment, RoutingMode
-from raiden.tests.utils.factories import make_address
-from raiden.tests.utils.mocks import MockChain, MockWeb3, patched_get_for_succesful_pfs_info
+from raiden.network import pathfinding
+from raiden.network.pathfinding import PFSInfo
+from raiden.tests.utils.factories import make_address, make_token_network_registry_address
+from raiden.tests.utils.mocks import MockChain, MockWeb3
 from raiden.ui.checks import check_ethereum_network_id
 from raiden.ui.startup import setup_contracts_or_exit, setup_environment, setup_proxies_or_exit
+from raiden.utils.typing import TokenAmount, TokenNetworkRegistryAddress
 from raiden_contracts.constants import (
     CONTRACT_SECRET_REGISTRY,
     CONTRACT_SERVICE_REGISTRY,
     CONTRACT_TOKEN_NETWORK_REGISTRY,
     CONTRACT_USER_DEPOSIT,
 )
+from raiden_contracts.utils.type_aliases import ChainID
 
-token_network_registry_address_test_default = "0xB9633dd9a9a71F22C933bF121d7a22008f66B908"
+token_network_registry_address_test_default = TokenNetworkRegistryAddress(
+    to_canonical_address("0xB9633dd9a9a71F22C933bF121d7a22008f66B908")
+)
+
+pfs_payment_address_default = to_canonical_address("0xB9633dd9a9a71F22C933bF121d7a22008f66B907")
+
+PFS_INFO = PFSInfo(
+    url="my-pfs",
+    price=TokenAmount(12),
+    chain_id=ChainID(42),
+    token_network_registry_address=token_network_registry_address_test_default,
+    payment_address=pfs_payment_address_default,
+    message="This is your favorite pathfinding service",
+    operator="John Doe",
+    version="0.0.3",
+)
 
 
 def test_check_network_id_raises_with_mismatching_ids():
@@ -175,7 +196,7 @@ def test_setup_proxies_all_addresses_are_given():
     contracts = {}
     blockchain_service = MockChain(network_id=network_id, node_address=make_address())
 
-    with patched_get_for_succesful_pfs_info():
+    with patch.object(pathfinding, "get_pfs_info", return_value=PFS_INFO):
         proxies = setup_proxies_or_exit(
             config=config,
             tokennetwork_registry_contract_address=token_network_registry_address_test_default,
@@ -204,7 +225,7 @@ def test_setup_proxies_all_addresses_are_known():
     contracts = setup_contracts_or_exit(config, network_id)
     blockchain_service = MockChain(network_id=network_id, node_address=make_address())
 
-    with patched_get_for_succesful_pfs_info():
+    with patch.object(pathfinding, "get_pfs_info", return_value=PFS_INFO):
         proxies = setup_proxies_or_exit(
             config=config,
             tokennetwork_registry_contract_address=None,
@@ -242,7 +263,7 @@ def test_setup_proxies_no_service_registry_but_pfs():
     contracts = {}
     blockchain_service = MockChain(network_id=network_id, node_address=make_address())
 
-    with patched_get_for_succesful_pfs_info():
+    with patch.object(pathfinding, "get_pfs_info", return_value=PFS_INFO):
         proxies = setup_proxies_or_exit(
             config=config,
             tokennetwork_registry_contract_address=token_network_registry_address_test_default,
@@ -257,22 +278,29 @@ def test_setup_proxies_no_service_registry_but_pfs():
     assert proxies
 
 
-def test_setup_proxies_no_service_registry_and_no_pfs_address_but_requesting_pfs():
+@pytest.mark.parametrize("environment_type", [Environment.DEVELOPMENT, Environment.PRODUCTION])
+def test_setup_proxies_no_service_registry_and_no_pfs_address_but_requesting_pfs(environment_type):
     """
     Test that if pfs routing mode is requested and no address or service registry is given
     then the client exits with an error message
     """
 
     network_id = 42
-    config = {"environment_type": Environment.DEVELOPMENT, "chain_id": network_id, "services": {}}
+    config = {
+        "environment_type": environment_type,
+        "chain_id": network_id,
+        "services": dict(
+            pathfinding_max_fee=100, pathfinding_iou_timeout=500, pathfinding_max_paths=5
+        ),
+    }
     contracts = {}
     blockchain_service = MockChain(network_id=network_id, node_address=make_address())
 
     with pytest.raises(SystemExit):
-        with patched_get_for_succesful_pfs_info():
+        with patch.object(pathfinding, "get_pfs_info", return_value=PFS_INFO):
             setup_proxies_or_exit(
                 config=config,
-                tokennetwork_registry_contract_address=make_address(),
+                tokennetwork_registry_contract_address=make_token_network_registry_address(),
                 secret_registry_contract_address=make_address(),
                 user_deposit_contract_address=make_address(),
                 service_registry_contract_address=None,

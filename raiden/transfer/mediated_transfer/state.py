@@ -1,6 +1,5 @@
 # pylint: disable=too-few-public-methods,too-many-arguments,too-many-instance-attributes
 from dataclasses import dataclass, field
-from hashlib import sha256
 
 from raiden.constants import EMPTY_SECRETHASH, LOCKSROOT_OF_NO_LOCKS
 from raiden.transfer.architecture import State
@@ -11,6 +10,7 @@ from raiden.transfer.state import (
     HopState,
     RouteState,
 )
+from raiden.utils.secrethash import sha256_secrethash
 from raiden.utils.typing import (
     TYPE_CHECKING,
     Address,
@@ -23,13 +23,13 @@ from raiden.utils.typing import (
     Optional,
     PaymentAmount,
     PaymentID,
-    PaymentNetworkAddress,
     Secret,
     SecretHash,
     T_Address,
     TargetAddress,
     TokenAddress,
     TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
     typecheck,
 )
 
@@ -105,7 +105,7 @@ class TransferDescriptionWithSecretState(State):
     additional secret that can be used with a hash-time-lock.
     """
 
-    payment_network_address: PaymentNetworkAddress = field(repr=False)
+    token_network_registry_address: TokenNetworkRegistryAddress = field(repr=False)
     payment_identifier: PaymentID = field(repr=False)
     amount: PaymentAmount
     allocated_fee: FeeAmount
@@ -117,7 +117,7 @@ class TransferDescriptionWithSecretState(State):
 
     def __post_init__(self) -> None:
         if self.secrethash == EMPTY_SECRETHASH and self.secret:
-            self.secrethash = SecretHash(sha256(self.secret).digest())
+            self.secrethash = sha256_secrethash(self.secret)
 
 
 @dataclass

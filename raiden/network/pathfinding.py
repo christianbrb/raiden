@@ -9,14 +9,7 @@ from uuid import UUID
 import click
 import requests
 import structlog
-from eth_utils import (
-    decode_hex,
-    encode_hex,
-    is_same_address,
-    to_canonical_address,
-    to_checksum_address,
-    to_hex,
-)
+from eth_utils import decode_hex, encode_hex, to_canonical_address, to_checksum_address, to_hex
 from web3 import Web3
 
 from raiden.constants import DEFAULT_HTTP_REQUEST_TIMEOUT, ZERO_TOKENS, RoutingMode
@@ -31,6 +24,7 @@ from raiden.utils.typing import (
     BlockSpecification,
     ChainID,
     Dict,
+    FeeAmount,
     InitiatorAddress,
     List,
     Optional,
@@ -39,6 +33,7 @@ from raiden.utils.typing import (
     TargetAddress,
     TokenAmount,
     TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
     Tuple,
 )
 from raiden_contracts.utils.proofs import sign_one_to_n_iou
@@ -51,12 +46,11 @@ class PFSInfo:
     url: str
     price: TokenAmount
     chain_id: ChainID
-    token_network_registry_address: TokenNetworkAddress
+    token_network_registry_address: TokenNetworkRegistryAddress
     payment_address: Address
     message: str
     operator: str
     version: str
-    settings: str
 
 
 @dataclass
@@ -137,7 +131,7 @@ class PFSError(IntEnum):
 MAX_PATHS_QUERY_ATTEMPTS = 2
 
 
-def get_pfs_info(url: str) -> Optional[PFSInfo]:
+def get_pfs_info(url: str) -> PFSInfo:
     try:
         response = requests.get(f"{url}/api/v1/info", timeout=DEFAULT_HTTP_REQUEST_TIMEOUT)
         infos = get_response_json(response)
@@ -146,21 +140,60 @@ def get_pfs_info(url: str) -> Optional[PFSInfo]:
             url=url,
             price=infos["price_info"],
             chain_id=infos["network_info"]["chain_id"],
-            token_network_registry_address=to_canonical_address(
-                infos["network_info"]["registry_address"]
+            token_network_registry_address=TokenNetworkRegistryAddress(
+                to_canonical_address(infos["network_info"]["registry_address"])
             ),
             payment_address=to_canonical_address(infos["payment_address"]),
             message=infos["message"],
             operator=infos["operator"],
             version=infos["version"],
-            settings=infos["settings"],
         )
-    except (json.JSONDecodeError, requests.exceptions.RequestException, KeyError):
+    except (json.JSONDecodeError, requests.exceptions.RequestException, KeyError) as e:
+        raise ServiceRequestFailed(str(e)) from e
+
+
+def get_valid_pfs_url(
+    service_registry: ServiceRegistry,
+    index_in_service_registry: int,
+    block_identifier: BlockSpecification,
+    pathfinding_max_fee: FeeAmount,
+) -> Optional[str]:
+    """Returns the URL for the PFS identified by the given index
+
+    Checks validity of registration in the ServiceRegistry contract and
+    checks the price from the PFS' info endpoint.
+
+    Returns PFS URL or None (if any check fails).
+    """
+    address = service_registry.ever_made_deposits(
+        block_identifier=block_identifier, index=index_in_service_registry
+    )
+    if not address:
         return None
+
+    if not service_registry.has_valid_registration(
+        service_address=address, block_identifier=block_identifier
+    ):
+        return None
+
+    url = service_registry.get_service_url(
+        block_identifier=block_identifier, service_address=address
+    )
+    if not url:
+        return None
+    try:
+        pfs_info = get_pfs_info(url)
+    except ServiceRequestFailed:
+        return None
+    if pfs_info.price > pathfinding_max_fee:
+        return None
+    return url
 
 
 def get_random_pfs(
-    service_registry: ServiceRegistry, block_identifier: BlockSpecification
+    service_registry: ServiceRegistry,
+    block_identifier: BlockSpecification,
+    pathfinding_max_fee: FeeAmount,
 ) -> Optional[str]:
     """Selects a random PFS from service_registry.
 
@@ -173,26 +206,18 @@ def get_random_pfs(
     indices_to_try = list(range(number_of_addresses))
     random.shuffle(indices_to_try)
 
-    address = None
     while indices_to_try:
         index = indices_to_try.pop()
-        address = service_registry.ever_made_deposits(
-            block_identifier=block_identifier, index=index
+        url = get_valid_pfs_url(
+            service_registry=service_registry,
+            index_in_service_registry=index,
+            block_identifier=block_identifier,
+            pathfinding_max_fee=pathfinding_max_fee,
         )
-        if not address:
-            continue
-        is_valid = service_registry.has_valid_registration(
-            address=address, block_identifier=block_identifier
-        )
-        if not is_valid:
-            continue
+        if url:
+            return url
 
-    if address is None:
-        return None
-    url = service_registry.get_service_url(
-        block_identifier=block_identifier, service_hex_address=to_canonical_address(address)
-    )
-    return url
+    return None
 
 
 def configure_pfs_or_exit(
@@ -200,7 +225,8 @@ def configure_pfs_or_exit(
     routing_mode: RoutingMode,
     service_registry: Optional[ServiceRegistry],
     node_network_id: ChainID,
-    token_network_registry_address: Address,
+    token_network_registry_address: TokenNetworkRegistryAddress,
+    pathfinding_max_fee: FeeAmount,
 ) -> PFSInfo:
     """
     Take in the given pfs_address argument, the service registry and find out a
@@ -218,7 +244,9 @@ def configure_pfs_or_exit(
         assert service_registry, "Should not get here without a service registry"
         block_hash = service_registry.client.get_confirmed_blockhash()
         maybe_pfs_url = get_random_pfs(
-            service_registry=service_registry, block_identifier=block_hash
+            service_registry=service_registry,
+            block_identifier=block_hash,
+            pathfinding_max_fee=pathfinding_max_fee,
         )
         if maybe_pfs_url is None:
             click.secho(
@@ -229,11 +257,12 @@ def configure_pfs_or_exit(
         else:
             pfs_url = maybe_pfs_url
 
-    pathfinding_service_info = get_pfs_info(pfs_url)
-    if not pathfinding_service_info:
+    try:
+        pathfinding_service_info = get_pfs_info(pfs_url)
+    except ServiceRequestFailed as e:
         click.secho(
             f"There is an error with the pathfinding service with address "
-            f"{pfs_url}. Raiden will shut down."
+            f"{pfs_url}. Error Message: {str(e)}. Raiden will shut down."
         )
         sys.exit(1)
 
@@ -253,9 +282,7 @@ def configure_pfs_or_exit(
         )
         sys.exit(1)
 
-    if not is_same_address(
-        pathfinding_service_info.token_network_registry_address, token_network_registry_address
-    ):
+    if pathfinding_service_info.token_network_registry_address != token_network_registry_address:
         click.secho(f"Invalid reply from pathfinding service {pfs_url}", fg="red")
         click.secho(
             f"PFS is not operating on the same Token Network Registry "
@@ -264,7 +291,6 @@ def configure_pfs_or_exit(
             f"Raiden will shut down. Please choose a different PFS."
         )
         sys.exit(1)
-
     click.secho(
         f"You have chosen the pathfinding service at {pfs_url}.\n"
         f"Operator: {pathfinding_service_info.operator}, "
@@ -278,6 +304,41 @@ def configure_pfs_or_exit(
     log.info("Using PFS", pfs_info=pathfinding_service_info)
 
     return pathfinding_service_info
+
+
+def check_pfs_for_production(
+    service_registry: Optional[ServiceRegistry], pfs_info: PFSInfo
+) -> None:
+    """ Checks that the PFS in `pfs_info` is registered in the service registry
+    and that the URL matches.
+
+    Should only be called in production mode.
+    """
+    if service_registry is None:
+        click.secho(
+            f"Cannot verify registration of PFS because no service registry is set"
+            f"Raiden will shut down. Please set the service registry."
+        )
+        sys.exit(1)
+
+    pfs_registered = service_registry.has_valid_registration(
+        block_identifier=service_registry.client.get_confirmed_blockhash(),
+        service_address=pfs_info.payment_address,
+    )
+    registered_pfs_url = service_registry.get_service_url(
+        block_identifier=service_registry.client.get_confirmed_blockhash(),
+        service_address=pfs_info.payment_address,
+    )
+    pfs_url_matches = registered_pfs_url == pfs_info.url
+    if not (pfs_registered and pfs_url_matches):
+        click.secho(
+            f"The pathfinding service at {pfs_info.url} is not registered "
+            f"with the service registry at {to_checksum_address(service_registry.address)} "
+            f"or the registered URL ({registered_pfs_url}) doesn't match the given URL "
+            f"{pfs_info.url}. "
+            f"Raiden will shut down. Please try a registered PFS."
+        )
+        sys.exit(1)
 
 
 def get_last_iou(
@@ -523,8 +584,9 @@ def query_paths(
             elif code in (PFSError.IOU_ALREADY_CLAIMED, PFSError.IOU_EXPIRED_TOO_EARLY):
                 scrap_existing_iou = True
             elif code == PFSError.INSUFFICIENT_SERVICE_PAYMENT:
-                new_info = get_pfs_info(pfs_config.info.url)
-                if new_info is None:
+                try:
+                    new_info = get_pfs_info(pfs_config.info.url)
+                except ServiceRequestFailed:
                     raise ServiceRequestFailed("Could not get updated fees from PFS.")
                 if new_info.price > pfs_config.maximum_fee:
                     raise ServiceRequestFailed("PFS fees too high.")
@@ -542,7 +604,7 @@ def post_pfs_feedback(
     token_network_address: TokenNetworkAddress,
     route: List[Address],
     token: UUID,
-    succesful: bool,
+    successful: bool,
 ) -> None:
 
     feedback_disabled = routing_mode == RoutingMode.PRIVATE or pfs_config is None
@@ -550,7 +612,7 @@ def post_pfs_feedback(
         return
 
     hex_route = [to_checksum_address(address) for address in route]
-    payload = dict(token=token.hex, path=hex_route, success=succesful)
+    payload = dict(token=token.hex, path=hex_route, success=successful)
 
     log.info(
         "Sending routing feedback to Pathfinding Service",

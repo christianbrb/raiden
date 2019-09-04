@@ -4,7 +4,6 @@ import logging
 import socket
 from hashlib import sha256
 from http import HTTPStatus
-from typing import Dict
 
 import gevent
 import gevent.pool
@@ -20,7 +19,9 @@ from raiden_webui import RAIDEN_WEBUI_PATH
 from webargs.flaskparser import parser
 from werkzeug.exceptions import NotFound
 
+from raiden.api.exceptions import ChannelNotFound, NonexistingChannel
 from raiden.api.objects import AddressList, PartnersPerTokenList
+from raiden.api.python import RaidenAPI
 from raiden.api.v1.encoding import (
     AddressListSchema,
     ChannelStateSchema,
@@ -58,14 +59,13 @@ from raiden.exceptions import (
     AddressWithoutCode,
     AlreadyRegisteredTokenAddress,
     APIServerPortInUseError,
-    ChannelNotFound,
     DepositMismatch,
     DepositOverLimit,
     DuplicatedChannelError,
     InsufficientFunds,
     InsufficientGasReserve,
-    InvalidAddress,
     InvalidAmount,
+    InvalidBinaryAddress,
     InvalidBlockNumberInput,
     InvalidNumberInput,
     InvalidSecret,
@@ -78,6 +78,7 @@ from raiden.exceptions import (
     TokenNetworkDeprecated,
     TokenNotRegistered,
     TransactionThrew,
+    UnexpectedChannelState,
     UnknownTokenAddress,
     WithdrawMismatch,
 )
@@ -93,9 +94,25 @@ from raiden.utils import (
     create_default_identifier,
     optional_address_to_string,
     split_endpoint,
-    typing,
 )
 from raiden.utils.runnable import Runnable
+from raiden.utils.testnet import MintingMethod
+from raiden.utils.typing import (
+    Address,
+    Any,
+    BlockSpecification,
+    BlockTimeout,
+    Dict,
+    PaymentAmount,
+    PaymentID,
+    Secret,
+    SecretHash,
+    TargetAddress,
+    TokenAddress,
+    TokenAmount,
+    TokenNetworkRegistryAddress,
+    WithdrawAmount,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -144,13 +161,13 @@ URLS_V1 = [
     ("/_debug/blockchain_events/network", BlockchainEventsNetworkResource),
     ("/_debug/blockchain_events/tokens/<hexaddress:token_address>", BlockchainEventsTokenResource),
     (
-        "/_debug/blockchain_events/payment_networks/<hexaddress:token_address>/channels",
+        "/_debug/blockchain_events/token_network_registries/<hexaddress:token_address>/channels",
         ChannelBlockchainEventsResource,
         "tokenchanneleventsresourceblockchain",
     ),
     (
         (
-            "/_debug/blockchain_events/payment_networks/"
+            "/_debug/blockchain_events/token_network_registries/"
             "<hexaddress:token_address>/channels/<hexaddress:partner_address>"
         ),
         ChannelBlockchainEventsResource,
@@ -303,8 +320,13 @@ class APIServer(Runnable):  # pragma: no unittest
     _api_prefix = "/api/1"
 
     def __init__(
-        self, rest_api, config, cors_domain_list=None, web_ui=False, eth_rpc_endpoint=None
-    ):
+        self,
+        rest_api: "RestAPI",
+        config: Dict[str, Any],
+        cors_domain_list=None,
+        web_ui=False,
+        eth_rpc_endpoint=None,
+    ) -> None:
         super().__init__()
         if rest_api.version != 1:
             raise ValueError(f"Invalid api version: {rest_api.version}")
@@ -412,7 +434,7 @@ class APIServer(Runnable):  # pragma: no unittest
             self.stop()  # ensure cleanup and wait on subtasks
             raise
 
-    def start(self):
+    def start(self) -> None:
         log.debug(
             "REST API starting",
             host=self.config["host"],
@@ -453,7 +475,7 @@ class APIServer(Runnable):  # pragma: no unittest
 
         super().start()
 
-    def stop(self):
+    def stop(self) -> None:
         log.debug(
             "REST API stopping",
             host=self.config["host"],
@@ -492,7 +514,7 @@ class RestAPI:  # pragma: no unittest
 
     version = 1
 
-    def __init__(self, raiden_api):
+    def __init__(self, raiden_api: RaidenAPI) -> None:
         self.raiden_api = raiden_api
         self.channel_schema = ChannelStateSchema()
         self.address_list_schema = AddressListSchema()
@@ -506,7 +528,7 @@ class RestAPI:  # pragma: no unittest
         return api_response(result=dict(our_address=to_checksum_address(self.raiden_api.address)))
 
     def register_token(
-        self, registry_address: typing.PaymentNetworkAddress, token_address: typing.TokenAddress
+        self, registry_address: TokenNetworkRegistryAddress, token_address: TokenAddress
     ):
         if self.raiden_api.raiden.config["environment_type"] == Environment.PRODUCTION:
             return api_error(
@@ -515,7 +537,7 @@ class RestAPI:  # pragma: no unittest
             )
 
         conflict_exceptions = (
-            InvalidAddress,
+            InvalidBinaryAddress,
             AlreadyRegisteredTokenAddress,
             TransactionThrew,
             InvalidToken,
@@ -531,8 +553,8 @@ class RestAPI:  # pragma: no unittest
             token_network_address = self.raiden_api.token_network_register(
                 registry_address=registry_address,
                 token_address=token_address,
-                channel_participant_deposit_limit=UINT256_MAX,
-                token_network_deposit_limit=UINT256_MAX,
+                channel_participant_deposit_limit=TokenAmount(UINT256_MAX),
+                token_network_deposit_limit=TokenAmount(UINT256_MAX),
             )
         except conflict_exceptions as e:
             return api_error(errors=str(e), status_code=HTTPStatus.CONFLICT)
@@ -546,10 +568,10 @@ class RestAPI:  # pragma: no unittest
 
     def mint_token(
         self,
-        token_address: typing.TokenAddress,
-        to: typing.Address,
-        value: typing.TokenAmount,
-        contract_method: str,
+        token_address: TokenAddress,
+        to: Address,
+        value: TokenAmount,
+        contract_method: MintingMethod,
     ):
         if self.raiden_api.raiden.config["environment_type"] == Environment.PRODUCTION:
             return api_error(
@@ -579,11 +601,11 @@ class RestAPI:  # pragma: no unittest
 
     def open(
         self,
-        registry_address: typing.PaymentNetworkAddress,
-        partner_address: typing.Address,
-        token_address: typing.TokenAddress,
-        settle_timeout: typing.BlockTimeout = None,
-        total_deposit: typing.TokenAmount = None,
+        registry_address: TokenNetworkRegistryAddress,
+        partner_address: Address,
+        token_address: TokenAddress,
+        settle_timeout: BlockTimeout = None,
+        total_deposit: TokenAmount = None,
     ):
         log.debug(
             "Opening channel",
@@ -612,7 +634,7 @@ class RestAPI:  # pragma: no unittest
                 registry_address, token_address, partner_address, settle_timeout
             )
         except (
-            InvalidAddress,
+            InvalidBinaryAddress,
             InvalidSettleTimeout,
             SamePeerAddress,
             AddressWithoutCode,
@@ -642,7 +664,9 @@ class RestAPI:  # pragma: no unittest
                 )
             except InsufficientFunds as e:
                 return api_error(errors=str(e), status_code=HTTPStatus.PAYMENT_REQUIRED)
-            except (DepositOverLimit, DepositMismatch) as e:
+            except (NonexistingChannel, UnknownTokenAddress) as e:
+                return api_error(errors=str(e), status_code=HTTPStatus.BAD_REQUEST)
+            except (DepositOverLimit, DepositMismatch, UnexpectedChannelState) as e:
                 return api_error(errors=str(e), status_code=HTTPStatus.CONFLICT)
 
         channel_state = views.get_channelstate_for(
@@ -658,11 +682,11 @@ class RestAPI:  # pragma: no unittest
 
     def connect(
         self,
-        registry_address: typing.PaymentNetworkAddress,
-        token_address: typing.TokenAddress,
-        funds: typing.TokenAmount,
-        initial_channel_target: int = None,
-        joinable_funds_target: float = None,
+        registry_address: TokenNetworkRegistryAddress,
+        token_address: TokenAddress,
+        funds: TokenAmount,
+        initial_channel_target: int = 3,
+        joinable_funds_target: float = 0.4,
     ):
         log.debug(
             "Connecting to token network",
@@ -683,14 +707,12 @@ class RestAPI:  # pragma: no unittest
             )
         except (InsufficientFunds, InsufficientGasReserve) as e:
             return api_error(errors=str(e), status_code=HTTPStatus.PAYMENT_REQUIRED)
-        except (InvalidAmount, InvalidAddress) as e:
+        except (InvalidAmount, InvalidBinaryAddress) as e:
             return api_error(errors=str(e), status_code=HTTPStatus.CONFLICT)
 
         return api_response(result=dict(), status_code=HTTPStatus.NO_CONTENT)
 
-    def leave(
-        self, registry_address: typing.PaymentNetworkAddress, token_address: typing.TokenAddress
-    ):
+    def leave(self, registry_address: TokenNetworkRegistryAddress, token_address: TokenAddress):
         log.debug(
             "Leaving token network",
             node=to_checksum_address(self.raiden_api.address),
@@ -703,7 +725,7 @@ class RestAPI:  # pragma: no unittest
         ]
         return api_response(result=closed_channels)
 
-    def get_connection_managers_info(self, registry_address: typing.PaymentNetworkAddress):
+    def get_connection_managers_info(self, registry_address: TokenNetworkRegistryAddress):
         """Get a dict whose keys are token addresses and whose values are
         open channels, funds of last request, sum of deposits and number of channels"""
         log.debug(
@@ -712,24 +734,27 @@ class RestAPI:  # pragma: no unittest
             registry_address=to_checksum_address(registry_address),
         )
         connection_managers = dict()
+        raiden_service = self.raiden_api.raiden
 
         for token in self.raiden_api.get_tokens_list(registry_address):
             token_network_address = views.get_token_network_address_by_token_address(
                 views.state_from_raiden(self.raiden_api.raiden),
-                payment_network_address=registry_address,
+                token_network_registry_address=registry_address,
                 token_address=token,
             )
+            connection_manager = None
 
-            try:
-                connection_manager = self.raiden_api.raiden.connection_manager_for_token_network(
-                    token_network_address
-                )
-            except InvalidAddress:
-                connection_manager = None
+            if token_network_address is not None:
+                try:
+                    connection_manager = raiden_service.connection_manager_for_token_network(
+                        token_network_address
+                    )
+                except InvalidBinaryAddress:
+                    pass
 
             open_channels = views.get_channelstate_open(
                 chain_state=views.state_from_raiden(self.raiden_api.raiden),
-                payment_network_address=registry_address,
+                token_network_registry_address=registry_address,
                 token_address=token,
             )
             if connection_manager is not None and open_channels:
@@ -745,9 +770,9 @@ class RestAPI:  # pragma: no unittest
 
     def get_channel_list(
         self,
-        registry_address: typing.PaymentNetworkAddress,
-        token_address: typing.TokenAddress = None,
-        partner_address: typing.Address = None,
+        registry_address: TokenNetworkRegistryAddress,
+        token_address: TokenAddress = None,
+        partner_address: Address = None,
     ):
         log.debug(
             "Getting channel list",
@@ -765,7 +790,7 @@ class RestAPI:  # pragma: no unittest
         ]
         return api_response(result=result)
 
-    def get_tokens_list(self, registry_address: typing.PaymentNetworkAddress):
+    def get_tokens_list(self, registry_address: TokenNetworkRegistryAddress):
         log.debug(
             "Getting token list",
             node=to_checksum_address(self.raiden_api.address),
@@ -778,7 +803,7 @@ class RestAPI:  # pragma: no unittest
         return api_response(result=result)
 
     def get_token_network_for_token(
-        self, registry_address: typing.PaymentNetworkAddress, token_address: typing.TokenAddress
+        self, registry_address: TokenNetworkRegistryAddress, token_address: TokenAddress
     ):
         log.debug(
             "Getting token network for token",
@@ -798,9 +823,9 @@ class RestAPI:  # pragma: no unittest
 
     def get_blockchain_events_network(
         self,
-        registry_address: typing.PaymentNetworkAddress,
-        from_block: typing.BlockSpecification = GENESIS_BLOCK_NUMBER,
-        to_block: typing.BlockSpecification = "latest",
+        registry_address: TokenNetworkRegistryAddress,
+        from_block: BlockSpecification = GENESIS_BLOCK_NUMBER,
+        to_block: BlockSpecification = "latest",
     ):
         log.debug(
             "Getting network events",
@@ -820,9 +845,9 @@ class RestAPI:  # pragma: no unittest
 
     def get_blockchain_events_token_network(
         self,
-        token_address: typing.TokenAddress,
-        from_block: typing.BlockSpecification = GENESIS_BLOCK_NUMBER,
-        to_block: typing.BlockSpecification = "latest",
+        token_address: TokenAddress,
+        from_block: BlockSpecification = GENESIS_BLOCK_NUMBER,
+        to_block: BlockSpecification = "latest",
     ):
         log.debug(
             "Getting token network blockchain events",
@@ -838,13 +863,13 @@ class RestAPI:  # pragma: no unittest
             return api_response(result=normalize_events_list(raiden_service_result))
         except UnknownTokenAddress as e:
             return api_error(str(e), status_code=HTTPStatus.NOT_FOUND)
-        except (InvalidBlockNumberInput, InvalidAddress) as e:
+        except (InvalidBlockNumberInput, InvalidBinaryAddress) as e:
             return api_error(str(e), status_code=HTTPStatus.CONFLICT)
 
     def get_raiden_events_payment_history_with_timestamps(
         self,
-        token_address: typing.TokenAddress = None,
-        target_address: typing.Address = None,
+        token_address: TokenAddress = None,
+        target_address: Address = None,
         limit: int = None,
         offset: int = None,
     ):
@@ -863,7 +888,7 @@ class RestAPI:  # pragma: no unittest
                 limit=limit,
                 offset=offset,
             )
-        except (InvalidNumberInput, InvalidAddress) as e:
+        except (InvalidNumberInput, InvalidBinaryAddress) as e:
             return api_error(str(e), status_code=HTTPStatus.CONFLICT)
 
         result = []
@@ -894,10 +919,10 @@ class RestAPI:  # pragma: no unittest
 
     def get_blockchain_events_channel(
         self,
-        token_address: typing.TokenAddress,
-        partner_address: typing.Address = None,
-        from_block: typing.BlockSpecification = GENESIS_BLOCK_NUMBER,
-        to_block: typing.BlockSpecification = "latest",
+        token_address: TokenAddress,
+        partner_address: Address = None,
+        from_block: BlockSpecification = GENESIS_BLOCK_NUMBER,
+        to_block: BlockSpecification = "latest",
     ):
         log.debug(
             "Getting channel blockchain events",
@@ -915,16 +940,16 @@ class RestAPI:  # pragma: no unittest
                 to_block=to_block,
             )
             return api_response(result=normalize_events_list(raiden_service_result))
-        except (InvalidBlockNumberInput, InvalidAddress) as e:
+        except (InvalidBlockNumberInput, InvalidBinaryAddress) as e:
             return api_error(str(e), status_code=HTTPStatus.CONFLICT)
         except UnknownTokenAddress as e:
             return api_error(str(e), status_code=HTTPStatus.NOT_FOUND)
 
     def get_channel(
         self,
-        registry_address: typing.PaymentNetworkAddress,
-        token_address: typing.TokenAddress,
-        partner_address: typing.Address,
+        registry_address: TokenNetworkRegistryAddress,
+        token_address: TokenAddress,
+        partner_address: Address,
     ):
         log.debug(
             "Getting channel",
@@ -945,7 +970,7 @@ class RestAPI:  # pragma: no unittest
             return api_error(errors=str(e), status_code=HTTPStatus.NOT_FOUND)
 
     def get_partners_by_token(
-        self, registry_address: typing.PaymentNetworkAddress, token_address: typing.TokenAddress
+        self, registry_address: TokenNetworkRegistryAddress, token_address: TokenAddress
     ):
         log.debug(
             "Getting partners by token",
@@ -958,7 +983,7 @@ class RestAPI:  # pragma: no unittest
             raiden_service_result = self.raiden_api.get_channel_list(
                 registry_address, token_address
             )
-        except InvalidAddress as e:
+        except InvalidBinaryAddress as e:
             return api_error(errors=str(e), status_code=HTTPStatus.CONFLICT)
 
         for result in raiden_service_result:
@@ -980,13 +1005,13 @@ class RestAPI:  # pragma: no unittest
 
     def initiate_payment(
         self,
-        registry_address: typing.PaymentNetworkAddress,
-        token_address: typing.TokenAddress,
-        target_address: typing.Address,
-        amount: typing.TokenAmount,
-        identifier: typing.PaymentID,
-        secret: typing.Secret,
-        secret_hash: typing.SecretHash,
+        registry_address: TokenNetworkRegistryAddress,
+        token_address: TokenAddress,
+        target_address: TargetAddress,
+        amount: PaymentAmount,
+        identifier: PaymentID,
+        secret: Secret,
+        secret_hash: SecretHash,
     ):
         log.debug(
             "Initiating payment",
@@ -1015,7 +1040,7 @@ class RestAPI:  # pragma: no unittest
             )
         except (
             InvalidAmount,
-            InvalidAddress,
+            InvalidBinaryAddress,
             InvalidSecret,
             InvalidSecretHash,
             PaymentConflict,
@@ -1049,9 +1074,9 @@ class RestAPI:  # pragma: no unittest
 
     def _deposit(
         self,
-        registry_address: typing.PaymentNetworkAddress,
+        registry_address: TokenNetworkRegistryAddress,
         channel_state: NettingChannelState,
-        total_deposit: typing.TokenAmount,
+        total_deposit: TokenAmount,
     ):
         log.debug(
             "Depositing to channel",
@@ -1082,6 +1107,8 @@ class RestAPI:  # pragma: no unittest
             return api_error(errors=str(e), status_code=HTTPStatus.CONFLICT)
         except TokenNetworkDeprecated as e:
             return api_error(errors=str(e), status_code=HTTPStatus.CONFLICT)
+        except UnexpectedChannelState as e:
+            return api_error(errors=str(e), status_code=HTTPStatus.CONFLICT)
 
         updated_channel_state = self.raiden_api.get_channel(
             registry_address, channel_state.token_address, channel_state.partner_state.address
@@ -1092,9 +1119,9 @@ class RestAPI:  # pragma: no unittest
 
     def _withdraw(
         self,
-        registry_address: typing.PaymentNetworkAddress,
+        registry_address: TokenNetworkRegistryAddress,
         channel_state: NettingChannelState,
-        total_withdraw: typing.TokenAmount,
+        total_withdraw: WithdrawAmount,
     ):
         log.debug(
             "Withdrawing from channel",
@@ -1116,6 +1143,8 @@ class RestAPI:  # pragma: no unittest
                 channel_state.partner_state.address,
                 total_withdraw,
             )
+        except (NonexistingChannel, UnknownTokenAddress) as e:
+            return api_error(errors=str(e), status_code=HTTPStatus.BAD_REQUEST)
         except (InsufficientFunds, WithdrawMismatch) as e:
             return api_error(errors=str(e), status_code=HTTPStatus.CONFLICT)
 
@@ -1127,7 +1156,7 @@ class RestAPI:  # pragma: no unittest
         return api_response(result=result)
 
     def _close(
-        self, registry_address: typing.PaymentNetworkAddress, channel_state: NettingChannelState
+        self, registry_address: TokenNetworkRegistryAddress, channel_state: NettingChannelState
     ):
         log.debug(
             "Closing channel",
@@ -1158,11 +1187,11 @@ class RestAPI:  # pragma: no unittest
 
     def patch_channel(
         self,
-        registry_address: typing.PaymentNetworkAddress,
-        token_address: typing.TokenAddress,
-        partner_address: typing.Address,
-        total_deposit: typing.TokenAmount = None,
-        total_withdraw: typing.TokenAmount = None,
+        registry_address: TokenNetworkRegistryAddress,
+        token_address: TokenAddress,
+        partner_address: Address,
+        total_deposit: TokenAmount = None,
+        total_withdraw: WithdrawAmount = None,
         state: str = None,
     ):
         log.debug(
@@ -1212,7 +1241,7 @@ class RestAPI:  # pragma: no unittest
                 ),
                 status_code=HTTPStatus.CONFLICT,
             )
-        except InvalidAddress as e:
+        except InvalidBinaryAddress as e:
             return api_error(errors=str(e), status_code=HTTPStatus.CONFLICT)
 
         if total_deposit is not None:

@@ -4,7 +4,6 @@ from collections import namedtuple
 from copy import deepcopy
 from hashlib import sha256
 from itertools import cycle
-from typing import List
 
 import pytest
 
@@ -29,10 +28,10 @@ from raiden.tests.utils.factories import (
     make_block_hash,
     make_canonical_identifier,
     make_lock,
-    make_payment_network_address,
     make_privkey_address,
     make_secret,
     make_signed_balance_proof_from_unsigned,
+    make_token_network_registry_address,
     make_transaction_hash,
     replace,
 )
@@ -86,6 +85,7 @@ from raiden.transfer.state_change import (
 from raiden.utils import sha3
 from raiden.utils.packing import pack_withdraw
 from raiden.utils.signer import LocalSigner
+from raiden.utils.typing import LockedAmount
 
 PartnerStateModel = namedtuple(
     "PartnerStateModel",
@@ -514,7 +514,7 @@ def test_channelstate_receive_lockedtransfer():
         sender=invalid_balance_proof.sender,
     )
     is_valid, _, _ = channel.handle_unlock(channel_state, invalid_unlock_state_change)
-    assert not is_valid, "Unlock message with chain_id different than the " "channel's should fail"
+    assert not is_valid, "Unlock message with chain_id different than the channel's should fail"
 
     is_valid, _, msg = channel.handle_unlock(channel_state, unlock_state_change)
     assert is_valid, msg
@@ -665,7 +665,7 @@ def test_channelstate_lockedtransfer_overspend_with_multiple_pending_transfers()
 def test_invalid_timeouts():
     token_address = make_address()
     token_network_address = make_address()
-    payment_network_address = make_payment_network_address()
+    token_network_registry_address = make_token_network_registry_address()
     reveal_timeout = 5
     settle_timeout = 10
     identifier = make_address()
@@ -692,7 +692,7 @@ def test_invalid_timeouts():
                 token_network_address=token_network_address, channel_identifier=identifier
             ),
             token_address=token_address,
-            payment_network_address=payment_network_address,
+            token_network_registry_address=token_network_registry_address,
             reveal_timeout=large_reveal_timeout,
             settle_timeout=small_settle_timeout,
             our_state=our_state,
@@ -711,7 +711,7 @@ def test_invalid_timeouts():
                     token_network_address=token_network_address, channel_identifier=identifier
                 ),
                 token_address=token_address,
-                payment_network_address=payment_network_address,
+                token_network_registry_address=token_network_registry_address,
                 reveal_timeout=invalid_value,
                 settle_timeout=settle_timeout,
                 our_state=our_state,
@@ -728,7 +728,7 @@ def test_invalid_timeouts():
                     token_network_address=token_network_address, channel_identifier=identifier
                 ),
                 token_address=token_address,
-                payment_network_address=payment_network_address,
+                token_network_registry_address=token_network_registry_address,
                 reveal_timeout=reveal_timeout,
                 settle_timeout=invalid_value,
                 our_state=our_state,
@@ -962,12 +962,12 @@ def test_regression_must_update_balanceproof_remove_expired_lock():
     assert lock.secrethash in channel_state.partner_state.secrethashes_to_lockedlocks
 
     lock_expired = make_receive_expired_lock(
-        channel_state,
-        privkey2,
-        receive_lockedtransfer.balance_proof.nonce + 1,
-        transferred_amount,
-        lock,
-        locked_amount=0,
+        channel_state=channel_state,
+        privkey=privkey2,
+        nonce=receive_lockedtransfer.balance_proof.nonce + 1,
+        transferred_amount=transferred_amount,
+        lock=lock,
+        locked_amount=LockedAmount(0),
     )
 
     is_valid, msg, _ = channel.is_valid_lock_expired(
@@ -1221,7 +1221,7 @@ def test_channelstate_unlock_without_locks():
     assert not iteration.events
 
 
-def pending_locks_from_packed_data(packed: bytes) -> List[HashTimeLockState]:
+def pending_locks_from_packed_data(packed: bytes) -> PendingLocksState:
     number_of_bytes = len(packed)
     locks = make_empty_pending_locks_state()
     for i in range(0, number_of_bytes, 96):

@@ -13,7 +13,7 @@ from raiden.tests.utils.detect_failure import raise_on_failure
 from raiden.tests.utils.events import raiden_events_search_for_item
 from raiden.tests.utils.factories import make_secret
 from raiden.tests.utils.network import CHAIN
-from raiden.tests.utils.transfer import assert_synced_channel_state
+from raiden.tests.utils.transfer import assert_synced_channel_state, watch_for_unlock_failures
 from raiden.transfer import views
 from raiden.transfer.events import EventPaymentSentSuccess
 from raiden.transfer.mediated_transfer.events import SendLockedTransfer, SendSecretReveal
@@ -43,9 +43,9 @@ def run_test_send_queued_messages(raiden_network, deposit, token_addresses, netw
     app0, app1 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, payment_network_address, token_address
+        chain_state, token_network_registry_address, token_address
     )
 
     number_of_transfers = 7
@@ -106,28 +106,29 @@ def run_test_send_queued_messages(raiden_network, deposit, token_addresses, netw
     #     msg = "The secrethashes of the pending transfers must be in the queue after a restart."
     #     assert secrethash in chain_state.payment_mapping.secrethashes_to_task, msg
 
-    exception = RuntimeError("Timeout while waiting for balance update for app0")
-    with gevent.Timeout(20, exception=exception):
-        waiting.wait_for_payment_balance(
-            raiden=app0_restart.raiden,
-            payment_network_address=payment_network_address,
-            token_address=token_address,
-            partner_address=app1.raiden.address,
-            target_address=app1.raiden.address,
-            target_balance=total_transferred_amount,
-            retry_timeout=network_wait,
-        )
-    exception = RuntimeError("Timeout while waiting for balance update for app1")
-    with gevent.Timeout(20, exception=exception):
-        waiting.wait_for_payment_balance(
-            raiden=app1.raiden,
-            payment_network_address=payment_network_address,
-            token_address=token_address,
-            partner_address=app0_restart.raiden.address,
-            target_address=app1.raiden.address,
-            target_balance=total_transferred_amount,
-            retry_timeout=network_wait,
-        )
+    with watch_for_unlock_failures(*raiden_network):
+        exception = RuntimeError("Timeout while waiting for balance update for app0")
+        with gevent.Timeout(20, exception=exception):
+            waiting.wait_for_payment_balance(
+                raiden=app0_restart.raiden,
+                token_network_registry_address=token_network_registry_address,
+                token_address=token_address,
+                partner_address=app1.raiden.address,
+                target_address=app1.raiden.address,
+                target_balance=total_transferred_amount,
+                retry_timeout=network_wait,
+            )
+        exception = RuntimeError("Timeout while waiting for balance update for app1")
+        with gevent.Timeout(20, exception=exception):
+            waiting.wait_for_payment_balance(
+                raiden=app1.raiden,
+                token_network_registry_address=token_network_registry_address,
+                token_address=token_address,
+                partner_address=app0_restart.raiden.address,
+                target_address=app1.raiden.address,
+                target_balance=total_transferred_amount,
+                retry_timeout=network_wait,
+            )
 
     assert_synced_channel_state(
         token_network_address,
@@ -138,6 +139,7 @@ def run_test_send_queued_messages(raiden_network, deposit, token_addresses, netw
         deposit + total_transferred_amount,
         [],
     )
+    new_transport.stop()
 
 
 @pytest.mark.parametrize("number_of_nodes", [2])
@@ -171,9 +173,9 @@ def run_test_payment_statuses_are_restored(raiden_network, token_addresses, netw
 
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
-    payment_network_address = app0.raiden.default_registry.address
+    token_network_registry_address = app0.raiden.default_registry.address
     token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, payment_network_address, token_address
+        chain_state, token_network_registry_address, token_address
     )
 
     # make a few transfers from app0 to app1
@@ -229,7 +231,7 @@ def run_test_payment_statuses_are_restored(raiden_network, token_addresses, netw
 
     waiting.wait_for_payment_balance(
         raiden=app1.raiden,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
         partner_address=app0_restart.raiden.address,
         target_address=app1.raiden.address,

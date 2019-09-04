@@ -2,14 +2,22 @@ from urllib.parse import urlparse
 
 import structlog
 import web3
-from eth_utils import is_binary_address, to_bytes, to_canonical_address, to_checksum_address
+from eth_utils import decode_hex, is_binary_address, to_canonical_address, to_checksum_address
 from web3.exceptions import BadFunctionCallOutput
 
-from raiden.exceptions import BrokenPreconditionError, InvalidAddress, RaidenUnrecoverableError
+from raiden.exceptions import BrokenPreconditionError, RaidenUnrecoverableError
 from raiden.network.proxies.utils import log_transaction
 from raiden.network.rpc.client import JSONRPCClient, check_address_has_code
 from raiden.network.rpc.transactions import check_transaction_threw
-from raiden.utils.typing import Address, AddressHex, BlockSpecification, Optional, TokenAmount
+from raiden.utils.typing import (
+    Address,
+    Any,
+    BlockSpecification,
+    Dict,
+    Optional,
+    TokenAddress,
+    TokenAmount,
+)
 from raiden_contracts.constants import CONTRACT_SERVICE_REGISTRY
 from raiden_contracts.contract_manager import ContractManager
 
@@ -24,21 +32,21 @@ class ServiceRegistry:
         contract_manager: ContractManager,
     ):
         if not is_binary_address(service_registry_address):
-            raise InvalidAddress("Expected binary address for service registry")
+            raise ValueError("Expected binary address for service registry")
 
         self.contract_manager = contract_manager
         check_address_has_code(
-            jsonrpc_client,
-            service_registry_address,
-            CONTRACT_SERVICE_REGISTRY,
-            expected_code=to_bytes(
-                hexstr=contract_manager.get_runtime_hexcode(CONTRACT_SERVICE_REGISTRY)
+            client=jsonrpc_client,
+            address=service_registry_address,
+            contract_name=CONTRACT_SERVICE_REGISTRY,
+            expected_code=decode_hex(
+                contract_manager.get_runtime_hexcode(CONTRACT_SERVICE_REGISTRY)
             ),
         )
 
         proxy = jsonrpc_client.new_contract_proxy(
-            self.contract_manager.get_contract_abi(CONTRACT_SERVICE_REGISTRY),
-            to_canonical_address(service_registry_address),
+            abi=self.contract_manager.get_contract_abi(CONTRACT_SERVICE_REGISTRY),
+            contract_address=service_registry_address,
         )
 
         self.address = service_registry_address
@@ -70,10 +78,10 @@ class ServiceRegistry:
         return result
 
     def has_valid_registration(
-        self, block_identifier: BlockSpecification, address: Address
+        self, block_identifier: BlockSpecification, service_address: Address
     ) -> Optional[bool]:
         try:
-            result = self.proxy.contract.functions.hasValidRegistration(address).call(
+            result = self.proxy.contract.functions.hasValidRegistration(service_address).call(
                 block_identifier=block_identifier
             )
         except web3.exceptions.BadFunctionCallOutput:
@@ -81,10 +89,10 @@ class ServiceRegistry:
         return result
 
     def get_service_url(
-        self, block_identifier: BlockSpecification, service_hex_address: AddressHex
+        self, block_identifier: BlockSpecification, service_address: Address
     ) -> Optional[str]:
         """Gets the URL of a service by address. If does not exist return None"""
-        result = self.proxy.contract.functions.urls(service_hex_address).call(
+        result = self.proxy.contract.functions.urls(service_address).call(
             block_identifier=block_identifier
         )
         if result == "":
@@ -95,8 +103,8 @@ class ServiceRegistry:
         """Gets the currently required deposit amount."""
         return self.proxy.contract.functions.currentPrice().call(block_identifier=block_identifier)
 
-    def token_address(self, block_identifier: BlockSpecification) -> Address:
-        return Address(
+    def token_address(self, block_identifier: BlockSpecification) -> TokenAddress:
+        return TokenAddress(
             to_canonical_address(
                 self.proxy.contract.functions.token().call(block_identifier=block_identifier)
             )
@@ -109,15 +117,15 @@ class ServiceRegistry:
             msg = "ServiceRegistry.deposit transaction fails"
             raise RaidenUnrecoverableError(msg)
         transaction_hash = self.proxy.transact("deposit", gas_limit, limit_amount)
-        self.client.poll(transaction_hash)
-        receipt = check_transaction_threw(self.client, transaction_hash)
-        if receipt:
+        receipt = self.client.poll(transaction_hash)
+        failed_receipt = check_transaction_threw(receipt=receipt)
+        if failed_receipt:
             msg = "ServiceRegistry.deposit transaction failed"
             raise RaidenUnrecoverableError(msg)
 
     def set_url(self, url: str) -> None:
         """Sets the url needed to access the service via HTTP for the caller"""
-        log_details = {
+        log_details: Dict[str, Any] = {
             "node": to_checksum_address(self.node_address),
             "contract": to_checksum_address(self.address),
             "url": url,
@@ -140,8 +148,8 @@ class ServiceRegistry:
 
             log_details["gas_limit"] = gas_limit
             transaction_hash = self.proxy.transact("setURL", gas_limit, url)
-            self.client.poll(transaction_hash)
-            receipt = check_transaction_threw(self.client, transaction_hash)
-            if receipt:
+            receipt = self.client.poll(transaction_hash)
+            failed_receipt = check_transaction_threw(receipt=receipt)
+            if failed_receipt:
                 msg = f"URL {url} is invalid"
                 raise RaidenUnrecoverableError(msg)

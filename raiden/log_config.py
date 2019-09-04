@@ -6,12 +6,17 @@ import os
 import re
 import sys
 from functools import wraps
-from traceback import TracebackException
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Pattern, Tuple
 
 import gevent
 import structlog
 
+LOG_BLACKLIST = {
+    re.compile(r"\b(access_?token=)([a-z0-9_-]+)", re.I): r"\1<redacted>",
+    re.compile(
+        r"(@0x[0-9a-fA-F]{40}:(?:[\w\d._-]+(?::[0-9]+)?))/([0-9a-zA-Z-]+)"
+    ): r"\1/<redacted>",
+}
 DEFAULT_LOG_LEVEL = "INFO"
 MAX_LOG_FILE_SIZE = 20 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
@@ -19,7 +24,7 @@ LOG_BACKUP_COUNT = 3
 _FIRST_PARTY_PACKAGES = frozenset(["raiden", "raiden_contracts"])
 
 
-def _chain(first_func, *funcs) -> Callable:
+def _chain(first_func: Callable, *funcs: Callable) -> Callable:
     """Chains a give number of functions.
     First function receives all args/kwargs. Its result is passed on as an argument
     to the second one and so on and so forth until all function arguments are used.
@@ -27,7 +32,7 @@ def _chain(first_func, *funcs) -> Callable:
     """
 
     @wraps(first_func)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         result = first_func(*args, **kwargs)
         for func in funcs:
             result = func(result)
@@ -94,11 +99,11 @@ class LogFilter:
 
 
 class RaidenFilter(logging.Filter):
-    def __init__(self, log_level_config, name=""):
+    def __init__(self, log_level_config: Dict[str, str], name: str = ""):
         super().__init__(name)
         self._log_filter = LogFilter(log_level_config, default_level=DEFAULT_LOG_LEVEL)
 
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> int:
         return self._log_filter.should_log(record.name, record.levelname)
 
 
@@ -126,25 +131,6 @@ def redactor(blacklist: Dict[Pattern, str]) -> Callable[[str], str]:
     return processor_wrapper
 
 
-def _wrap_tracebackexception_format(redact: Callable[[str], str]):
-    """Monkey-patch TracebackException.format to redact printed lines.
-
-    Only the last call will be effective. Consecutive calls will overwrite the
-    previous monkey patches.
-    """
-    original_format = getattr(TracebackException, "_original", None)
-    if original_format is None:
-        original_format = TracebackException.format
-        setattr(TracebackException, "_original", original_format)  # noqa: B010
-
-    @wraps(original_format)
-    def tracebackexception_format(self, *, chain=True):
-        for line in original_format(self, chain=chain):
-            yield redact(line)
-
-    setattr(TracebackException, "format", tracebackexception_format)  # noqa: B010
-
-
 def configure_logging(
     logger_level_config: Dict[str, str] = None,
     colorize: bool = True,
@@ -155,7 +141,7 @@ def configure_logging(
     cache_logger_on_first_use: bool = True,
     _first_party_packages: FrozenSet[str] = _FIRST_PARTY_PACKAGES,
     _debug_log_file_additional_level_filters: Dict[str, str] = None,
-):
+) -> None:
     structlog.reset_defaults()
 
     logger_level_config = logger_level_config or dict()
@@ -179,8 +165,7 @@ def configure_logging(
     else:
         formatter = "plain"
 
-    redact = redactor({re.compile(r"\b(access_?token=)([a-z0-9_-]+)", re.I): r"\1<redacted>"})
-    _wrap_tracebackexception_format(redact)
+    redact = redactor(LOG_BLACKLIST)
 
     handlers: Dict[str, Any] = dict()
     if log_file:

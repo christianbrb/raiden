@@ -11,6 +11,7 @@ from raiden.network.proxies.secret_registry import SecretRegistry
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.tests.utils.events import must_have_event
 from raiden.tests.utils.factories import make_secret
+from raiden.utils.secrethash import sha256_secrethash
 
 
 def secret_registry_batch_happy_path(secret_registry_proxy):
@@ -46,9 +47,9 @@ def test_register_secret_happy_path(secret_registry_proxy: SecretRegistry, contr
     the SecretRegistered event.
     """
     secret = make_secret()
-    secrethash = sha256(secret).digest()
+    secrethash = sha256_secrethash(secret)
     secret_unregistered = make_secret()
-    secrethash_unregistered = sha256(secret_unregistered).digest()
+    secrethash_unregistered = sha256_secrethash(secret_unregistered)
 
     secret_registered_filter = secret_registry_proxy.secret_registered_filter()
 
@@ -137,9 +138,7 @@ def test_concurrent_secret_registration(secret_registry_proxy, monkeypatch):
         def count_transactions(function_name, startgas, secrets):
             for secret in secrets:
                 count[secret] += 1
-                msg = (
-                    "All secrets must be registered, " "and they all must be registered only once"
-                )
+                msg = "All secrets must be registered, and they all must be registered only once"
                 assert count[secret] == 1, msg
 
             return transact(function_name, startgas, secrets)
@@ -178,5 +177,5 @@ def test_concurrent_secret_registration(secret_registry_proxy, monkeypatch):
 
         gevent.joinall(greenlets, raise_error=True)
 
-        msg = "All secrets must be registered, " "and they all must be registered only once"
+        msg = "All secrets must be registered, and they all must be registered only once"
         assert all(count[secret] == 1 for secret in secrets), msg

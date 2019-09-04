@@ -12,8 +12,12 @@ Raiden is a payment channel implementation which provides scalable, low latency,
 Installation
 ============
 
-The preferred way to install Raiden is downloading a self contained application bundle from the
-`GitHub release page <https://github.com/raiden-network/raiden/releases>`_.
+To install Raiden you can either:
+
+    * Use the `Raiden Wizard <https://docs.raiden.network/quick-start/>`_
+    * Download a self contained application bundle from the `GitHub release page <https://github.com/raiden-network/raiden/releases>`_
+
+**If you're installing Raiden from the self contained application bundle the following sections will detail how to set up Raiden on various platforms.**
 
 Linux
 *****
@@ -244,7 +248,7 @@ There are pathfinding services running on every testnet at the moment, some that
 
 To start Raiden you need to provide a valid pathfinding service address, e.g. for Görli::
 
-    raiden --keystore-path  ~/.ethereum/testnet/keystore --eth-rpc-endpoint "https://ropsten.infura.io/v3/<yourToken>" --pathfinding-service-address "https://pfs-goerli.services-dev.raiden.network"
+    raiden --keystore-path  ~/.ethereum/testnet/keystore --eth-rpc-endpoint "https://goerli.infura.io/v3/<yourToken>" --pathfinding-service-address "https://pfs-goerli.services-dev.raiden.network"
 
 
 Now that Raiden is up and running, head over to the :doc:`API walkthrough <api_walkthrough>` for further instructions on how to interact with Raiden. There's also a :doc:`Web UI tutorial <webui_tutorial>` available for people who prefer a graphical interface.

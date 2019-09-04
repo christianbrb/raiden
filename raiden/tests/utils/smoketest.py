@@ -5,17 +5,11 @@ import shutil
 import sys
 from contextlib import contextmanager
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Callable, ContextManager, List
 
 import click
 import requests
-from eth_utils import (
-    decode_hex,
-    encode_hex,
-    remove_0x_prefix,
-    to_canonical_address,
-    to_checksum_address,
-)
+from eth_utils import encode_hex, remove_0x_prefix, to_canonical_address, to_checksum_address
+from gevent import sleep
 from web3 import HTTPProvider, Web3
 from web3.middleware import geth_poa_middleware
 
@@ -46,12 +40,29 @@ from raiden.tests.utils.eth_node import (
     parity_keystore,
     run_private_blockchain,
 )
+from raiden.tests.utils.factories import make_address
 from raiden.tests.utils.smartcontracts import deploy_contract_web3, deploy_token
 from raiden.transfer import channel, views
 from raiden.transfer.state import ChannelState
 from raiden.ui.app import run_app
 from raiden.utils import privatekey_to_address, split_endpoint
-from raiden.utils.typing import Address, AddressHex, ChainID, Dict, Iterable, Port
+from raiden.utils.typing import (
+    TYPE_CHECKING,
+    Address,
+    AddressHex,
+    Any,
+    Callable,
+    ChainID,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Port,
+    PrivateKey,
+    TokenAddress,
+    TokenAmount,
+    TokenNetworkRegistryAddress,
+)
 from raiden.waiting import wait_for_block
 from raiden_contracts.constants import (
     CONTRACT_HUMAN_STANDARD_TOKEN,
@@ -68,13 +79,12 @@ from raiden_contracts.contract_manager import ContractManager, contracts_precomp
 
 if TYPE_CHECKING:
     # pylint: disable=unused-import
-    from raiden.network.transport.matrix import ParsedURL  # noqa: F401
+    from raiden.tests.utils.transport import ParsedURL  # noqa: F401
 
 # the smoketest will assert that a different endpoint got successfully registered
-TEST_PARTNER_ADDRESS = "2" * 40
-TEST_DEPOSIT_AMOUNT = 5
+TEST_DEPOSIT_AMOUNT = TokenAmount(5)
 
-TEST_PRIVKEY = (
+TEST_PRIVKEY = PrivateKey(
     b"\xad\xd4\xd3\x10\xba\x04$hy\x1d\xd7\xbf\x7fn\xae\x85\xac"
     b"\xc4\xdd\x14?\xfa\x81\x0e\xf1\x80\x9aj\x11\xf2\xbcD"
 )
@@ -144,9 +154,9 @@ def deploy_smoketest_contracts(
         addresses[CONTRACT_SERVICE_REGISTRY] = service_registry_address
 
         # The MSC is not used, no need to waste time on deployment
-        addresses[CONTRACT_MONITORING_SERVICE] = "0x" + "1" * 40
+        addresses[CONTRACT_MONITORING_SERVICE] = make_address()
         # The OneToN contract is not used, no need to waste time on deployment
-        addresses[CONTRACT_ONE_TO_N] = "0x" + "1" * 40
+        addresses[CONTRACT_ONE_TO_N] = make_address()
 
     return addresses
 
@@ -162,8 +172,8 @@ def get_private_key(keystore):
 
 @contextmanager
 def setup_testchain(
-    eth_client: EthClient, free_port_generator: Iterable[Port], base_datadir: str, base_logdir: str
-) -> ContextManager[Dict[str, Any]]:
+    eth_client: EthClient, free_port_generator: Iterator[Port], base_datadir: str, base_logdir: str
+) -> Iterator[Dict[str, Any]]:
 
     ensure_executable(eth_client.value)
 
@@ -187,10 +197,7 @@ def setup_testchain(
 
     random_marker = remove_0x_prefix(hex(random.getrandbits(100)))
     genesis_description = GenesisDescription(
-        prefunded_accounts=[
-            AccountDescription(TEST_ACCOUNT_ADDRESS, DEFAULT_BALANCE),
-            AccountDescription(TEST_PARTNER_ADDRESS, DEFAULT_BALANCE),
-        ],
+        prefunded_accounts=[AccountDescription(TEST_ACCOUNT_ADDRESS, DEFAULT_BALANCE)],
         random_marker=random_marker,
         chain_id=NETWORKNAME_TO_ID["smoketest"],
     )
@@ -224,7 +231,7 @@ def setup_testchain(
 @contextmanager
 def setup_matrix_for_smoketest(
     print_step: Callable, free_port_generator: Iterable[Port]
-) -> ContextManager[List["ParsedURL"]]:
+) -> Iterator[List["ParsedURL"]]:
     from raiden.tests.utils.transport import matrix_server_starter
 
     print_step("Starting Matrix transport")
@@ -237,10 +244,10 @@ def setup_matrix_for_smoketest(
 def setup_testchain_for_smoketest(
     eth_client: EthClient,
     print_step: Callable,
-    free_port_generator: Iterable[Port],
+    free_port_generator: Iterator[Port],
     base_datadir: str,
     base_logdir: str,
-) -> ContextManager[Dict[str, Any]]:
+) -> Iterator[Dict[str, Any]]:
     print_step("Starting Ethereum node")
 
     with setup_testchain(
@@ -347,13 +354,22 @@ def setup_raiden(
         one_to_n_contract_address = to_checksum_address(contract_addresses[CONTRACT_ONE_TO_N])
         args["one_to_n_contract_address"] = one_to_n_contract_address
 
+    # Wait until the secret registry is confirmed, otherwise the App
+    # inialization will fail, needed for the check
+    # `check_ethereum_confirmed_block_is_not_pruned`.
+    current_block = client.block_number()
+    target_block_number = current_block + DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS
+    while current_block < target_block_number:
+        current_block = client.block_number()
+        sleep(0.5)
+
     return {"args": args, "contract_addresses": contract_addresses, "token": token}
 
 
 def run_smoketest(
     print_step: Callable,
     args: Dict[str, Any],
-    contract_addresses: List[Address],
+    contract_addresses: Dict[str, Address],
     token: ContractProxy,
 ):
     print_step("Starting Raiden")
@@ -375,15 +391,19 @@ def run_smoketest(
         wait_for_block(raiden=app.raiden, block_number=block, retry_timeout=1.0)
 
         raiden_api.channel_open(
-            registry_address=contract_addresses[CONTRACT_TOKEN_NETWORK_REGISTRY],
-            token_address=to_canonical_address(token.contract.address),
-            partner_address=to_canonical_address(TEST_PARTNER_ADDRESS),
+            registry_address=TokenNetworkRegistryAddress(
+                contract_addresses[CONTRACT_TOKEN_NETWORK_REGISTRY]
+            ),
+            token_address=TokenAddress(to_canonical_address(token.contract.address)),
+            partner_address=ConnectionManager.BOOTSTRAP_ADDR,
         )
         raiden_api.set_total_channel_deposit(
-            contract_addresses[CONTRACT_TOKEN_NETWORK_REGISTRY],
-            to_canonical_address(token.contract.address),
-            to_canonical_address(TEST_PARTNER_ADDRESS),
-            TEST_DEPOSIT_AMOUNT,
+            registry_address=TokenNetworkRegistryAddress(
+                contract_addresses[CONTRACT_TOKEN_NETWORK_REGISTRY]
+            ),
+            token_address=TokenAddress(to_canonical_address(token.contract.address)),
+            partner_address=ConnectionManager.BOOTSTRAP_ADDR,
+            total_deposit=TEST_DEPOSIT_AMOUNT,
         )
         token_addresses = [to_checksum_address(token.contract.address)]
 
@@ -403,11 +423,12 @@ def run_smoketest(
         assert len(token_networks) == 1
 
         channel_state = views.get_channelstate_for(
-            views.state_from_raiden(raiden_service),
-            raiden_service.default_registry.address,
-            token_networks[0],
-            decode_hex(TEST_PARTNER_ADDRESS),
+            chain_state=views.state_from_raiden(raiden_service),
+            token_network_registry_address=raiden_service.default_registry.address,
+            token_address=token_networks[0],
+            partner_address=ConnectionManager.BOOTSTRAP_ADDR,
         )
+        assert channel_state
 
         distributable = channel.get_distributable(
             channel_state.our_state, channel_state.partner_state

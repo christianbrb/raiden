@@ -1,12 +1,10 @@
 from enum import Enum
 
-from eth_utils import to_checksum_address
-
 from raiden.exceptions import MintFailed, RaidenError
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
 from raiden.network.rpc.transactions import check_transaction_threw
-from raiden.utils.typing import Any, List, TokenAddress, TransactionHash
+from raiden.utils.typing import Address, Any, List, TokenAddress, TransactionHash
 
 
 class MintingMethod(Enum):
@@ -47,9 +45,7 @@ _MINT_ABI = [
 
 
 def token_minting_proxy(client: JSONRPCClient, address: TokenAddress) -> ContractProxy:
-    return client.new_contract_proxy(
-        contract_interface=_MINT_ABI, contract_address=to_checksum_address(address)
-    )
+    return client.new_contract_proxy(abi=_MINT_ABI, contract_address=Address(address))
 
 
 def call_minting_method(
@@ -77,8 +73,8 @@ def call_minting_method(
         # that might fall through ContractProxy.transact()'s exception handling.
         raise MintFailed(str(e))
 
-    client.poll(tx_hash)
-    if check_transaction_threw(client, tx_hash):
+    receipt = client.poll(tx_hash)
+    if check_transaction_threw(receipt=receipt):
         raise MintFailed(f"Call to contract method {method}: Transaction failed.")
 
     return tx_hash

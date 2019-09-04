@@ -1,14 +1,14 @@
 import json
 import warnings
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import gevent
 import structlog
 from eth_utils import encode_hex, is_checksum_address, to_canonical_address, to_checksum_address
 from gevent.lock import Semaphore
 from hexbytes import HexBytes
-from requests.exceptions import ConnectTimeout
+from requests.exceptions import ConnectTimeout, ReadTimeout
 from web3 import Web3
 from web3.contract import ContractFunction
 from web3.eth import Eth
@@ -19,6 +19,7 @@ from web3.utils.empty import empty
 from web3.utils.toolz import assoc
 
 from raiden import constants
+from raiden.blockchain.filters import StatelessFilter
 from raiden.exceptions import (
     AddressWithoutCode,
     ContractCodeMismatch,
@@ -26,15 +27,10 @@ from raiden.exceptions import (
     EthNodeInterfaceError,
     InsufficientFunds,
 )
-from raiden.network.rpc.middleware import (
-    block_hash_cache_middleware,
-    connection_test_middleware,
-    http_retry_with_backoff_middleware,
-)
+from raiden.network.rpc.middleware import block_hash_cache_middleware, connection_test_middleware
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
 from raiden.utils import privatekey_to_address
 from raiden.utils.ethereum_clients import is_supported_client
-from raiden.utils.filters import StatelessFilter
 from raiden.utils.typing import (
     ABI,
     Address,
@@ -241,6 +237,8 @@ def patched_web3_eth_estimate_gas(self, transaction, block_identifier=None):
         else:
             # else the error is not denoting estimate gas failure and is something else
             raise e
+    except ReadTimeout:
+        result = None
 
     return result
 
@@ -345,12 +343,6 @@ def monkey_patch_web3(web3, gas_price_strategy):
 
         # set gas price strategy
         web3.eth.setGasPriceStrategy(gas_price_strategy)
-
-        # In the version of web3.py we are using the http_retry_request_middleware
-        # is not on by default. But in recent ones it is. This solves some random
-        # crashes that happen on the mainnet as reported in issue
-        # https://github.com/raiden-network/raiden/issues/3558
-        web3.middleware_stack.add(http_retry_with_backoff_middleware)
 
         # we use a PoA chain for smoketest, use this middleware to fix this
         web3.middleware_stack.inject(geth_poa_middleware, layer=0)
@@ -535,16 +527,16 @@ class JSONRPCClient:
 
         return price
 
-    def new_contract_proxy(self, contract_interface, contract_address: Address) -> ContractProxy:
+    def new_contract_proxy(
+        self, abi: List[Dict[str, Any]], contract_address: Address
+    ) -> ContractProxy:
         """ Return a proxy for interacting with a smart contract.
 
         Args:
-            contract_interface: The contract interface as defined by the json.
-            address: The contract's address.
+            abi: The contract interface as defined by the json.
+            contract_address: The contract's address.
         """
-        return ContractProxy(
-            self, contract=self.new_contract(contract_interface, contract_address)
-        )
+        return ContractProxy(self, contract=self.new_contract(abi, contract_address))
 
     def new_contract(self, contract_interface: ABI, contract_address: Address):
         return self.web3.eth.contract(
@@ -558,7 +550,7 @@ class JSONRPCClient:
         self,
         contract_name: str,
         contract: CompiledContract,
-        constructor_parameters: Tuple[Any, ...] = None,
+        constructor_parameters: Sequence = None,
     ) -> Tuple[ContractProxy, Dict]:
         """
         Deploy a single solidity contract without dependencies.
@@ -579,8 +571,7 @@ class JSONRPCClient:
             startgas=self._gas_estimate_correction(contract_transaction["gas"]),
         )
 
-        self.poll(transaction_hash)
-        receipt = self.get_transaction_receipt(transaction_hash)
+        receipt = self.poll(transaction_hash)
         contract_address = receipt["contractAddress"]
 
         deployed_code = self.web3.eth.getCode(to_checksum_address(contract_address))
@@ -592,11 +583,14 @@ class JSONRPCClient:
                 )
             )
 
-        return self.new_contract_proxy(contract["abi"], contract_address), receipt
+        return (
+            self.new_contract_proxy(abi=contract["abi"], contract_address=contract_address),
+            receipt,
+        )
 
     def send_transaction(
         self, to: Address, startgas: int, value: int = 0, data: bytes = b""
-    ) -> bytes:
+    ) -> TransactionHash:
         """ Helper to send signed messages.
 
         This method will use the `privkey` provided in the constructor to
@@ -643,10 +637,10 @@ class JSONRPCClient:
             self._available_nonce += 1
 
             log.debug("send_raw_transaction returned", tx_hash=encode_hex(tx_hash), **log_details)
-            return tx_hash
+            return TransactionHash(tx_hash)
 
-    def poll(self, transaction_hash: bytes):
-        """ Wait until the `transaction_hash` is applied or rejected.
+    def poll(self, transaction_hash: TransactionHash) -> Dict[str, Any]:
+        """ Wait until the `transaction_hash` is mined.
 
         Args:
             transaction_hash: Transaction hash that we are waiting for.
@@ -654,47 +648,33 @@ class JSONRPCClient:
         if len(transaction_hash) != 32:
             raise ValueError("transaction_hash must be a 32 byte hash")
 
-        transaction_hash = encode_hex(transaction_hash)
-
-        # used to check if the transaction was removed, this could happen
-        # if gas price is too low:
-        #
-        # > Transaction (acbca3d6) below gas price (tx=1 Wei ask=18
-        # > Shannon). All sequential txs from this address(7d0eae79)
-        # > will be ignored
-        #
-        last_result = None
+        transaction_hash_hex = encode_hex(transaction_hash)
 
         while True:
-            # Could return None for a short period of time, until the
-            # transaction is added to the pool
-            transaction = self.web3.eth.getTransaction(transaction_hash)
+            # Returns `None` while the transaction isn't yet mined. A
+            # transaction is not guaranteed to be mined until the confirmation
+            # block is reached, because of this it is possible for the receipt
+            # to be set on one interation and for it to disappear on another
+            # (assuming a properly chosen confirmation_block number).
+            tx_receipt = self.web3.eth.getTransactionReceipt(transaction_hash_hex)
 
-            # if the transaction was added to the pool and then removed
-            if transaction is None and last_result is not None:
-                raise Exception("invalid transaction, check gas price")
-
-            # the transaction was added to the pool and mined
-            if transaction and transaction["blockNumber"] is not None:
-                last_result = transaction
-
-                # this will wait for both APPLIED and REVERTED transactions
-                transaction_block = transaction["blockNumber"]
-                confirmation_block = transaction_block + self.default_block_num_confirmations
-
+            if tx_receipt:
+                confirmation_block = (
+                    tx_receipt["blockNumber"] + self.default_block_num_confirmations
+                )
                 block_number = self.block_number()
 
                 if block_number >= confirmation_block:
-                    return transaction
+                    return tx_receipt
 
             gevent.sleep(1.0)
 
     def new_filter(
         self,
         contract_address: Address,
-        topics: List[str] = None,
-        from_block: BlockSpecification = 0,
-        to_block: BlockSpecification = "latest",
+        topics: Optional[List[Optional[str]]],
+        from_block: BlockSpecification,
+        to_block: BlockSpecification,
     ) -> StatelessFilter:
         """ Create a filter in the ethereum node. """
         logs_blocks_sanity_check(from_block, to_block)

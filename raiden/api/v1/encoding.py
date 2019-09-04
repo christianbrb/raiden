@@ -1,4 +1,6 @@
 import binascii
+import datetime
+from typing import Any, Optional
 
 from eth_utils import (
     is_0x_prefixed,
@@ -18,7 +20,6 @@ from raiden.constants import SECRET_LENGTH, SECRETHASH_LENGTH, UINT256_MAX
 from raiden.settings import DEFAULT_INITIAL_CHANNEL_TARGET, DEFAULT_JOINABLE_FUNDS_TARGET
 from raiden.transfer import channel
 from raiden.transfer.state import ChannelState, NettingChannelState
-from raiden.utils import data_decoder, data_encoder
 
 
 class InvalidEndpoint(NotFound):
@@ -79,14 +80,18 @@ class AddressField(fields.Field):
         return value
 
 
-class DataField(fields.Field):
-    @staticmethod
-    def _serialize(value, attr, obj, **kwargs):  # pylint: disable=unused-argument
-        return data_encoder(value)
+class TimeStampField(fields.DateTime):
+    def _serialize(
+        self, value: Optional[datetime.datetime], attr: Any, obj: Any, **kwargs
+    ) -> Optional[str]:
+        if value is not None:
+            return value.isoformat()
+        return None
 
-    @staticmethod
-    def _deserialize(value, attr, data, **kwargs):  # pylint: disable=unused-argument
-        return data_decoder(value)
+    def _deserialize(self, value, attr, data, **kwargs) -> Optional[datetime.datetime]:
+        if value is not None:
+            return datetime.datetime.fromisoformat(value)
+        return None
 
 
 class SecretField(fields.Field):
@@ -122,7 +127,7 @@ class SecretHashField(fields.Field):
         "missing_prefix": "Not a valid hex encoded value, must be 0x prefixed.",
         "invalid_data": "Not a valid hex formated string, contains invalid characters.",
         "invalid_size": (
-            f"Not a valid secrethash, decoded value is not {SECRETHASH_LENGTH} " f"bytes long."
+            f"Not a valid secrethash, decoded value is not {SECRETHASH_LENGTH} bytes long."
         ),
     }
 
@@ -271,7 +276,7 @@ class ChannelStateSchema(BaseSchema):
 
     @staticmethod
     def get_balance(channel_state: NettingChannelState) -> int:
-        return channel.get_distributable(channel_state.our_state, channel_state.partner_state)
+        return channel.get_balance(channel_state.our_state, channel_state.partner_state)
 
     @staticmethod
     def get_state(channel_state: NettingChannelState) -> str:
@@ -361,7 +366,7 @@ class EventPaymentSentFailedSchema(BaseSchema):
     event = fields.Constant("EventPaymentSentFailed")
     reason = fields.Str()
     target = AddressField()
-    log_time = fields.String()
+    log_time = TimeStampField()
 
     class Meta:
         fields = ("block_number", "event", "reason", "target", "log_time")
@@ -375,7 +380,7 @@ class EventPaymentSentSuccessSchema(BaseSchema):
     event = fields.Constant("EventPaymentSentSuccess")
     amount = fields.Integer()
     target = AddressField()
-    log_time = fields.String()
+    log_time = TimeStampField()
 
     class Meta:
         fields = ("block_number", "event", "amount", "target", "identifier", "log_time")
@@ -389,7 +394,7 @@ class EventPaymentReceivedSuccessSchema(BaseSchema):
     event = fields.Constant("EventPaymentReceivedSuccess")
     amount = fields.Integer()
     initiator = AddressField()
-    log_time = fields.String()
+    log_time = TimeStampField()
 
     class Meta:
         fields = ("block_number", "event", "amount", "initiator", "identifier", "log_time")

@@ -23,9 +23,7 @@ def test_estimate_gas_fail(deploy_client):
     assert contract_proxy.estimate_gas(check_block, "fail_require") is None, msg
 
 
-def test_estimate_gas_fails_if_startgas_is_higher_than_blockgaslimit(
-    deploy_client, skip_if_not_geth  # pylint: disable=unused-argument
-):
+def test_estimate_gas_fails_if_startgas_is_higher_than_blockgaslimit(deploy_client):
     """ Gas estimation fails if the transaction execution requires more gas
     then the block's gas limit.
     """
@@ -73,11 +71,8 @@ def test_estimate_gas_defaults_to_pending(deploy_client):
     assert second_gas, "gas estimation should not have failed"
     second_tx = contract_proxy.transact("gas_increase_exponential", second_gas)
 
-    deploy_client.poll(first_tx)
-    deploy_client.poll(second_tx)
-
-    first_receipt = deploy_client.get_transaction_receipt(first_tx)
-    second_receipt = deploy_client.get_transaction_receipt(second_tx)
+    first_receipt = deploy_client.poll(first_tx)
+    second_receipt = deploy_client.poll(second_tx)
 
     assert second_receipt["gasLimit"] < deploy_client.get_block("latest")["gasLimit"]
     assert first_receipt["status"] != RECEIPT_FAILURE_CODE

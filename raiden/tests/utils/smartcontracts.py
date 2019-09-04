@@ -1,5 +1,4 @@
 import os
-from typing import Any, List, Tuple
 
 from solc import compile_files
 
@@ -10,15 +9,24 @@ from raiden.network.proxies.token import Token
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
 from raiden.network.rpc.transactions import check_transaction_threw
-from raiden.utils import typing
 from raiden.utils.smart_contracts import deploy_contract_web3
+from raiden.utils.typing import (
+    Address,
+    Any,
+    Dict,
+    FeeAmount,
+    List,
+    TokenAddress,
+    TokenAmount,
+    Tuple,
+)
 from raiden_contracts.contract_manager import ContractManager
 
 
 def deploy_token(
     deploy_client: JSONRPCClient,
     contract_manager: ContractManager,
-    initial_amount: typing.TokenAmount,
+    initial_amount: TokenAmount,
     decimals: int,
     token_name: str,
     token_symbol: str,
@@ -32,19 +40,17 @@ def deploy_token(
     )
 
     contract_abi = contract_manager.get_contract_abi(token_contract_name)
-    return deploy_client.new_contract_proxy(
-        contract_interface=contract_abi, contract_address=token_address
-    )
+    return deploy_client.new_contract_proxy(abi=contract_abi, contract_address=token_address)
 
 
 def deploy_tokens_and_fund_accounts(
-    token_amount: int,
+    token_amount: TokenAmount,
     number_of_tokens: int,
     deploy_service: BlockChainService,
-    participants: typing.List[typing.Address],
+    participants: List[Address],
     contract_manager: ContractManager,
     token_contract_name: str,
-) -> typing.List[typing.TokenAddress]:
+) -> List[TokenAddress]:
     """ Deploy `number_of_tokens` ERC20 token instances with `token_amount` minted and
     distributed among `blockchain_services`. Optionally the instances will be registered with
     the raiden registry.
@@ -57,11 +63,13 @@ def deploy_tokens_and_fund_accounts(
     """
     result = list()
     for _ in range(number_of_tokens):
-        token_address = deploy_contract_web3(
-            token_contract_name,
-            deploy_service.client,
-            contract_manager=contract_manager,
-            constructor_arguments=(token_amount, 2, "raiden", "Rd"),
+        token_address = TokenAddress(
+            deploy_contract_web3(
+                token_contract_name,
+                deploy_service.client,
+                contract_manager=contract_manager,
+                constructor_arguments=(token_amount, 2, "raiden", "Rd"),
+            )
         )
 
         result.append(token_address)
@@ -70,7 +78,7 @@ def deploy_tokens_and_fund_accounts(
         # transfer from the creator to the other nodes
         for transfer_to in participants:
             deploy_service.token(token_address).transfer(
-                to_address=transfer_to, amount=token_amount // len(participants)
+                to_address=transfer_to, amount=TokenAmount(token_amount // len(participants))
             )
 
     return result
@@ -110,14 +118,14 @@ def deploy_service_registry_and_set_urls(
     )
 
     # Test that getting a random service for an empty registry returns None
-    pfs_address = get_random_pfs(c1_service_proxy, "latest")
+    pfs_address = get_random_pfs(c1_service_proxy, "latest", pathfinding_max_fee=FeeAmount(1))
     assert pfs_address is None
 
     # Test that setting the urls works
     c1_price = c1_service_proxy.current_price(block_identifier="latest")
     tx = c1_token_proxy.proxy.transact("mint", 1000000, c1_price)
-    c1_client.poll(tx)
-    assert not check_transaction_threw(c1_client, tx)
+    receipt = c1_client.poll(tx)
+    assert not check_transaction_threw(receipt=receipt)
     assert c1_token_proxy.balance_of(c1_client.address) > 0
     c1_token_proxy.approve(allowed_address=service_registry_address, allowance=c1_price)
     c1_service_proxy.deposit(block_identifier="latest", limit_amount=c1_price)
@@ -125,8 +133,8 @@ def deploy_service_registry_and_set_urls(
 
     c2_price = c2_service_proxy.current_price(block_identifier="latest")
     tx = c2_token_proxy.proxy.transact("mint", 1000000, c2_price)
-    c2_client.poll(tx)
-    assert not check_transaction_threw(c2_client, tx)
+    receipt = c2_client.poll(tx)
+    assert not check_transaction_threw(receipt=receipt)
     assert c2_token_proxy.balance_of(c2_client.address) > 0
     c2_token_proxy.approve(allowed_address=service_registry_address, allowance=c2_price)
     c2_service_proxy.deposit(block_identifier="latest", limit_amount=c2_price)
@@ -134,8 +142,8 @@ def deploy_service_registry_and_set_urls(
 
     c3_price = c3_service_proxy.current_price(block_identifier="latest")
     tx = c3_token_proxy.proxy.transact("mint", 1000000, c3_price)
-    c3_client.poll(tx)
-    assert not check_transaction_threw(c3_client, tx)
+    receipt = c3_client.poll(tx)
+    assert not check_transaction_threw(receipt=receipt)
     assert c3_token_proxy.balance_of(c3_client.address) > 0
     c3_token_proxy.approve(allowed_address=service_registry_address, allowance=c3_price)
     c3_service_proxy.deposit(block_identifier="latest", limit_amount=c3_price)
@@ -146,7 +154,7 @@ def deploy_service_registry_and_set_urls(
     return c1_service_proxy, urls
 
 
-def compile_files_cwd(*args: Any, **kwargs: Any) -> str:
+def compile_files_cwd(*args: Any, **kwargs: Any) -> Dict[str, Any]:
     """change working directory to contract's dir in order to avoid symbol
     name conflicts"""
     # get root directory of the contracts
@@ -174,7 +182,7 @@ def compile_files_cwd(*args: Any, **kwargs: Any) -> str:
     return compiled_contracts
 
 
-def deploy_rpc_test_contract(deploy_client, name: str):
+def deploy_rpc_test_contract(deploy_client: JSONRPCClient, name: str):
     contract_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "smart_contracts", f"{name}.sol")
     )

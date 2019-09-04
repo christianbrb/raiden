@@ -1,5 +1,5 @@
 import structlog
-from eth_utils import encode_hex, is_binary_address, to_checksum_address, to_normalized_address
+from eth_utils import encode_hex, is_binary_address, to_checksum_address
 from gevent.lock import RLock
 
 from raiden.constants import GAS_LIMIT_FOR_TOKEN_CONTRACT_CALL
@@ -27,8 +27,7 @@ class Token:
         contract_manager: ContractManager,
     ) -> None:
         contract = jsonrpc_client.new_contract(
-            contract_manager.get_contract_abi(CONTRACT_CUSTOM_TOKEN),
-            to_normalized_address(token_address),
+            contract_manager.get_contract_abi(CONTRACT_CUSTOM_TOKEN), Address(token_address)
         )
         proxy = ContractProxy(jsonrpc_client, contract)
 
@@ -44,10 +43,14 @@ class Token:
 
         self.token_lock: RLock = RLock()
 
-    def allowance(self, owner: Address, spender: Address, block_identifier: BlockSpecification):
-        return self.proxy.contract.functions.allowance(
-            to_checksum_address(owner), to_checksum_address(spender)
-        ).call(block_identifier=block_identifier)
+    def allowance(
+        self, owner: Address, spender: Address, block_identifier: BlockSpecification
+    ) -> TokenAmount:
+        return TokenAmount(
+            self.proxy.contract.functions.allowance(
+                to_checksum_address(owner), to_checksum_address(spender)
+            ).call(block_identifier=block_identifier)
+        )
 
     def approve(self, allowed_address: Address, allowance: TokenAmount) -> None:
         """ Approve `allowed_address` to transfer up to `deposit` amount of token.
@@ -86,8 +89,8 @@ class Token:
                         "approve", gas_limit, to_checksum_address(allowed_address), allowance
                     )
 
-                    self.client.poll(transaction_hash)
-                    failed_receipt = check_transaction_threw(self.client, transaction_hash)
+                    receipt = self.client.poll(transaction_hash)
+                    failed_receipt = check_transaction_threw(receipt=receipt)
 
                     if failed_receipt:
                         failed_at_blockhash = encode_hex(failed_receipt["blockHash"])
@@ -159,9 +162,11 @@ class Token:
             block_identifier=block_identifier
         )
 
-    def total_supply(self, block_identifier: BlockSpecification = "latest"):
+    def total_supply(self, block_identifier: BlockSpecification = "latest") -> TokenAmount:
         """ Return the total supply of the token at the given block identifier. """
-        return self.proxy.contract.functions.totalSupply().call(block_identifier=block_identifier)
+        return TokenAmount(
+            self.proxy.contract.functions.totalSupply().call(block_identifier=block_identifier)
+        )
 
     def transfer(self, to_address: Address, amount: TokenAmount) -> None:
         """ Transfer `amount` tokens to `to_address`.
@@ -198,9 +203,9 @@ class Token:
                         "transfer", gas_limit, to_checksum_address(to_address), amount
                     )
 
-                    self.client.poll(transaction_hash)
+                    receipt = self.client.poll(transaction_hash)
                     # TODO: check Transfer event (issue: #2598)
-                    failed_receipt = check_transaction_threw(self.client, transaction_hash)
+                    failed_receipt = check_transaction_threw(receipt=receipt)
 
                 if gas_limit is None or failed_receipt is not None:
                     if failed_receipt:

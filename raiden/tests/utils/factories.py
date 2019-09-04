@@ -30,9 +30,9 @@ from raiden.transfer.state import (
     HopState,
     NettingChannelEndState,
     NettingChannelState,
-    PaymentNetworkState,
     PendingLocksState,
     RouteState,
+    TokenNetworkRegistryState,
     TokenNetworkState,
     TransactionExecutionStatus,
     message_identifier_from_prng,
@@ -41,6 +41,7 @@ from raiden.transfer.state_change import ContractReceiveChannelNew, ContractRece
 from raiden.transfer.utils import hash_balance_data
 from raiden.utils import privatekey_to_address, random_secret, sha3
 from raiden.utils.packing import pack_balance_proof
+from raiden.utils.secrethash import sha256_secrethash
 from raiden.utils.signer import LocalSigner, Signer
 from raiden.utils.typing import (
     AdditionalHash,
@@ -67,7 +68,6 @@ from raiden.utils.typing import (
     Nonce,
     Optional,
     PaymentID,
-    PaymentNetworkAddress,
     Secret,
     SecretHash,
     Signature,
@@ -75,6 +75,7 @@ from raiden.utils.typing import (
     TokenAddress,
     TokenAmount,
     TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
     TransactionHash,
     Tuple,
     Type,
@@ -93,7 +94,37 @@ def _partial_dict(full_dict: Dict[K, V], *args) -> Dict[K, V]:
 
 
 class Properties:
-    """ Base class for all properties classes. """
+    """
+    Base class for all properties classes.
+
+    Each properties class is a frozen dataclass used for creating a
+    specific type of object. It is called `TProperties`, where `T`
+    is the type of the object to be created, which is also specified
+    in the class variable `TARGET_TYPE`. An object of type `T` is
+    created by passing a `TProperties` instance to `create`.
+
+    When subclassing `Properties`, all fields should be given `EMPTY`
+    as a default value. The class variable `DEFAULTS` should be set to
+    a fully initialized instance of `TProperties`.
+
+    The advantage of this is that we can change defaults later: If
+    some test module needs many slightly varied instances of the same
+    object, it can define its own defaults instance and use it like
+    this:
+    ```
+    my_defaults = create_properties(custom_defaults)
+    # my_defaults is now a fully initialized version of
+    # custom_defaults, no EMPTY fields
+    ...
+    object1 = create(properties1, my_defaults)
+    object2 = create(properties2, my_defaults)
+    ...
+    ```
+
+    Fields in the default instance can be set to `GENERATE` to indicate
+    they should be generated (either randomly, like a secret, or from
+    the other fields, like a signature).
+    """
 
     DEFAULTS: ClassVar["Properties"] = None
     TARGET_TYPE: ClassVar[Type] = None
@@ -165,6 +196,10 @@ def make_20bytes() -> bytes:
     return bytes("".join(random.choice(string.printable) for _ in range(20)), encoding="utf-8")
 
 
+def make_locksroot() -> Locksroot:
+    return Locksroot(make_32bytes())
+
+
 def make_address() -> Address:
     return Address(make_20bytes())
 
@@ -189,6 +224,10 @@ def make_token_network_address() -> TokenNetworkAddress:
     return TokenNetworkAddress(make_address())
 
 
+def make_token_network_registry_address() -> TokenNetworkRegistryAddress:
+    return TokenNetworkRegistryAddress(make_address())
+
+
 def make_additional_hash() -> AdditionalHash:
     return AdditionalHash(make_32bytes())
 
@@ -209,10 +248,6 @@ def make_privatekey_bin() -> bin:
     return make_32bytes()
 
 
-def make_payment_network_address() -> PaymentNetworkAddress:
-    return PaymentNetworkAddress(make_address())
-
-
 def make_keccak_hash() -> Keccak256:
     return Keccak256(make_32bytes())
 
@@ -229,6 +264,12 @@ def make_secret_hash(i: int = EMPTY) -> SecretHash:
         return sha256(format(i, ">032").encode()).digest()
     else:
         return make_32bytes()
+
+
+def make_secret_with_hash(i: int = EMPTY) -> Tuple[Secret, SecretHash]:
+    secret = make_secret(i)
+    secrethash = sha256_secrethash(secret)
+    return secret, secrethash
 
 
 def make_lock() -> HashTimeLockState:
@@ -268,8 +309,8 @@ UNIT_SETTLE_TIMEOUT = 50
 UNIT_REVEAL_TIMEOUT = 5
 UNIT_TRANSFER_AMOUNT = 10
 UNIT_TRANSFER_FEE = 5
-UNIT_SECRET = b"secretsecretsecretsecretsecretse"
-UNIT_SECRETHASH = SecretHash(sha256(UNIT_SECRET).digest())
+UNIT_SECRET = Secret(b"secretsecretsecretsecretsecretse")
+UNIT_SECRETHASH = sha256_secrethash(UNIT_SECRET)
 UNIT_TOKEN_ADDRESS = b"tokentokentokentoken"
 UNIT_TOKEN_NETWORK_ADDRESS = b"networknetworknetwor"
 UNIT_CHANNEL_ID = 1338
@@ -282,16 +323,13 @@ UNIT_CANONICAL_ID = CanonicalIdentifier(
 UNIT_OUR_KEY = b"ourourourourourourourourourourou"
 UNIT_OUR_ADDRESS = privatekey_to_address(UNIT_OUR_KEY)
 
-UNIT_PAYMENT_NETWORK_IDENTIFIER = b"paymentnetworkidentifier"
+UNIT_TOKEN_NETWORK_REGISTRY_IDENTIFIER = b"tokennetworkregistryidentifier"
 UNIT_TRANSFER_IDENTIFIER = 37
-UNIT_TRANSFER_INITIATOR = b"initiatorinitiatorin"
-UNIT_TRANSFER_TARGET = b"targettargettargetta"
+UNIT_TRANSFER_INITIATOR = Address(b"initiatorinitiatorin")
+UNIT_TRANSFER_TARGET = Address(b"targettargettargetta")
 UNIT_TRANSFER_PKEY_BIN = sha3(b"transfer pkey")
 UNIT_TRANSFER_PKEY = UNIT_TRANSFER_PKEY_BIN
-UNIT_TRANSFER_SENDER = privatekey_to_address(sha3(b"transfer pkey"))
-
-UNIT_OUR_KEY = b"ourourourourourourourourourourou"
-UNIT_OUR_ADDRESS = privatekey_to_address(UNIT_OUR_KEY)
+UNIT_TRANSFER_SENDER = Address(privatekey_to_address(sha3(b"transfer pkey")))
 
 HOP1_KEY = b"11111111111111111111111111111111"
 HOP2_KEY = b"22222222222222222222222222222222"
@@ -448,7 +486,7 @@ FeeScheduleStateProperties.DEFAULTS = FeeScheduleStateProperties(flat=0, proport
 class NettingChannelStateProperties(Properties):
     canonical_identifier: CanonicalIdentifier = EMPTY
     token_address: TokenAddress = EMPTY
-    payment_network_address: PaymentNetworkAddress = EMPTY
+    token_network_registry_address: TokenNetworkRegistryAddress = EMPTY
 
     reveal_timeout: BlockTimeout = EMPTY
     settle_timeout: BlockTimeout = EMPTY
@@ -467,7 +505,7 @@ class NettingChannelStateProperties(Properties):
 NettingChannelStateProperties.DEFAULTS = NettingChannelStateProperties(
     canonical_identifier=CanonicalIdentifierProperties.DEFAULTS,
     token_address=UNIT_TOKEN_ADDRESS,
-    payment_network_address=UNIT_PAYMENT_NETWORK_IDENTIFIER,
+    token_network_registry_address=UNIT_TOKEN_NETWORK_REGISTRY_IDENTIFIER,
     reveal_timeout=UNIT_REVEAL_TIMEOUT,
     settle_timeout=UNIT_SETTLE_TIMEOUT,
     fee_schedule=FeeScheduleStateProperties.DEFAULTS,
@@ -481,7 +519,7 @@ NettingChannelStateProperties.DEFAULTS = NettingChannelStateProperties(
 
 @dataclass(frozen=True)
 class TransferDescriptionProperties(Properties):
-    payment_network_address: PaymentNetworkAddress = EMPTY
+    token_network_registry_address: TokenNetworkRegistryAddress = EMPTY
     payment_identifier: PaymentID = EMPTY
     amount: TokenAmount = EMPTY
     token_network_address: TokenNetworkAddress = EMPTY
@@ -493,7 +531,7 @@ class TransferDescriptionProperties(Properties):
 
 
 TransferDescriptionProperties.DEFAULTS = TransferDescriptionProperties(
-    payment_network_address=UNIT_PAYMENT_NETWORK_IDENTIFIER,
+    token_network_registry_address=UNIT_TOKEN_NETWORK_REGISTRY_IDENTIFIER,
     payment_identifier=UNIT_TRANSFER_IDENTIFIER,
     amount=UNIT_TRANSFER_AMOUNT,
     token_network_address=UNIT_TOKEN_NETWORK_ADDRESS,
@@ -1242,7 +1280,7 @@ def make_transfers_pair(
 class ContainerForChainStateTests:
     chain_state: ChainState
     our_address: Address
-    payment_network_address: PaymentNetworkAddress
+    token_network_registry_address: TokenNetworkRegistryAddress
     token_address: TokenAddress
     token_network_address: TokenNetworkAddress
     channel_set: ChannelSet
@@ -1266,7 +1304,7 @@ def make_chain_state(
     """Factory for populating a complete `ChainState`.
 
     Sets up a `ChainState` instance with `number_of_channels` `NettingChannelState`s inside one
-    `TokenNetworkState` inside one `PaymentNetworkState`.
+    `TokenNetworkState` inside one `TokenNetworkRegistryState`.
 
     The returned container, `ContainerForChainStateTests`, provides direct access to the most used
     function parameters when traversing a `ChainState` (i.e. the `token_network_address` of the
@@ -1294,7 +1332,7 @@ def make_chain_state(
             netting_channel.partner_state.address
         ].append(netting_channel.canonical_identifier.channel_identifier)
 
-    payment_network_address = make_address()
+    token_network_registry_address = make_address()
     our_address = channel_set.channels[0].our_state.address
 
     chain_state = ChainState(
@@ -1304,12 +1342,14 @@ def make_chain_state(
         our_address=our_address,
         chain_id=UNIT_CHAIN_ID,
     )
-    chain_state.identifiers_to_paymentnetworks[payment_network_address] = PaymentNetworkState(
-        address=payment_network_address, token_network_list=[token_network]
+    chain_state.identifiers_to_tokennetworkregistries[
+        token_network_registry_address
+    ] = TokenNetworkRegistryState(
+        address=token_network_registry_address, token_network_list=[token_network]
     )
-    chain_state.tokennetworkaddresses_to_paymentnetworkaddresses[
+    chain_state.tokennetworkaddresses_to_tokennetworkregistryaddresses[
         token_network_address
-    ] = payment_network_address
+    ] = token_network_registry_address
 
     chain_state.nodeaddresses_to_networkstates = make_node_availability_map(
         [channel.partner_state.address for channel in channel_set.channels]
@@ -1317,7 +1357,7 @@ def make_chain_state(
     return ContainerForChainStateTests(
         chain_state=chain_state,
         our_address=our_address,
-        payment_network_address=payment_network_address,
+        token_network_registry_address=token_network_registry_address,
         token_address=token_address,
         token_network_address=token_network_address,
         channel_set=channel_set,

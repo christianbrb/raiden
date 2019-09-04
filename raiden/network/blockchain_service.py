@@ -15,13 +15,14 @@ from raiden.utils.typing import (
     Address,
     BlockHash,
     BlockNumber,
+    BlockSpecification,
     ChainID,
     ChannelID,
     Dict,
-    PaymentNetworkAddress,
     T_ChannelID,
     TokenAddress,
     TokenNetworkAddress,
+    TokenNetworkRegistryAddress,
     Tuple,
     typecheck,
 )
@@ -29,7 +30,12 @@ from raiden_contracts.contract_manager import ContractManager
 
 
 class BlockChainService:
-    """ Exposes the blockchain's state through JSON-RPC. """
+    """ Encapsulates access and creation of contract proxies.
+
+    This class keeps track of mapping between contract addresses and their internal
+    contract proxy counterparts. It also synchronizes creation of proxies, so that
+    a 1-to-1 relationship is kept.
+    """
 
     # pylint: disable=too-many-instance-attributes
 
@@ -37,7 +43,9 @@ class BlockChainService:
         self.address_to_secret_registry: Dict[Address, SecretRegistry] = dict()
         self.address_to_token: Dict[TokenAddress, Token] = dict()
         self.address_to_token_network: Dict[TokenNetworkAddress, TokenNetwork] = dict()
-        self.address_to_token_network_registry: Dict[Address, TokenNetworkRegistry] = dict()
+        self.address_to_token_network_registry: Dict[
+            TokenNetworkRegistryAddress, TokenNetworkRegistry
+        ] = dict()
         self.address_to_user_deposit: Dict[Address, UserDeposit] = dict()
         self.address_to_service_registry: Dict[Address, ServiceRegistry] = dict()
         self.identifier_to_payment_channel: Dict[
@@ -68,7 +76,7 @@ class BlockChainService:
     def block_hash(self) -> BlockHash:
         return self.client.blockhash_from_blocknumber("latest")
 
-    def get_block(self, block_identifier):
+    def get_block(self, block_identifier: BlockSpecification):
         return self.client.web3.eth.getBlock(block_identifier=block_identifier)
 
     def is_synced(self) -> bool:
@@ -103,13 +111,10 @@ class BlockChainService:
         else:
             interval = last_block_number - oldest
         assert interval > 0
-        last_timestamp = self.get_block_header(last_block_number)["timestamp"]
-        first_timestamp = self.get_block_header(last_block_number - interval)["timestamp"]
+        last_timestamp = self.get_block(last_block_number)["timestamp"]
+        first_timestamp = self.get_block(last_block_number - interval)["timestamp"]
         delta = last_timestamp - first_timestamp
         return delta / interval
-
-    def get_block_header(self, block_number: int):
-        return self.client.web3.eth.getBlock(block_number, False)
 
     def next_block(self) -> int:
         target_block_number = self.block_number() + 1
@@ -140,7 +145,7 @@ class BlockChainService:
 
         return self.address_to_token[token_address]
 
-    def token_network_registry(self, address: Address) -> TokenNetworkRegistry:
+    def token_network_registry(self, address: TokenNetworkRegistryAddress) -> TokenNetworkRegistry:
         if not is_binary_address(address):
             raise ValueError("address must be a valid address")
 
@@ -148,7 +153,7 @@ class BlockChainService:
             if address not in self.address_to_token_network_registry:
                 self.address_to_token_network_registry[address] = TokenNetworkRegistry(
                     jsonrpc_client=self.client,
-                    registry_address=PaymentNetworkAddress(address),
+                    registry_address=TokenNetworkRegistryAddress(address),
                     contract_manager=self.contract_manager,
                     blockchain_service=self,
                 )

@@ -38,9 +38,10 @@ from raiden.transfer.mediated_transfer.state_change import (
 from raiden.transfer.state import NODE_NETWORK_UNREACHABLE, message_identifier_from_prng
 from raiden.transfer.state_change import Block, ContractReceiveSecretReveal
 from raiden.utils.signer import LocalSigner
+from raiden.utils.typing import BlockExpiration
 
 LONG_EXPIRATION = factories.create_properties(
-    factories.LockedTransferSignedStateProperties(expiration=30)
+    factories.LockedTransferSignedStateProperties(expiration=BlockExpiration(30))
 )
 
 
@@ -465,13 +466,11 @@ def test_regression_mediator_not_update_payer_state_twice():
     assert current_state.transfers_pair[0].payee_state == "payee_expired"
     assert not channel.is_secret_known(payer_channel.partner_state, secrethash)
 
-    safe_to_wait, _ = mediator.is_safe_to_wait(
+    assert mediator.is_safe_to_wait(
         lock_expiration=lock.expiration,
         reveal_timeout=payer_channel.reveal_timeout,
         block_number=lock.expiration + 10,
-    )
-
-    assert not safe_to_wait
+    ).fail
 
     iteration = mediator.state_transition(
         mediator_state=current_state,
@@ -599,7 +598,5 @@ def test_regression_unavailable_nodes_must_be_properly_filtered():
     )
 
     send_transfer = search_for_item(initial_iteration.events, SendLockedTransfer, {})
-    msg = (
-        "All available routes are with unavailable nodes, therefore no send " "should be produced"
-    )
+    msg = "All available routes are with unavailable nodes, therefore no send should be produced"
     assert send_transfer is None, msg
