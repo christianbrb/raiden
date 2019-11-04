@@ -10,7 +10,7 @@ import pytest
 from raiden.constants import EMPTY_SIGNATURE, LOCKSROOT_OF_NO_LOCKS, UINT64_MAX
 from raiden.messages.decode import balanceproof_from_envelope
 from raiden.messages.transfers import Lock, Unlock
-from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS
+from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS, MediationFeeConfig
 from raiden.tests.utils.events import search_for_item
 from raiden.tests.utils.factories import (
     HOP1,
@@ -46,6 +46,7 @@ from raiden.transfer.events import (
     EventInvalidReceivedWithdraw,
     EventInvalidReceivedWithdrawExpired,
     EventInvalidReceivedWithdrawRequest,
+    SendPFSFeeUpdate,
     SendProcessed,
     SendWithdrawConfirmation,
     SendWithdrawExpired,
@@ -237,7 +238,7 @@ def test_endstate_update_contract_balance():
 
 def test_channelstate_update_contract_balance():
     """A blockchain event for a new balance must increase the respective
-    participants balance.
+    participants balance and trigger a fee update
     """
     deposit_block_number = 10
     block_number = deposit_block_number + DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS + 1
@@ -259,6 +260,7 @@ def test_channelstate_update_contract_balance():
         deposit_transaction=deposit_transaction,
         block_number=block_number,
         block_hash=block_hash,
+        fee_config=MediationFeeConfig(),
     )
 
     iteration = channel.state_transition(
@@ -277,6 +279,9 @@ def test_channelstate_update_contract_balance():
 
     assert_partner_state(new_state.our_state, new_state.partner_state, our_model2)
     assert_partner_state(new_state.partner_state, new_state.our_state, partner_model2)
+    # Also make sure that a fee update triggering event is created
+    assert len(iteration.events) == 1
+    assert isinstance(iteration.events[0], SendPFSFeeUpdate)
 
 
 def test_channelstate_decreasing_contract_balance():
@@ -303,6 +308,7 @@ def test_channelstate_decreasing_contract_balance():
         deposit_transaction=deposit_transaction,
         block_number=deposit_block_number,
         block_hash=deposit_block_hash,
+        fee_config=MediationFeeConfig(),
     )
 
     iteration = channel.state_transition(
@@ -342,6 +348,7 @@ def test_channelstate_repeated_contract_balance():
         deposit_transaction=deposit_transaction,
         block_number=deposit_block_number,
         block_hash=deposit_block_hash,
+        fee_config=MediationFeeConfig(),
     )
 
     our_model2 = our_model1._replace(
@@ -1932,7 +1939,6 @@ def test_node_handles_received_withdraw_expiry():
 
     our_model1, _ = create_model(balance=70)
     partner_model1, privkey2 = create_model(balance=100)
-    signer = LocalSigner(privkey2)
     channel_state = create_channel_from_models(our_model1, partner_model1, privkey2)
     block_hash = make_block_hash()
 
@@ -1944,21 +1950,10 @@ def test_node_handles_received_withdraw_expiry():
         total_withdraw=total_withdraw, expiration=expiration_block_number, nonce=1
     )
 
-    packed = pack_withdraw(
-        canonical_identifier=channel_state.canonical_identifier,
-        # pylint: disable=no-member
-        participant=channel_state.partner_state.address,
-        # pylint: enable=no-member
-        total_withdraw=total_withdraw,
-        expiration_block=10,
-    )
-    partner_signature = signer.sign(packed)
-
     receive_withdraw_expired = ReceiveWithdrawExpired(
         message_identifier=message_identifier_from_prng(pseudo_random_generator),
         canonical_identifier=channel_state.canonical_identifier,
         total_withdraw=total_withdraw,
-        signature=partner_signature,
         # pylint: disable=no-member
         sender=channel_state.partner_state.address,
         participant=channel_state.partner_state.address,
@@ -1987,7 +1982,6 @@ def test_node_rejects_received_withdraw_expiry_invalid_total_withdraw():
 
     our_model1, _ = create_model(balance=70)
     partner_model1, privkey2 = create_model(balance=100)
-    signer = LocalSigner(privkey2)
     channel_state = create_channel_from_models(our_model1, partner_model1, privkey2)
     block_hash = make_block_hash()
 
@@ -2000,22 +1994,11 @@ def test_node_rejects_received_withdraw_expiry_invalid_total_withdraw():
     )
     channel_state.partner_state.withdraws_pending[total_withdraw] = pending_withdraw
 
-    packed = pack_withdraw(
-        canonical_identifier=channel_state.canonical_identifier,
-        # pylint: disable=no-member
-        participant=channel_state.partner_state.address,
-        # pylint: enable=no-member
-        total_withdraw=total_withdraw,
-        expiration_block=expiration_block_number,
-    )
-    partner_signature = signer.sign(packed)
-
     # Test a withdraw that has not expired yet
     receive_withdraw_expired = ReceiveWithdrawExpired(
         message_identifier=message_identifier_from_prng(pseudo_random_generator),
         canonical_identifier=channel_state.canonical_identifier,
         total_withdraw=total_withdraw,
-        signature=partner_signature,
         # pylint: disable=no-member
         sender=channel_state.partner_state.address,
         participant=channel_state.partner_state.address,
@@ -2063,14 +2046,13 @@ def test_node_rejects_received_withdraw_expiry_invalid_signature():
     )
     channel_state.partner_state.withdraws_pending[total_withdraw] = pending_withdraw
 
-    # Invalid signature
+    # Signed by wrong party
     receive_withdraw_expired = ReceiveWithdrawExpired(
         message_identifier=message_identifier_from_prng(pseudo_random_generator),
         canonical_identifier=channel_state.canonical_identifier,
         total_withdraw=total_withdraw,
-        signature=make_32bytes(),
         # pylint: disable=no-member
-        sender=channel_state.partner_state.address,
+        sender=channel_state.our_state.address,  # signed by wrong party
         participant=channel_state.partner_state.address,
         # pylint: enable=no-member
         nonce=1,
@@ -2104,7 +2086,6 @@ def test_node_rejects_received_withdraw_expiry_invalid_nonce():
 
     our_model1, _ = create_model(balance=70)
     partner_model1, privkey2 = create_model(balance=100)
-    signer = LocalSigner(privkey2)
     channel_state = create_channel_from_models(our_model1, partner_model1, privkey2)
     block_hash = make_block_hash()
 
@@ -2117,22 +2098,11 @@ def test_node_rejects_received_withdraw_expiry_invalid_nonce():
     )
     channel_state.partner_state.withdraws_pending[total_withdraw] = pending_withdraw
 
-    packed = pack_withdraw(
-        canonical_identifier=channel_state.canonical_identifier,
-        # pylint: disable=no-member
-        participant=channel_state.partner_state.address,
-        # pylint: enable=no-member
-        total_withdraw=total_withdraw,
-        expiration_block=expiration_block_number,
-    )
-    partner_signature = signer.sign(packed)
-
     # Invalid Nonce
     receive_withdraw_expired = ReceiveWithdrawExpired(
         message_identifier=message_identifier_from_prng(pseudo_random_generator),
         canonical_identifier=channel_state.canonical_identifier,
         total_withdraw=total_withdraw,
-        signature=partner_signature,
         # pylint: disable=no-member
         sender=channel_state.partner_state.address,
         participant=channel_state.partner_state.address,
@@ -2168,23 +2138,12 @@ def test_node_multiple_withdraws_with_one_expiring():
 
     our_model1, _ = create_model(balance=70)
     partner_model1, privkey2 = create_model(balance=100)
-    signer = LocalSigner(privkey2)
     channel_state = create_channel_from_models(our_model1, partner_model1, privkey2)
     block_hash = make_block_hash()
 
     total_withdraw = 50
     expiration_block_number = 10
     expiration_threshold = channel.get_receiver_expiration_threshold(expiration_block_number)
-
-    packed = pack_withdraw(
-        canonical_identifier=channel_state.canonical_identifier,
-        # pylint: disable=no-member
-        participant=channel_state.partner_state.address,
-        # pylint: enable=no-member
-        total_withdraw=total_withdraw,
-        expiration_block=expiration_block_number,
-    )
-    partner_signature = signer.sign(packed)
 
     second_total_withdraw = total_withdraw * 2
 
@@ -2201,7 +2160,6 @@ def test_node_multiple_withdraws_with_one_expiring():
         message_identifier=message_identifier_from_prng(pseudo_random_generator),
         canonical_identifier=channel_state.canonical_identifier,
         total_withdraw=total_withdraw,
-        signature=partner_signature,
         # pylint: disable=no-member
         sender=channel_state.partner_state.address,
         participant=channel_state.partner_state.address,
@@ -2252,6 +2210,7 @@ def test_receive_contract_withdraw():
         block_number=15,
         block_hash=block_hash,
         transaction_hash=make_transaction_hash(),
+        fee_config=MediationFeeConfig(),
     )
 
     iteration = channel.handle_channel_withdraw(
@@ -2263,6 +2222,9 @@ def test_receive_contract_withdraw():
     assert iteration.new_state.our_state.total_withdraw == total_withdraw
     assert iteration.new_state.our_total_withdraw == total_withdraw
     assert total_withdraw not in iteration.new_state.our_state.withdraws_pending
+    # Also make sure that a fee update triggering event is created
+    assert len(iteration.events) == 1
+    assert isinstance(iteration.events[0], SendPFSFeeUpdate)
 
     contract_receive_withdraw = ContractReceiveChannelWithdraw(
         canonical_identifier=channel_state.canonical_identifier,
@@ -2273,6 +2235,7 @@ def test_receive_contract_withdraw():
         block_number=15,
         block_hash=block_hash,
         transaction_hash=make_transaction_hash(),
+        fee_config=MediationFeeConfig(),
     )
 
     iteration = channel.handle_channel_withdraw(
@@ -2284,3 +2247,6 @@ def test_receive_contract_withdraw():
     assert iteration.new_state.partner_state.total_withdraw == total_withdraw
     assert iteration.new_state.partner_total_withdraw == total_withdraw
     assert total_withdraw not in iteration.new_state.partner_state.withdraws_pending
+    # Also make sure that a fee update triggering event is created
+    assert len(iteration.events) == 1
+    assert isinstance(iteration.events[0], SendPFSFeeUpdate)

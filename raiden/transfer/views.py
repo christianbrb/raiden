@@ -3,12 +3,12 @@ from raiden.transfer.architecture import ContractSendEvent, TransferTask
 from raiden.transfer.identifiers import CanonicalIdentifier
 from raiden.transfer.mediated_transfer.tasks import InitiatorTask, MediatorTask, TargetTask
 from raiden.transfer.state import (
-    NODE_NETWORK_UNKNOWN,
     BalanceProofSignedState,
     BalanceProofUnsignedState,
     ChainState,
     ChannelState,
     NettingChannelState,
+    NetworkState,
     QueueIdsToQueues,
     TokenNetworkRegistryState,
     TokenNetworkState,
@@ -101,9 +101,8 @@ def get_networkstatuses(chain_state: ChainState) -> Dict:
     return chain_state.nodeaddresses_to_networkstates
 
 
-def get_node_network_status(chain_state: ChainState, node_address: Address) -> str:
-
-    return chain_state.nodeaddresses_to_networkstates.get(node_address, NODE_NETWORK_UNKNOWN)
+def get_node_network_status(chain_state: ChainState, node_address: Address) -> NetworkState:
+    return chain_state.nodeaddresses_to_networkstates.get(node_address, NetworkState.UNKNOWN)
 
 
 def get_participants_addresses(
@@ -425,7 +424,7 @@ def secret_from_transfer_task(
     """Return the secret for the transfer, None on ABSENT_SECRET."""
     assert isinstance(transfer_task, InitiatorTask)
 
-    transfer_state = transfer_task.manager_state.initiator_transfers[secrethash]
+    transfer_state = transfer_task.manager_state.initiator_transfers.get(secrethash)
 
     if transfer_state is None:
         return None

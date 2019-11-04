@@ -7,22 +7,13 @@ from raiden.tests.utils import factories
 from raiden.tests.utils.detect_failure import raise_on_failure
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 @pytest.mark.parametrize("channels_per_node", [1])
 def test_close_regression(raiden_network, deposit, token_addresses):
     """ The python api was using the wrong balance proof to close the channel,
     thus the close was failing if a transfer was made.
     """
-    raise_on_failure(
-        raiden_network,
-        run_test_close_regression,
-        raiden_network=raiden_network,
-        deposit=deposit,
-        token_addresses=token_addresses,
-    )
-
-
-def run_test_close_regression(raiden_network, deposit, token_addresses):
     app0, app1 = raiden_network
     token_address = token_addresses[0]
 
@@ -33,7 +24,7 @@ def run_test_close_regression(raiden_network, deposit, token_addresses):
     channel_list = api1.get_channel_list(registry_address, token_address, app1.raiden.address)
     channel12 = channel_list[0]
 
-    token_proxy = app0.raiden.chain.token(token_address)
+    token_proxy = app0.raiden.proxy_manager.token(token_address)
     node1_balance_before = token_proxy.balance_of(api1.address)
     node2_balance_before = token_proxy.balance_of(api2.address)
 

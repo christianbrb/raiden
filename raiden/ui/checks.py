@@ -3,7 +3,6 @@ import sys
 import click
 import structlog
 from eth_utils import to_checksum_address
-from requests.exceptions import ConnectTimeout
 from web3 import Web3
 
 from raiden.accounts import AccountManager
@@ -16,8 +15,8 @@ from raiden.constants import (
     SQLITE_MIN_REQUIRED_VERSION,
     Environment,
 )
-from raiden.exceptions import EthNodeCommunicationError, EthNodeInterfaceError
-from raiden.network.blockchain_service import BlockChainService
+from raiden.exceptions import EthNodeInterfaceError
+from raiden.network.proxies.proxy_manager import ProxyManager
 from raiden.network.proxies.secret_registry import SecretRegistry
 from raiden.network.proxies.service_registry import ServiceRegistry
 from raiden.network.rpc.client import JSONRPCClient
@@ -44,12 +43,10 @@ def check_sql_version() -> None:
 def check_ethereum_client_is_supported(web3: Web3) -> None:
     try:
         node_version = web3.version.node  # pylint: disable=no-member
-    except ConnectTimeout:
-        raise EthNodeCommunicationError("Couldn't connect to the ethereum node")
     except ValueError:
         raise EthNodeInterfaceError(
             "The underlying ethereum node does not have the web3 rpc interface "
-            "enabled. Please run it with --rpcapi eth,net,web3,txpool for geth "
+            "enabled. Please run it with --rpcapi eth,net,web3 for geth "
             "and --jsonrpc-apis=eth,net,web3,parity for parity."
         )
 
@@ -206,8 +203,8 @@ def check_pfs_configuration(
         sys.exit(1)
 
 
-def check_synced(blockchain_service: BlockChainService) -> None:
-    network_id = ChainID(int(blockchain_service.client.web3.version.network))
+def check_synced(proxy_manager: ProxyManager) -> None:
+    network_id = ChainID(int(proxy_manager.client.web3.version.network))
     network_name = ID_TO_NETWORKNAME.get(network_id)
 
     if network_name is None:
@@ -223,6 +220,4 @@ def check_synced(blockchain_service: BlockChainService) -> None:
     url = ETHERSCAN_API.format(
         network=network_name if network_id != 1 else "api", action="eth_blockNumber"
     )
-    wait_for_sync(
-        blockchain_service, url=url, tolerance=ORACLE_BLOCKNUMBER_DRIFT_TOLERANCE, sleep=3
-    )
+    wait_for_sync(proxy_manager, url=url, tolerance=ORACLE_BLOCKNUMBER_DRIFT_TOLERANCE, sleep=3)

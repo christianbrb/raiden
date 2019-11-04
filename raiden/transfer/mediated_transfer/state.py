@@ -14,9 +14,9 @@ from raiden.utils.secrethash import sha256_secrethash
 from raiden.utils.typing import (
     TYPE_CHECKING,
     Address,
+    BlockTimeout,
     ChannelID,
     Dict,
-    FeeAmount,
     InitiatorAddress,
     List,
     MessageID,
@@ -108,12 +108,12 @@ class TransferDescriptionWithSecretState(State):
     token_network_registry_address: TokenNetworkRegistryAddress = field(repr=False)
     payment_identifier: PaymentID = field(repr=False)
     amount: PaymentAmount
-    allocated_fee: FeeAmount
     token_network_address: TokenNetworkAddress
     initiator: InitiatorAddress = field(repr=False)
     target: TargetAddress
     secret: Secret = field(repr=False)
     secrethash: SecretHash = field(default=EMPTY_SECRETHASH)
+    lock_timeout: Optional[BlockTimeout] = field(default=None)
 
     def __post_init__(self) -> None:
         if self.secrethash == EMPTY_SECRETHASH and self.secret:

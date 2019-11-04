@@ -24,9 +24,7 @@ from raiden.constants import EMPTY_HASH, LOCKSROOT_OF_NO_LOCKS
 from raiden.settings import MediationFeeConfig
 from raiden.transfer import views
 from raiden.transfer.architecture import StateChange
-from raiden.transfer.channel import get_capacity
 from raiden.transfer.identifiers import CanonicalIdentifier
-from raiden.transfer.mediated_transfer.mediation_fee import calculate_imbalance_fees
 from raiden.transfer.state import (
     FeeScheduleState,
     NettingChannelEndState,
@@ -37,7 +35,6 @@ from raiden.transfer.state import (
     TransactionExecutionStatus,
 )
 from raiden.transfer.state_change import (
-    ActionChannelUpdateFee,
     ContractReceiveChannelBatchUnlock,
     ContractReceiveChannelClosed,
     ContractReceiveChannelDeposit,
@@ -54,10 +51,8 @@ from raiden.utils.typing import (
     Balance,
     BlockNumber,
     BlockTimeout,
-    FeeAmount,
     List,
     Optional,
-    ProportionalFeeAmount,
     SecretRegistryAddress,
     TokenNetworkAddress,
     TokenNetworkRegistryAddress,
@@ -170,7 +165,9 @@ def contractreceivechannelnew_from_event(
     )
 
 
-def contractreceivechanneldeposit_from_event(event: DecodedEvent) -> ContractReceiveChannelDeposit:
+def contractreceivechanneldeposit_from_event(
+    event: DecodedEvent, fee_config: MediationFeeConfig
+) -> ContractReceiveChannelDeposit:
     data = event.event_data
     args = data["args"]
     block_number = event.block_number
@@ -187,11 +184,12 @@ def contractreceivechanneldeposit_from_event(event: DecodedEvent) -> ContractRec
         transaction_hash=event.transaction_hash,
         block_number=block_number,
         block_hash=event.block_hash,
+        fee_config=fee_config,
     )
 
 
 def contractreceivechannelwithdraw_from_event(
-    event: DecodedEvent
+    event: DecodedEvent, fee_config: MediationFeeConfig
 ) -> ContractReceiveChannelWithdraw:
     data = event.event_data
     args = data["args"]
@@ -210,6 +208,7 @@ def contractreceivechannelwithdraw_from_event(
         transaction_hash=event.transaction_hash,
         block_number=event.block_number,
         block_hash=event.block_hash,
+        fee_config=fee_config,
     )
 
 
@@ -325,25 +324,6 @@ def contractreceivechannelbatchunlock_from_event(
     )
 
 
-def actionchannelupdatefee_from_channelstate(
-    channel_state: NettingChannelState,
-    flat_fee: FeeAmount,
-    proportional_fee: ProportionalFeeAmount,
-    proportional_imbalance_fee: ProportionalFeeAmount,
-) -> ActionChannelUpdateFee:
-    imbalance_penalty = calculate_imbalance_fees(
-        channel_capacity=get_capacity(channel_state),
-        proportional_imbalance_fee=proportional_imbalance_fee,
-    )
-
-    return ActionChannelUpdateFee(
-        canonical_identifier=channel_state.canonical_identifier,
-        fee_schedule=FeeScheduleState(
-            flat=flat_fee, proportional=proportional_fee, imbalance_penalty=imbalance_penalty
-        ),
-    )
-
-
 def blockchainevent_to_statechange(
     raiden: "RaidenService", event: DecodedEvent, latest_confirmed_block: BlockNumber
 ) -> List[StateChange]:  # pragma: no unittest
@@ -352,7 +332,7 @@ def blockchainevent_to_statechange(
 
     event_name = event.event_data["event"]
     chain_state = views.state_from_raiden(raiden)
-    chain_service = raiden.chain
+    proxy_manager = raiden.proxy_manager
 
     state_changes: List[StateChange] = []
 
@@ -369,8 +349,8 @@ def blockchainevent_to_statechange(
             channel_config = ChannelConfig(
                 reveal_timeout=raiden.config["reveal_timeout"],
                 fee_schedule=FeeScheduleState(
-                    flat=fee_config.get_flat_fee(new_channel_details.token_network_address),
-                    proportional=fee_config.proportional_fee,
+                    flat=fee_config.get_flat_fee(new_channel_details.token_address),
+                    proportional=fee_config.get_proportional_fee(new_channel_details.token_address)
                     # no need to set the imbalance fee here, will be set during deposit
                 ),
             )
@@ -382,38 +362,14 @@ def blockchainevent_to_statechange(
             state_changes.append(contractreceiveroutenew_from_event(event))
 
     elif event_name == ChannelEvent.DEPOSIT:
-        deposit = contractreceivechanneldeposit_from_event(event)
+        deposit = contractreceivechanneldeposit_from_event(event, raiden.config["mediation_fees"])
         state_changes.append(deposit)
 
-        channel_state = views.get_channelstate_by_canonical_identifier(
-            chain_state, deposit.canonical_identifier
-        )
-        if channel_state is not None:
-            fee_config = raiden.config["mediation_fees"]
-            update_fee = actionchannelupdatefee_from_channelstate(
-                channel_state=channel_state,
-                flat_fee=channel_state.fee_schedule.flat,
-                proportional_fee=channel_state.fee_schedule.proportional,
-                proportional_imbalance_fee=fee_config.proportional_imbalance_fee,
-            )
-            state_changes.append(update_fee)
-
     elif event_name == ChannelEvent.WITHDRAW:
-        withdraw = contractreceivechannelwithdraw_from_event(event)
-        state_changes.append(withdraw)
-
-        channel_state = views.get_channelstate_by_canonical_identifier(
-            chain_state, withdraw.canonical_identifier
+        withdraw = contractreceivechannelwithdraw_from_event(
+            event, raiden.config["mediation_fees"]
         )
-        if channel_state is not None:
-            fee_config = raiden.config["mediation_fees"]
-            update_fee = actionchannelupdatefee_from_channelstate(
-                channel_state=channel_state,
-                flat_fee=channel_state.fee_schedule.flat,
-                proportional_fee=channel_state.fee_schedule.proportional,
-                proportional_imbalance_fee=fee_config.proportional_imbalance_fee,
-            )
-            state_changes.append(update_fee)
+        state_changes.append(withdraw)
 
     elif event_name == ChannelEvent.BALANCE_PROOF_UPDATED:
         channel_state = get_contractreceiveupdatetransfer_data_from_event(chain_state, event)
@@ -432,7 +388,7 @@ def blockchainevent_to_statechange(
 
     elif event_name == ChannelEvent.SETTLED:
         channel_settle_state = get_contractreceivechannelsettled_data_from_event(
-            chain_service=chain_service,
+            proxy_manager=proxy_manager,
             chain_state=chain_state,
             event=event,
             latest_confirmed_block=latest_confirmed_block,

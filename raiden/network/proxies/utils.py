@@ -5,12 +5,12 @@ from eth_utils import decode_hex, to_hex
 from structlog import BoundLoggerBase
 
 from raiden.blockchain.filters import decode_event, get_filter_args_for_specific_event_from_channel
-from raiden.constants import GENESIS_BLOCK_NUMBER
 from raiden.exceptions import RaidenUnrecoverableError
 from raiden.transfer.identifiers import CanonicalIdentifier
 from raiden.utils.typing import (
     Address,
     Any,
+    BlockNumber,
     BlockSpecification,
     ChannelID,
     Dict,
@@ -26,16 +26,16 @@ from raiden_contracts.contract_manager import ContractManager
 
 if TYPE_CHECKING:
     # pylint: disable=unused-import
-    from raiden.network.blockchain_service import BlockChainService
+    from raiden.network.proxies.proxy_manager import ProxyManager
     from raiden.network.proxies.token_network import TokenNetwork
 
 
 def get_channel_participants_from_open_event(
-    token_network: "TokenNetwork", channel_identifier: ChannelID, contract_manager: ContractManager
+    token_network: "TokenNetwork",
+    channel_identifier: ChannelID,
+    contract_manager: ContractManager,
+    from_block: BlockNumber,
 ) -> Optional[Tuple[Address, Address]]:
-    # FIXME: Issue #3958
-    from_block = GENESIS_BLOCK_NUMBER
-
     # For this check it is perfectly fine to use a `latest` block number.
     # Because the filter is looking just for the OPENED event.
     to_block = "latest"
@@ -63,7 +63,7 @@ def get_channel_participants_from_open_event(
 
 
 def get_onchain_locksroots(
-    chain: "BlockChainService",
+    proxy_manager: "ProxyManager",
     canonical_identifier: CanonicalIdentifier,
     participant1: Address,
     participant2: Address,
@@ -95,7 +95,7 @@ def get_onchain_locksroots(
     - When channel is settled A must query the blockchain to figure out which
       locksroot was used.
     """
-    payment_channel = chain.payment_channel(canonical_identifier=canonical_identifier)
+    payment_channel = proxy_manager.payment_channel(canonical_identifier=canonical_identifier)
     token_network = payment_channel.token_network
 
     participants_details = token_network.detail_participants(

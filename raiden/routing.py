@@ -9,11 +9,13 @@ from eth_utils import to_canonical_address, to_checksum_address
 from raiden.exceptions import ServiceRequestFailed
 from raiden.messages.metadata import RouteMetadata
 from raiden.network.pathfinding import PFSConfig, query_paths
+from raiden.settings import INTERNAL_ROUTING_DEFAULT_FEE_PERC
 from raiden.transfer import channel, views
 from raiden.transfer.state import ChainState, ChannelState, RouteState
 from raiden.utils.typing import (
     Address,
     ChannelID,
+    FeeAmount,
     InitiatorAddress,
     NamedTuple,
     Optional,
@@ -208,7 +210,21 @@ def get_best_routes_internal(
         # The complete route includes the initiator, add it to the beginning
         complete_route = [Address(from_address)] + neighbour.route
 
-        available_routes.append(RouteState(complete_route, neighbour.channelid))
+        # https://github.com/raiden-network/raiden/issues/4751
+        # Internal routing doesn't know how much fees the initiator will be charged,
+        # so it should set a percentage on top of the original amount
+        # for the whole route.
+        estimated_fee = FeeAmount(round(INTERNAL_ROUTING_DEFAULT_FEE_PERC * amount))
+        if neighbour.length == 1:  # Target is our direct neighbour, pay no fees.
+            estimated_fee = FeeAmount(0)
+
+        available_routes.append(
+            RouteState(
+                route=complete_route,
+                forward_channel_id=neighbour.channelid,
+                estimated_fee=estimated_fee,
+            )
+        )
 
     return available_routes
 
@@ -246,6 +262,7 @@ def get_best_routes_pfs(
     paths = []
     for path_object in pfs_routes:
         path = path_object["path"]
+        estimated_fee = path_object["estimated_fee"]
         canonical_path = [to_canonical_address(node) for node in path]
 
         # get the second entry, as the first one is the node itself
@@ -275,7 +292,13 @@ def get_best_routes_pfs(
             )
             continue
 
-        paths.append(RouteState(canonical_path, channel_state.identifier))
+        paths.append(
+            RouteState(
+                route=canonical_path,
+                forward_channel_id=channel_state.identifier,
+                estimated_fee=estimated_fee,
+            )
+        )
 
     return True, paths, feedback_token
 
@@ -303,6 +326,8 @@ def resolve_routes(
                 RouteState(
                     route=route_metadata.route,
                     forward_channel_id=channel_state.canonical_identifier.channel_identifier,
+                    # This is only used in the mediator, so fees are set to 0
+                    estimated_fee=FeeAmount(0),
                 )
             )
     return resolvable

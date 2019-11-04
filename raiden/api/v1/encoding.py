@@ -300,6 +300,7 @@ class ChannelStateSchema(BaseSchema):
 class ChannelPutSchema(BaseSchema):
     token_address = AddressField(required=True)
     partner_address = AddressField(required=True)
+    reveal_timeout = fields.Integer(missing=None)
     settle_timeout = fields.Integer(missing=None)
     total_deposit = fields.Integer(default=None, missing=None)
 
@@ -312,6 +313,7 @@ class ChannelPutSchema(BaseSchema):
 class ChannelPatchSchema(BaseSchema):
     total_deposit = fields.Integer(default=None, missing=None)
     total_withdraw = fields.Integer(default=None, missing=None)
+    reveal_timeout = fields.Integer(default=None, missing=None)
     state = fields.String(
         default=None,
         missing=None,
@@ -338,6 +340,7 @@ class PaymentSchema(BaseSchema):
     identifier = fields.Integer(missing=None)
     secret = SecretField(missing=None)
     secret_hash = SecretHashField(missing=None)
+    lock_timeout = fields.Integer(missing=None)
 
     class Meta:
         strict = True

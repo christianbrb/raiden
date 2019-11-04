@@ -29,7 +29,7 @@ Channel Object
        "total_deposit": 35000000,
        "state": "opened",
        "settle_timeout": 500,
-       "reveal_timeout": 40
+       "reveal_timeout": 50
     }
 
 
@@ -106,6 +106,28 @@ Querying Information About Your Raiden Node
           "our_address": "0x2a65Aca4D5fC5B5C859090a6c34d164135398226"
       }
 
+.. http:get:: /api/(version)/version
+
+   Query the version of the Raiden instance
+
+   **Example Request**:
+
+   .. http:example:: curl wget httpie python-requests
+
+      GET /api/v1/version HTTP/1.1
+      Host: localhost:5001
+
+   **Example Response**:
+
+   .. sourcecode:: http
+
+      HTTP/1.1 200 OK
+      Content-Type: application/json
+
+      {
+          "version": "0.100.5a1.dev157+geb2af878d"
+      }
+
 Deploying
 =========
 .. note::
@@ -173,8 +195,8 @@ Querying Information About Channels and Tokens
               "total_deposit": 35000000,
               "total_withdraw": 5000000,
               "state": "opened",
-              "settle_timeout": 100,
-              "reveal_timeout": 30
+              "settle_timeout": 500,
+              "reveal_timeout": 50
           }
       ]
 
@@ -209,8 +231,8 @@ Querying Information About Channels and Tokens
               "total_deposit": 35000000,
               "total_withdraw": 5000000,
               "state": "opened",
-              "settle_timeout": 100,
-              "reveal_timeout": 30
+              "settle_timeout": 500,
+              "reveal_timeout": 50
           }
       ]
 
@@ -245,8 +267,8 @@ Querying Information About Channels and Tokens
           "total_deposit": 35000000,
           "total_withdraw": 5000000,
           "state": "opened",
-          "settle_timeout": 100,
-          "reveal_timeout": 30
+          "settle_timeout": 500,
+          "reveal_timeout": 50
       }
 
    :statuscode 200: Successful query
@@ -423,13 +445,15 @@ Channel Management
           "partner_address": "0x61C808D82A3Ac53231750daDc13c777b59310bD9",
           "token_address": "0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8",
           "total_deposit": 35000000,
-          "settle_timeout": 500
+          "settle_timeout": 500,
+          "reveal_timeout": 50
       }
 
    :reqjson address partner_address: The partner we want to open a channel with.
    :reqjson address token_address: The token we want to be used in the channel.
    :reqjson int total_deposit: Total amount of tokens to be deposited to the channel
    :reqjson int settle_timeout: The amount of blocks that the settle timeout should have.
+   :reqjson int reveal_timeout: The amount of blocks that the reveal timeout should have.
 
    The request's payload is a channel object; since it is a new channel, its ``channel_address``
    and ``status`` fields will be ignored and can be omitted.
@@ -457,7 +481,7 @@ Channel Management
           "total_withdraw": 0,
           "state": "opened",
           "settle_timeout": 500,
-          "reveal_timeout": 30
+          "reveal_timeout": 50
       }
 
    :statuscode 201: Channel created successfully
@@ -507,11 +531,24 @@ Channel Management
           "total_withdraw": 100
       }
 
+   **Example Request (update channel reveal timeout)**:
+
+   .. http:example:: curl wget httpie python-requests
+
+      PATCH /api/v1/channels/0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
+      Host: localhost:5001
+      Content-Type: application/json
+
+      {
+          "reveal_timeout": 50
+      }
+
    :reqjson string state: Desired new state; the only valid choice is ``"closed"``
    :reqjson int total_deposit: The increased total deposit
    :reqjson int total_withdraw: The increased total withdraw
+   :reqjson int reveal_timeout: The new reveal timeout value
 
-   .. note::
+.. note::
       For the Raiden Red Eyes release the maximum deposit per node in a channel is limited to 0.075 worth of `W-ETH <https://weth.io/>`_. This means that the maximum amount of tokens in a channel is limited to 0.15 worth of W-ETH. This is done to mitigate risk since the Red Eyes release is an alpha testing version on the mainnet.
 
    **Example Response**:
@@ -531,7 +568,7 @@ Channel Management
           "total_withdraw": 5000000,
           "state": "closed",
           "settle_timeout": 500,
-          "reveal_timeout": 30
+          "reveal_timeout": 50
       }
 
    :statuscode 200: Success
@@ -659,6 +696,8 @@ Connection Management
    .. note::
       Currently, the API calls are blocking. This means that in the case of long running calls like ``leave``, if an API call is currently being processed by Raiden, all pending calls will be queued and processed with their passed API call argument.
 
+.. _Payments:
+
 Payments
 ========
 
@@ -683,6 +722,8 @@ Payments
 
    :reqjson int amount: Amount to be sent to the target
    :reqjson int identifier: Identifier of the payment (optional)
+   :reqjson int lock_timeout: lock timeout, in blocks, to be used with the payment. Default is 2 * channel's reveal_timeout, Value must be greater than channel's reveal_timeout (optional)
+
 
    **Example Response**:
 
@@ -696,7 +737,9 @@ Payments
           "target_address": "0x61C808D82A3Ac53231750daDc13c777b59310bD9",
           "token_address": "0x2a65Aca4D5fC5B5C859090a6c34d164135398226",
           "amount": 200,
-          "identifier": 42
+          "identifier": 42,
+          "secret": "0x4c7b2eae8bbed5bde529fda2dcb092fddee3cc89c89c8d4c747ec4e570b05f66",
+          "secret_hash": "0x1f67db95d7bf4c8269f69d55831e627005a23bfc199744b7ab9abcb1c12353bd"
       }
 
    :statuscode 200: Successful payment
@@ -706,6 +749,33 @@ Payments
    :statuscode 408: If a timeout happened during the payment
    :statuscode 409: If the address or the amount is invalid or if there is no path to the target, or if the identifier is already in use for a different payment.
    :statuscode 500: Internal Raiden node error
+
+.. note::
+      This endpoint will return as soon the initiator has unlocked the payment(i.e Unlock message is sent).
+      However, this does not necessarily mean that querying the balance from the target node, immediately after the initiator returns, will return the new balance amount due to the fact that the target might not have received or processed the unlock.
+
+To use Raiden for an atomic swap (see :doc:`Token Swaps <token_swaps>`), the endpoint could be called to initiate a payment while providing values for ``secret`` and ``secret_hash``.
+
+   **Example Request**:
+
+   .. http:example:: curl wget httpie python-requests
+
+      POST /api/v1/payments/0x2a65Aca4D5fC5B5C859090a6c34d164135398226/0x61C808D82A3Ac53231750daDc13c777b59310bD9 HTTP/1.1
+      Host: localhost:5001
+      Content-Type: application/json
+
+      {
+          "amount": 200,
+          "identifier": 42,
+          "secret": "0x4c7b2eae8bbed5bde529fda2dcb092fddee3cc89c89c8d4c747ec4e570b05f66",
+          "secret_hash": "0x1f67db95d7bf4c8269f69d55831e627005a23bfc199744b7ab9abcb1c12353bd"
+      }
+
+   :reqjson int amount: Amount to be sent to the target
+   :reqjson int identifier: Identifier of the payment (optional)
+   :reqjson string secret: The secret to be used for the payment
+   :reqjson string secret_hash: The secret hash (should be equal to SHA256 of the secret)
+
 
 Querying Events
 ===============

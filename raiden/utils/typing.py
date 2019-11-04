@@ -15,6 +15,7 @@ if TYPE_CHECKING:
         HashTimeLockState,
         NettingChannelState,
         UnlockPartialProofState,
+        NetworkState,
     )
     from raiden.transfer.mediated_transfer.state import (  # noqa: F401
         InitiatorTransferState,
@@ -36,6 +37,11 @@ def typecheck(value: Any, expected: Type):
 ABI = List[Dict[str, Any]]
 BlockchainEvent = Dict[str, Any]
 
+T_EVMBytecode = bytes
+EVMBytecode = NewType("EVMBytecode", T_EVMBytecode)
+
+GasMeasurements = Dict[str, int]
+
 T_Address = bytes
 
 AddressHex = ChecksumAddress
@@ -46,6 +52,9 @@ BlockExpiration = NewType("BlockExpiration", T_BlockExpiration)
 
 T_Balance = int
 Balance = NewType("Balance", T_Balance)
+
+T_GasPrice = int
+GasPrice = NewType("GasPrice", T_GasPrice)
 
 T_BalanceHash = bytes
 BalanceHash = NewType("BalanceHash", T_BalanceHash)
@@ -164,7 +173,7 @@ WithdrawAmount = NewType("WithdrawAmount", T_WithdrawAmount)
 
 BlockSpecification = Union[str, T_BlockNumber, T_BlockHash]
 
-NodeNetworkStateMap = Dict[Address, str]
+NodeNetworkStateMap = Dict[Address, "NetworkState"]
 
 Host = NewType("Host", str)
 Port = NewType("Port", int)

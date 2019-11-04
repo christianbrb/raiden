@@ -1,6 +1,7 @@
 import itertools
 import random
 
+from raiden.exceptions import UndefinedMediationFee
 from raiden.transfer import channel, routes, secret_registry
 from raiden.transfer.architecture import Event, StateChange, SuccessOrError, TransitionResult
 from raiden.transfer.channel import get_balance
@@ -29,9 +30,9 @@ from raiden.transfer.mediated_transfer.state_change import (
     ReceiveTransferRefund,
 )
 from raiden.transfer.state import (
-    NODE_NETWORK_REACHABLE,
     ChannelState,
     NettingChannelState,
+    NetworkState,
     RouteState,
     message_identifier_from_prng,
 )
@@ -56,7 +57,6 @@ from raiden.utils.typing import (
     LockType,
     NodeNetworkStateMap,
     Optional,
-    PaymentAmount,
     PaymentWithFeeAmount,
     Secret,
     SecretHash,
@@ -116,19 +116,21 @@ def is_safe_to_wait(
 
 
 def is_send_transfer_almost_equal(
-    send_channel: NettingChannelState,
+    send_channel: NettingChannelState,  # pylint: disable=unused-argument
     send: LockedTransferUnsignedState,
     received: LockedTransferSignedState,
 ) -> bool:
     """ True if both transfers are for the same mediated transfer. """
     # The only thing that may change is the direction of the transfer
     return (
-        isinstance(send, LockedTransferUnsignedState)
-        and isinstance(received, LockedTransferSignedState)
-        and send.payment_identifier == received.payment_identifier
+        send.payment_identifier == received.payment_identifier
         and send.token == received.token
-        # FIXME: user proper fee calculation
-        and send.lock.amount == received.lock.amount - send_channel.fee_schedule.flat
+        # FIXME: Checking the transferred amount would make a lot of sense, but
+        #        this is hard to do precisely without larger changes to the
+        #        codebase. With the uncertainty about how we want to deal with
+        #        refunds and backtracking in the long term, this check is
+        #        skipped for now.
+        # and send.lock.amount == received.lock.amount - send_channel.fee_schedule.flat
         and send.lock.expiration == received.lock.expiration
         and send.lock.secrethash == received.lock.secrethash
         and send.initiator == received.initiator
@@ -220,26 +222,60 @@ def get_pending_transfer_pairs(
     return pending_pairs
 
 
-def _fee_for_channel(channel: NettingChannelState, amount: PaymentAmount) -> FeeAmount:
+def _fee_for_payer_channel(
+    channel: NettingChannelState, amount: PaymentWithFeeAmount
+) -> Optional[FeeAmount]:
+    """ Fee deducted by the mediator for an incoming channel.
+
+    The `amount` is the total incoming amount without any fees deducted.
+    """
     balance = get_balance(channel.our_state, channel.partner_state)
-    return channel.fee_schedule.fee(amount, balance)
+    try:
+        return channel.fee_schedule.fee_payer(amount, balance)
+    except UndefinedMediationFee:
+        return None
+
+
+def _fee_for_payee_channel(
+    channel: NettingChannelState, amount: PaymentWithFeeAmount
+) -> Optional[FeeAmount]:
+    """ Fee deducted by the mediator for an outgoing channel.
+
+    The `amount` is the incoming amount where the incoming fee is already
+    deducted, but the outgoing fee isn't (that's what this function does,
+    after all).
+    """
+    balance = get_balance(channel.our_state, channel.partner_state)
+
+    try:
+        return channel.fee_schedule.fee_payee(amount=amount, balance=balance)
+    except UndefinedMediationFee:
+        return None
 
 
 def get_lock_amount_after_fees(
     lock: HashTimeLockState, payer_channel: NettingChannelState, payee_channel: NettingChannelState
-) -> PaymentWithFeeAmount:
+) -> Optional[PaymentWithFeeAmount]:
     """
     Return the lock.amount after fees are taken.
 
     Fees are taken only for the outgoing channel, which is the one with
     collateral locked from this node.
     """
-    fee_in = _fee_for_channel(payer_channel, PaymentAmount(lock.amount))
-    # fee_out should be calculated on the payment amount without any fees. But
-    # we only have the amount including fee_out, so we use that as an
-    # approximation.
-    fee_out = _fee_for_channel(payee_channel, PaymentAmount(lock.amount - fee_in))
-    return PaymentWithFeeAmount(lock.amount - fee_in - fee_out)
+    fee_in = _fee_for_payer_channel(payer_channel, lock.amount)
+    if fee_in is None:
+        return None
+    fee_out = _fee_for_payee_channel(payee_channel, PaymentWithFeeAmount(lock.amount - fee_in))
+    if fee_out is None:
+        return None
+
+    amount_after_fees = PaymentWithFeeAmount(lock.amount - fee_in - fee_out)
+
+    if amount_after_fees <= 0:
+        # The node can't cover its mediations fees from the tranferred amount.
+        return None
+
+    return amount_after_fees
 
 
 def sanity_check(
@@ -374,6 +410,9 @@ def forward_transfer_pair(
     amount_after_fees = get_lock_amount_after_fees(
         payer_transfer.lock, payer_channel, payee_channel
     )
+    if not amount_after_fees:
+        return None, []
+
     lock_timeout = BlockTimeout(payer_transfer.lock.expiration - block_number)
     safe_to_use_channel = channel.is_channel_usable_for_mediation(
         channel_state=payee_channel, transfer_amount=amount_after_fees, lock_timeout=lock_timeout
@@ -1387,7 +1426,7 @@ def handle_node_change_network_state(
     3. Check that the transfer was stuck because there was no route available.
     4. Send the transfer again to this now-available route.
     """
-    if state_change.network_state != NODE_NETWORK_REACHABLE:
+    if state_change.network_state != NetworkState.REACHABLE:
         return TransitionResult(mediator_state, list())
 
     try:

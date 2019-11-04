@@ -11,17 +11,12 @@ import gevent
 import gevent.monkey
 import structlog
 from gevent.event import AsyncResult
-from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import ConnectionError as RequestsConnectionError, ConnectTimeout
 
 from raiden import constants, settings
 from raiden.api.rest import APIServer, RestAPI
 from raiden.app import App
-from raiden.exceptions import (
-    APIServerPortInUseError,
-    EthNodeCommunicationError,
-    EthNodeInterfaceError,
-    RaidenError,
-)
+from raiden.exceptions import APIServerPortInUseError, EthNodeInterfaceError, RaidenError
 from raiden.log_config import configure_logging
 from raiden.tasks import check_gas_reserve, check_network_id, check_rdn_deposits, check_version
 from raiden.utils import get_system_spec, merge_dict, split_endpoint, typing
@@ -78,6 +73,8 @@ class NodeRunner:
         from raiden.api.python import RaidenAPI
 
         config = deepcopy(App.DEFAULT_CONFIG)
+        config["reveal_timeout"] = self._options["default_reveal_timeout"]
+        config["settle_timeout"] = self._options["default_settle_timeout"]
         if self._options.get("extra_config", dict()):
             merge_dict(config, self._options["extra_config"])
             del self._options["extra_config"]
@@ -93,7 +90,7 @@ class NodeRunner:
         # this catches exceptions raised when waiting for the stalecheck to complete
         try:
             app_ = run_app(**self._options)
-        except (EthNodeCommunicationError, RequestsConnectionError):
+        except (ConnectionError, ConnectTimeout, RequestsConnectionError):
             print(ETHEREUM_NODE_COMMUNICATION_ERROR)
             sys.exit(1)
         except RuntimeError as e:
@@ -165,7 +162,7 @@ class NodeRunner:
         # spawn a greenlet to handle the periodic check for the network id
         tasks.append(
             gevent.spawn(
-                check_network_id, app_.raiden.chain.network_id, app_.raiden.chain.client.web3
+                check_network_id, app_.raiden.rpc_client.chain_id, app_.raiden.rpc_client.web3
             )
         )
 
@@ -181,7 +178,7 @@ class NodeRunner:
         self._startup_hook()
 
         # wait for interrupt
-        event = AsyncResult()
+        event: "AsyncResult[None]" = AsyncResult()
 
         def sig_set(sig=None, _frame=None):
             event.set(sig)
@@ -197,7 +194,7 @@ class NodeRunner:
         try:
             event.get()
             print("Signal received. Shutting down ...")
-        except (EthNodeCommunicationError, RequestsConnectionError):
+        except (ConnectionError, ConnectTimeout, RequestsConnectionError):
             print(ETHEREUM_NODE_COMMUNICATION_ERROR)
             sys.exit(1)
         except RaidenError as ex:

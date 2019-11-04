@@ -1,10 +1,11 @@
 # pylint: disable=too-many-lines
 import random
+from typing import TYPE_CHECKING
 
 from eth_utils import encode_hex, keccak, to_checksum_address, to_hex
 
 from raiden.constants import LOCKSROOT_OF_NO_LOCKS, MAXIMUM_PENDING_TRANSFERS, UINT256_MAX
-from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS
+from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS, MediationFeeConfig
 from raiden.transfer.architecture import Event, StateChange, SuccessOrError, TransitionResult
 from raiden.transfer.events import (
     ContractSendChannelBatchUnlock,
@@ -12,6 +13,7 @@ from raiden.transfer.events import (
     ContractSendChannelSettle,
     ContractSendChannelUpdateTransfer,
     ContractSendChannelWithdraw,
+    EventInvalidActionSetRevealTimeout,
     EventInvalidActionWithdraw,
     EventInvalidReceivedLockedTransfer,
     EventInvalidReceivedLockExpired,
@@ -20,6 +22,7 @@ from raiden.transfer.events import (
     EventInvalidReceivedWithdraw,
     EventInvalidReceivedWithdrawExpired,
     EventInvalidReceivedWithdrawRequest,
+    SendPFSFeeUpdate,
     SendProcessed,
     SendWithdrawConfirmation,
     SendWithdrawExpired,
@@ -32,6 +35,10 @@ from raiden.transfer.mediated_transfer.events import (
     SendLockExpired,
     SendRefundTransfer,
     refund_from_sendmediated,
+)
+from raiden.transfer.mediated_transfer.mediation_fee import (
+    FeeScheduleState,
+    calculate_imbalance_fees,
 )
 from raiden.transfer.mediated_transfer.state import (
     LockedTransferSignedState,
@@ -59,7 +66,7 @@ from raiden.transfer.state import (
 )
 from raiden.transfer.state_change import (
     ActionChannelClose,
-    ActionChannelUpdateFee,
+    ActionChannelSetRevealTimeout,
     ActionChannelWithdraw,
     Block,
     ContractReceiveChannelBatchUnlock,
@@ -109,6 +116,10 @@ from raiden.utils.typing import (
     WithdrawAmount,
 )
 
+if TYPE_CHECKING:
+    # pylint: disable=unused-import
+    from raiden.raiden_service import RaidenService  # noqa: F401
+
 # This should be changed to `Union[str, PendingLocksState]`
 PendingLocksStateOrError = Tuple[bool, Optional[str], Optional[PendingLocksState]]
 EventsOrError = Tuple[bool, List[Event], Optional[str]]
@@ -122,7 +133,7 @@ class UnlockGain(NamedTuple):
 
 
 def get_safe_initial_expiration(
-    block_number: BlockNumber, reveal_timeout: BlockTimeout
+    block_number: BlockNumber, reveal_timeout: BlockTimeout, lock_timeout: BlockTimeout = None
 ) -> BlockExpiration:
     """ Returns the upper bound block expiration number used by the initiator
     of a transfer or a withdraw.
@@ -136,6 +147,9 @@ def get_safe_initial_expiration(
     reveal_timeout`, otherwise for off-chain transfers Raiden would be slower
     than blockchain.
     """
+    if lock_timeout:
+        return BlockExpiration(block_number + lock_timeout)
+
     return BlockExpiration(block_number + reveal_timeout * 2)
 
 
@@ -190,26 +204,29 @@ def is_channel_usable_for_mediation(
     secret on-chain.
     """
 
-    channel_usable = is_channel_usable_for_new_transfer(channel_state, transfer_amount)
-    lock_timeout_valid = (
-        lock_timeout > 0
-        and channel_state.settle_timeout >= lock_timeout
-        and channel_state.reveal_timeout < lock_timeout
+    channel_usable = is_channel_usable_for_new_transfer(
+        channel_state, transfer_amount, lock_timeout
     )
+    lock_timeout_valid = lock_timeout > 0
 
     return channel_usable and lock_timeout_valid
 
 
 def is_channel_usable_for_new_transfer(
-    channel_state: NettingChannelState, transfer_amount: PaymentWithFeeAmount
+    channel_state: NettingChannelState,
+    transfer_amount: PaymentWithFeeAmount,
+    lock_timeout: Optional[BlockTimeout],
 ) -> bool:
-    """True if the channel be used to start a new transfer.
+    """True if the channel can be used to start a new transfer.
 
     This will make sure that:
 
     - The channel has capacity.
     - The number of locks can be claimed on-chain.
     - The transfer amount does not overflow.
+    - The settlement window is large enough to allow the secret to be
+      registered on-chain.
+    - lock_timeout, if provided, is within allowed range (reveal_timeout, settle_timeout]
 
     The number of locks has to be checked because the gas usage will increase
     linearly with the number of locks in it, this has to be limited to a value
@@ -218,11 +235,27 @@ def is_channel_usable_for_new_transfer(
     pending_transfers = get_number_of_pending_transfers(channel_state.our_state)
     distributable = get_distributable(channel_state.our_state, channel_state.partner_state)
 
+    lock_timeout_valid = lock_timeout is None or (
+        lock_timeout <= channel_state.settle_timeout
+        and lock_timeout > channel_state.reveal_timeout
+    )
+
+    # The settle_timeout can be chosen independently by our partner. That means
+    # it is possible for a malicious partner to choose a settlement timeout so
+    # small that it is not possible to register the secret on-chain.
+    #
+    # This is true for version 0.25.0 of the smart contracts, since there is
+    # nothing the client can do to prevent the channel from being open the only
+    # option is to ignore the channel.
+    is_valid_settle_timeout = channel_state.settle_timeout >= channel_state.reveal_timeout * 2
+
     channel_usable = (
         get_status(channel_state) == ChannelState.STATE_OPENED
+        and is_valid_settle_timeout
         and pending_transfers < MAXIMUM_PENDING_TRANSFERS
         and transfer_amount <= distributable
         and is_valid_amount(channel_state.our_state, transfer_amount)
+        and lock_timeout_valid
     )
     return channel_usable
 
@@ -335,9 +368,7 @@ def is_valid_channel_total_withdraw(channel_total_withdraw: TokenAmount) -> bool
 
 
 def is_valid_withdraw(
-    withdraw_request: Union[
-        ReceiveWithdrawRequest, ReceiveWithdrawConfirmation, ReceiveWithdrawExpired
-    ]
+    withdraw_request: Union[ReceiveWithdrawRequest, ReceiveWithdrawConfirmation]
 ) -> SuccessOrError:
     """True if the signature of the message corresponds is valid.
 
@@ -1008,8 +1039,6 @@ def is_valid_withdraw_expired(
 ) -> SuccessOrError:
     expected_nonce = get_next_nonce(channel_state.partner_state)
 
-    is_valid = is_valid_withdraw(state_change)
-
     withdraw_expired = is_withdraw_expired(
         block_number=block_number,
         expiration_threshold=get_receiver_expiration_threshold(
@@ -1037,7 +1066,7 @@ def is_valid_withdraw_expired(
             f"got: {state_change.nonce}."
         )
     else:
-        return is_valid
+        return SuccessOrError()
 
 
 def get_amount_unclaimed_onchain(end_state: NettingChannelEndState) -> TokenAmount:
@@ -1848,17 +1877,6 @@ def handle_action_close(
     return TransitionResult(channel_state, events)
 
 
-def handle_action_update_fee(
-    channel_state: NettingChannelState, update_fee: ActionChannelUpdateFee
-) -> TransitionResult[NettingChannelState]:
-    msg = "caller must make sure the ids match"
-    assert channel_state.canonical_identifier == update_fee.canonical_identifier, msg
-
-    channel_state.fee_schedule = update_fee.fee_schedule
-
-    return TransitionResult(channel_state, list())
-
-
 def handle_action_withdraw(
     channel_state: NettingChannelState,
     action_withdraw: ActionChannelWithdraw,
@@ -1881,6 +1899,33 @@ def handle_action_withdraw(
         events = [
             EventInvalidActionWithdraw(
                 attempted_withdraw=action_withdraw.total_withdraw, reason=error_msg
+            )
+        ]
+
+    return TransitionResult(channel_state, events)
+
+
+def handle_action_set_reveal_timeout(
+    channel_state: NettingChannelState, state_change: ActionChannelSetRevealTimeout
+) -> TransitionResult[NettingChannelState]:
+    events: List[Event] = list()
+
+    is_valid_reveal_timeout = (
+        # This has to account for the bare minimum for block & transaction propagation
+        # + the min amount of blocks expected for that transaction to be mined according
+        # to fastest gas strategy where a transaction takes roughly 60 seconds to
+        # be mined, which is roughly equal to 7 blocks.
+        state_change.reveal_timeout >= 7
+        and channel_state.settle_timeout >= state_change.reveal_timeout * 2
+    )
+
+    if is_valid_reveal_timeout:
+        channel_state.reveal_timeout = state_change.reveal_timeout
+    else:
+        error_msg = "Settle timeout should be at least twice as large as reveal timeout"
+        events = [
+            EventInvalidActionSetRevealTimeout(
+                reveal_timeout=state_change.reveal_timeout, reason=error_msg
             )
         ]
 
@@ -2301,6 +2346,25 @@ def handle_channel_settled(
     return TransitionResult(channel_state, events)
 
 
+def update_fee_schedule_after_balance_change(
+    channel_state: NettingChannelState, fee_config: MediationFeeConfig
+) -> List[Event]:
+    proportional_imbalance_fee = fee_config.get_proportional_imbalance_fee(
+        channel_state.token_address
+    )
+    imbalance_penalty = calculate_imbalance_fees(
+        channel_capacity=get_capacity(channel_state),
+        proportional_imbalance_fee=proportional_imbalance_fee,
+    )
+
+    channel_state.fee_schedule = FeeScheduleState(
+        flat=channel_state.fee_schedule.flat,
+        proportional=channel_state.fee_schedule.proportional,
+        imbalance_penalty=imbalance_penalty,
+    )
+    return [SendPFSFeeUpdate(canonical_identifier=channel_state.canonical_identifier)]
+
+
 def handle_channel_deposit(
     channel_state: NettingChannelState, state_change: ContractReceiveChannelDeposit
 ) -> TransitionResult[NettingChannelState]:
@@ -2312,7 +2376,9 @@ def handle_channel_deposit(
     elif participant_address == channel_state.partner_state.address:
         update_contract_balance(channel_state.partner_state, contract_balance)
 
-    return TransitionResult(channel_state, [])
+    # A deposit changes the total capacity of the channel and as such the fees need to change
+    events = update_fee_schedule_after_balance_change(channel_state, state_change.fee_config)
+    return TransitionResult(channel_state, events)
 
 
 def handle_channel_withdraw(
@@ -2337,7 +2403,9 @@ def handle_channel_withdraw(
 
     end_state.onchain_total_withdraw = state_change.total_withdraw
 
-    return TransitionResult(channel_state, list())
+    # A withdraw changes the total capacity of the channel and as such the fees need to change
+    events = update_fee_schedule_after_balance_change(channel_state, state_change.fee_config)
+    return TransitionResult(channel_state, events)
 
 
 def handle_channel_batch_unlock(
@@ -2478,9 +2546,6 @@ def state_transition(
             block_number=block_number,
             block_hash=block_hash,
         )
-    elif type(state_change) == ActionChannelUpdateFee:
-        assert isinstance(state_change, ActionChannelUpdateFee), MYPY_ANNOTATION
-        iteration = handle_action_update_fee(channel_state=channel_state, update_fee=state_change)
     elif type(state_change) == ActionChannelWithdraw:
         assert isinstance(state_change, ActionChannelWithdraw), MYPY_ANNOTATION
         iteration = handle_action_withdraw(
@@ -2488,6 +2553,11 @@ def state_transition(
             action_withdraw=state_change,
             pseudo_random_generator=pseudo_random_generator,
             block_number=block_number,
+        )
+    elif type(state_change) == ActionChannelSetRevealTimeout:
+        assert isinstance(state_change, ActionChannelSetRevealTimeout), MYPY_ANNOTATION
+        iteration = handle_action_set_reveal_timeout(
+            channel_state=channel_state, state_change=state_change
         )
     elif type(state_change) == ContractReceiveChannelClosed:
         assert isinstance(state_change, ContractReceiveChannelClosed), MYPY_ANNOTATION

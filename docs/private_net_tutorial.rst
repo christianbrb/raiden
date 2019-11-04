@@ -87,7 +87,7 @@ With the ``genesis.json`` you can initialize a blockchain.
  (env) $ pwd
  <snip>/priv_chain
  (env) $ geth --datadir blkchain1 init genesis.json
- (env) $ geth --rpc --datadir blkchain1 --networkid 4321 --rpcapi "eth,net,web3,txpool" console
+ (env) $ geth --rpc --datadir blkchain1 --networkid 4321 --rpcapi "eth,net,web3" console
  <snip>
  > personal.newAccount()
  "0xd4de892c06cf4a0557c7d515f79fd20b8356d6cf"
@@ -112,13 +112,13 @@ Open a new console, and load the Python environment.
  $ source env/bin/activate
  (env) $
 
-In the ``raiden`` directory, figure out the value ``DEVELOPMENT_CONTRACT_VERSION``
+In the ``raiden`` directory, figure out the value ``RAIDEN_CONTRACT_VERSION``
 
 .. code:: bash
 
  (env) $ cd raiden
- (env) $ grep 'DEVELOPMENT_CONTRACT_VERSION = ' -r .
- ./raiden/settings.py:DEVELOPMENT_CONTRACT_VERSION = '0.10.1'
+ (env) $ grep 'RAIDEN_CONTRACT_VERSION = ' -r .
+ ./raiden/settings.py:RAIDEN_CONTRACT_VERSION = '0.10.1'
 
 Copy the shown version somewhere.
 

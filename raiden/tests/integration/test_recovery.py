@@ -18,7 +18,7 @@ from raiden.tests.utils.transfer import (
 )
 from raiden.transfer import views
 from raiden.transfer.events import ContractSendChannelWithdraw
-from raiden.transfer.state import NODE_NETWORK_UNREACHABLE
+from raiden.transfer.state import NetworkState
 from raiden.transfer.state_change import (
     ContractReceiveChannelClosed,
     ContractReceiveChannelSettled,
@@ -57,7 +57,7 @@ def test_recovery_happy_case(
     app0.stop()
 
     waiting.wait_for_network_state(
-        app1.raiden, app0.raiden.address, NODE_NETWORK_UNREACHABLE, network_wait
+        app1.raiden, app0.raiden.address, NetworkState.UNREACHABLE, network_wait
     )
 
     app0.start()
@@ -155,7 +155,8 @@ def test_recovery_unhappy_case(
 
     app0_restart = App(
         config=app0.config,
-        chain=app0.raiden.chain,
+        rpc_client=app0.raiden.rpc_client,
+        proxy_manager=app0.raiden.proxy_manager,
         query_start_block=BlockNumber(0),
         default_registry=app0.raiden.default_registry,
         default_one_to_n_address=app0.raiden.default_one_to_n_address,
@@ -213,7 +214,8 @@ def test_recovery_blockchain_events(raiden_network, token_addresses, network_wai
 
     app0_restart = App(
         config=app0.config,
-        chain=app0.raiden.chain,
+        rpc_client=app0.raiden.rpc_client,
+        proxy_manager=app0.raiden.proxy_manager,
         query_start_block=BlockNumber(0),
         default_registry=app0.raiden.default_registry,
         default_one_to_n_address=app0.raiden.default_one_to_n_address,

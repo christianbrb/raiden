@@ -30,21 +30,10 @@ STATE_PRUNING = {
 }
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 @pytest.mark.parametrize("blockchain_extra_config", [STATE_PRUNING])
 def test_locksroot_loading_during_channel_settle_handling(
-    raiden_chain, deploy_client, token_addresses
-):
-    raise_on_failure(
-        raiden_chain,
-        run_test_locksroot_loading_during_channel_settle_handling,
-        raiden_chain=raiden_chain,
-        deploy_client=deploy_client,
-        token_addresses=token_addresses,
-    )
-
-
-def run_test_locksroot_loading_during_channel_settle_handling(
     raiden_chain, deploy_client, token_addresses
 ):
     app0, app1 = raiden_chain
@@ -77,9 +66,9 @@ def run_test_locksroot_loading_during_channel_settle_handling(
         app0=app0, app1=app1, token_network_address=token_network_address
     )
 
-    channel = app0.raiden.chain.payment_channel(channel_state.canonical_identifier)
+    channel = app0.raiden.proxy_manager.payment_channel(channel_state.canonical_identifier)
     balance_proof = channel_state.partner_state.balance_proof
-    block_number = app0.raiden.chain.block_number()
+    block_number = app0.raiden.rpc_client.block_number()
 
     closing_data = pack_signed_balance_proof(
         msg_type=MessageTypeId.BALANCE_PROOF,
@@ -100,7 +89,7 @@ def run_test_locksroot_loading_during_channel_settle_handling(
         block_identifier=block_number,
     )
 
-    close_block = app0.raiden.chain.block_number()
+    close_block = app0.raiden.rpc_client.block_number()
 
     app0.stop()
 
@@ -133,7 +122,7 @@ def run_test_locksroot_loading_during_channel_settle_handling(
         raiden=app1.raiden, block_number=close_block + pruned_after_blocks, retry_timeout=1
     )
 
-    channel = app0.raiden.chain.payment_channel(channel_state.canonical_identifier)
+    channel = app0.raiden.proxy_manager.payment_channel(channel_state.canonical_identifier)
 
     # make sure the block was pruned
     with pytest.raises(ValueError):

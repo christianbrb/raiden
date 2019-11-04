@@ -13,9 +13,9 @@ from raiden.transfer.mediated_transfer.events import EventUnlockClaimFailed
 from raiden.transfer.mediated_transfer.state_change import ActionInitMediator, ActionInitTarget
 from raiden.transfer.state import (
     CHANNEL_AFTER_CLOSE_STATES,
-    NODE_NETWORK_REACHABLE,
     ChannelState,
     NettingChannelEndState,
+    NetworkState,
 )
 from raiden.transfer.state_change import (
     ContractReceiveChannelWithdraw,
@@ -37,6 +37,7 @@ from raiden.utils.typing import (
 
 if TYPE_CHECKING:
     from raiden.raiden_service import RaidenService  # pylint: disable=unused-import
+    from raiden.app import App
 
 log = structlog.get_logger(__name__)
 
@@ -117,10 +118,8 @@ def wait_for_participant_deposit(
     """
     if target_address == raiden.address:
         balance = lambda channel_state: channel_state.our_state.contract_balance
-    elif target_address == partner_address:
-        balance = lambda channel_state: channel_state.partner_state.contract_balance
     else:
-        raise ValueError("target_address must be one of the channel participants")
+        balance = lambda channel_state: channel_state.partner_state.contract_balance
 
     channel_state = views.get_channelstate_for(
         views.state_from_raiden(raiden),
@@ -128,6 +127,9 @@ def wait_for_participant_deposit(
         token_address,
         partner_address,
     )
+    if not channel_state:
+        raise ValueError("no channel could be found between provided partner and target addresses")
+
     current_balance = balance(channel_state)
 
     log_details = {
@@ -151,6 +153,62 @@ def wait_for_participant_deposit(
             partner_address,
         )
         current_balance = balance(channel_state)
+
+
+def wait_single_channel_deposit(
+    app_deposit: "App",
+    app_partner: "App",
+    registry_address: TokenNetworkRegistryAddress,
+    token_address: TokenAddress,
+    total_deposit: TokenAmount,
+    retry_timeout: float,
+) -> None:
+    """ Wait until a deposit of `total_deposit` for app_deposit is seen by both apps"""
+    wait_for_participant_deposit(
+        raiden=app_deposit.raiden,
+        token_network_registry_address=registry_address,
+        token_address=token_address,
+        partner_address=app_partner.raiden.address,
+        target_address=app_deposit.raiden.address,
+        target_balance=total_deposit,
+        retry_timeout=retry_timeout,
+    )
+    wait_for_participant_deposit(
+        raiden=app_partner.raiden,
+        token_network_registry_address=registry_address,
+        token_address=token_address,
+        partner_address=app_deposit.raiden.address,
+        target_address=app_deposit.raiden.address,
+        target_balance=total_deposit,
+        retry_timeout=retry_timeout,
+    )
+
+
+def wait_both_channel_deposit(
+    app_deposit: "App",
+    app_partner: "App",
+    registry_address: TokenNetworkRegistryAddress,
+    token_address: TokenAddress,
+    total_deposit: TokenAmount,
+    retry_timeout: float,
+) -> None:
+    """ Wait until a deposit of `total_deposit` for both apps is seen by both apps"""
+    wait_single_channel_deposit(
+        app_deposit=app_deposit,
+        app_partner=app_partner,
+        registry_address=registry_address,
+        token_address=token_address,
+        total_deposit=total_deposit,
+        retry_timeout=retry_timeout,
+    )
+    wait_single_channel_deposit(
+        app_deposit=app_partner,
+        app_partner=app_deposit,
+        registry_address=registry_address,
+        token_address=token_address,
+        total_deposit=total_deposit,
+        retry_timeout=retry_timeout,
+    )
 
 
 def wait_for_payment_balance(
@@ -355,7 +413,10 @@ def wait_for_settle(
 
 
 def wait_for_network_state(
-    raiden: "RaidenService", node_address: Address, network_state: str, retry_timeout: float
+    raiden: "RaidenService",
+    node_address: Address,
+    network_state: NetworkState,
+    retry_timeout: float,
 ) -> None:  # pragma: no unittest
     """Wait until `node_address` becomes healthy.
 
@@ -388,7 +449,7 @@ def wait_for_healthy(
         This does not time out, use gevent.Timeout.
     """
 
-    wait_for_network_state(raiden, node_address, NODE_NETWORK_REACHABLE, retry_timeout)
+    wait_for_network_state(raiden, node_address, NetworkState.REACHABLE, retry_timeout)
 
 
 class TransferWaitResult(Enum):

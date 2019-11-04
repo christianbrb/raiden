@@ -1,4 +1,5 @@
 import contextlib
+import datetime
 import json
 import os
 import signal
@@ -13,8 +14,8 @@ from typing import Any, AnyStr, ContextManager, Dict, List, Optional, Tuple
 
 import click
 import structlog
-import urllib3
-from urllib3.exceptions import InsecureRequestWarning
+from requests.packages import urllib3
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
 from raiden.app import App
 from raiden.constants import Environment, EthClient, RoutingMode
@@ -22,14 +23,15 @@ from raiden.exceptions import ReplacementTransactionUnderpriced, TransactionAlre
 from raiden.log_config import configure_logging
 from raiden.network.utils import get_free_port
 from raiden.settings import (
+    DEFAULT_BLOCKCHAIN_QUERY_INTERVAL,
     DEFAULT_HTTP_SERVER_PORT,
-    DEFAULT_MEDIATION_PROPORTIONAL_FEE,
-    DEFAULT_MEDIATION_PROPORTIONAL_IMBALANCE_FEE,
     DEFAULT_PATHFINDING_IOU_TIMEOUT,
     DEFAULT_PATHFINDING_MAX_FEE,
     DEFAULT_PATHFINDING_MAX_PATHS,
+    DEFAULT_REVEAL_TIMEOUT,
+    DEFAULT_SETTLE_TIMEOUT,
+    RAIDEN_CONTRACT_VERSION,
 )
-from raiden.ui.startup import environment_type_to_contracts_version
 from raiden.utils import get_system_spec
 from raiden.utils.cli import (
     ADDRESS_TYPE,
@@ -204,6 +206,30 @@ def options(func):
             help="Show all configuration values used to control Raiden's behavior",
             is_flag=True,
         ),
+        option(
+            "--blockchain-query-interval",
+            help="Time interval after which to check for new blocks (in seconds)",
+            default=DEFAULT_BLOCKCHAIN_QUERY_INTERVAL,
+            show_default=True,
+            type=click.FloatRange(min=0.1),
+        ),
+        option_group(
+            "Channel-specific Options",
+            option(
+                "--default-reveal-timeout",
+                help="Sets the default reveal timeout to be used to newly created channels",
+                default=DEFAULT_REVEAL_TIMEOUT,
+                show_default=True,
+                type=click.IntRange(min=20),
+            ),
+            option(
+                "--default-settle-timeout",
+                help="Sets the default settle timeout to be used to newly created channels",
+                default=DEFAULT_SETTLE_TIMEOUT,
+                show_default=True,
+                type=click.IntRange(min=20),
+            ),
+        ),
         option_group(
             "Ethereum Node Options",
             option(
@@ -372,6 +398,19 @@ def options(func):
         option_group(
             "Debugging options",
             option(
+                "--flamegraph",
+                help=("Directory to save stack data used to produce flame graphs."),
+                type=click.Path(
+                    exists=False,
+                    dir_okay=True,
+                    file_okay=False,
+                    writable=True,
+                    resolve_path=True,
+                    allow_dash=False,
+                ),
+                default=None,
+            ),
+            option(
                 "--unrecoverable-error-should-crash",
                 help=(
                     "DO NOT use, unless you know what you are doing. If provided "
@@ -402,27 +441,28 @@ def options(func):
                 "--flat-fee",
                 help=(
                     "Sets the flat fee required for every mediation in wei of the "
-                    "mediated token for a certain token network."
+                    "mediated token for a certain token address."
                 ),
                 type=(ADDRESS_TYPE, click.IntRange(min=0)),
                 multiple=True,
             ),
             option(
                 "--proportional-fee",
-                help="Mediation fee as ratio of mediated amount in parts-per-million (10^-6).",
-                default=DEFAULT_MEDIATION_PROPORTIONAL_FEE,
-                type=click.IntRange(min=0, max=10 ** 6),
-                show_default=True,
+                help=(
+                    "Mediation fee as ratio of mediated amount in parts-per-million "
+                    "(10^-6) for a certain token address."
+                ),
+                type=(ADDRESS_TYPE, click.IntRange(min=0, max=10 ** 6)),
+                multiple=True,
             ),
             option(
                 "--proportional-imbalance-fee",
                 help=(
                     "Set the worst-case imbalance fee relative to the channels capacity "
-                    "in parts-per-million (10^-6)."
+                    "in parts-per-million (10^-6) for a certain token address."
                 ),
-                default=DEFAULT_MEDIATION_PROPORTIONAL_IMBALANCE_FEE,
-                type=click.IntRange(min=0, max=10 ** 6),
-                show_default=True,
+                type=(ADDRESS_TYPE, click.IntRange(min=0, max=50_000)),
+                multiple=True,
             ),
         ),
     ]
@@ -437,6 +477,20 @@ def options(func):
 @click.pass_context
 def run(ctx, **kwargs):
     # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+
+    flamegraph = kwargs.pop("flamegraph", None)
+    profiler = None
+
+    if flamegraph:
+        os.makedirs(flamegraph, exist_ok=True)
+
+        from raiden.utils.profiling.sampler import TraceSampler, FlameGraphCollector
+
+        now = datetime.datetime.now()
+        stack_path = os.path.join(flamegraph, f"{now:%Y%m%d_%H%M}_stack.data")
+        stack_stream = open(stack_path, "w")
+        flame = FlameGraphCollector(stack_stream)
+        profiler = TraceSampler(flame)
 
     if kwargs.pop("version", False):
         click.echo(
@@ -520,6 +574,9 @@ def run(ctx, **kwargs):
             fg="red",
         )
         sys.exit(1)
+    finally:
+        if profiler is not None:
+            profiler.stop()
 
 
 @run.command()
@@ -613,7 +670,7 @@ def smoketest(ctx, debug: bool, eth_client: EthClient, report_path: Optional[str
             file=stdout,
         )
 
-    contracts_version = environment_type_to_contracts_version(environment_type)
+    contracts_version = RAIDEN_CONTRACT_VERSION
 
     try:
         free_port_generator = get_free_port()
@@ -665,6 +722,8 @@ def smoketest(ctx, debug: bool, eth_client: EthClient, report_path: Optional[str
             args["one_to_n_contract_address"] = "0x" + "1" * 40
             args["routing_mode"] = RoutingMode.PRIVATE
             args["flat_fee"] = ()
+            args["proportional_fee"] = ()
+            args["proportional_imbalance_fee"] = ()
 
             for option_ in run.params:
                 if option_.name in args.keys():

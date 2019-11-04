@@ -9,6 +9,7 @@ import pytest
 
 from raiden.constants import EMPTY_HASH, MAXIMUM_PENDING_TRANSFERS
 from raiden.raiden_service import initiator_init
+from raiden.settings import DEFAULT_MEDIATION_FEE_MARGIN, MAX_MEDIATION_FEE_PERC
 from raiden.tests.utils import factories
 from raiden.tests.utils.events import search_for_item
 from raiden.tests.utils.factories import (
@@ -18,6 +19,9 @@ from raiden.tests.utils.factories import (
     UNIT_TRANSFER_IDENTIFIER,
     UNIT_TRANSFER_INITIATOR,
     UNIT_TRANSFER_TARGET,
+    ChannelSet,
+    TransferDescriptionProperties,
+    create,
 )
 from raiden.tests.utils.mocks import MockRaidenService
 from raiden.tests.utils.transfer import assert_dropped
@@ -25,6 +29,7 @@ from raiden.transfer import channel
 from raiden.transfer.architecture import State
 from raiden.transfer.events import (
     EventInvalidReceivedLockExpired,
+    EventInvalidSecretRequest,
     EventPaymentSentFailed,
     EventPaymentSentSuccess,
     SendProcessed,
@@ -49,9 +54,9 @@ from raiden.transfer.mediated_transfer.state_change import (
     ReceiveTransferCancelRoute,
 )
 from raiden.transfer.state import (
-    NODE_NETWORK_REACHABLE,
     HashTimeLockState,
     NettingChannelState,
+    NetworkState,
     RouteState,
     message_identifier_from_prng,
 )
@@ -62,7 +67,15 @@ from raiden.transfer.state_change import (
     ContractReceiveSecretReveal,
 )
 from raiden.utils import random_secret, sha3, typing
-from raiden.utils.typing import BlockNumber, FeeAmount, NodeNetworkStateMap, PaymentAmount
+from raiden.utils.typing import (
+    Address,
+    BlockNumber,
+    ChannelID,
+    FeeAmount,
+    NodeNetworkStateMap,
+    PaymentAmount,
+    TokenAmount,
+)
 
 
 def get_transfer_at_index(
@@ -77,10 +90,11 @@ def make_initiator_manager_state(
     pseudo_random_generator: random.Random,
     transfer_description: factories.TransferDescriptionWithSecretState = None,
     block_number: BlockNumber = BlockNumber(1),  # noqa: B008
+    estimated_fee: FeeAmount = FeeAmount(0),  # noqa: B008
 ):
     init = ActionInitInitiator(
         transfer=transfer_description or factories.UNIT_TRANSFER_DESCRIPTION,
-        routes=channels.get_routes(),
+        routes=channels.get_routes(estimated_fee=estimated_fee),
     )
     initial_state = None
     iteration = initiator_manager.state_transition(
@@ -111,12 +125,10 @@ def setup_initiator_tests(
     our_address=EMPTY,
     partner_address=EMPTY,
     block_number=1,
-    allocated_fee=EMPTY,
+    allocated_fee=0,
 ) -> InitiatorSetup:
     """Commonly used setup code for initiator manager and channel"""
     prng = random.Random()
-
-    allocated_fee = factories.if_empty(allocated_fee, 0)
 
     properties = factories.NettingChannelStateProperties(
         our_state=factories.NettingChannelEndStateProperties(
@@ -128,19 +140,21 @@ def setup_initiator_tests(
     )
     channels = factories.make_channel_set([properties])
     transfer_description = factories.create(
-        factories.TransferDescriptionProperties(secret=UNIT_SECRET, allocated_fee=allocated_fee)
+        factories.TransferDescriptionProperties(secret=UNIT_SECRET)
     )
     current_state = make_initiator_manager_state(
         channels=channels,
         transfer_description=transfer_description,
         pseudo_random_generator=prng,
         block_number=block_number,
+        estimated_fee=allocated_fee,
     )
 
     initiator_state = get_transfer_at_index(current_state, 0)
+    assert initiator_state, "There should be an initial initiator state"
     lock = channel.get_lock(channels[0].our_state, initiator_state.transfer_description.secrethash)
     assert lock
-    available_routes = channels.get_routes()
+    available_routes = channels.get_routes(estimated_fee=allocated_fee)
     setup = InitiatorSetup(
         current_state=current_state,
         block_number=block_number,
@@ -150,7 +164,7 @@ def setup_initiator_tests(
         prng=prng,
         lock=lock,
         nodeaddresses_to_networkstates={
-            channel.partner_state.address: NODE_NETWORK_REACHABLE for channel in channels.channels
+            channel.partner_state.address: NetworkState.REACHABLE for channel in channels.channels
         },
     )
     return setup
@@ -176,17 +190,24 @@ def test_next_route():
 
 
 def test_init_with_usable_routes():
+    transfer_amount = TokenAmount(1000)
+    flat_fee = FeeAmount(20)
+    expected_fee_margin = int(flat_fee * DEFAULT_MEDIATION_FEE_MARGIN)  # == 1
     properties = factories.NettingChannelStateProperties(
-        our_state=factories.NettingChannelEndStateProperties(balance=UNIT_TRANSFER_AMOUNT)
+        our_state=factories.NettingChannelEndStateProperties(
+            balance=TokenAmount(transfer_amount + flat_fee + expected_fee_margin)
+        )
     )
     channels = factories.make_channel_set([properties])
     pseudo_random_generator = random.Random()
 
-    init_state_change = ActionInitInitiator(
-        factories.UNIT_TRANSFER_DESCRIPTION, channels.get_routes()
+    transfer_description = create(
+        TransferDescriptionProperties(secret=UNIT_SECRET, amount=transfer_amount)
     )
+    routes = channels.get_routes(estimated_fee=flat_fee)
+    init_state_change = ActionInitInitiator(transfer=transfer_description, routes=routes)
 
-    block_number = 1
+    block_number = BlockNumber(1)
     transition = initiator_manager.state_transition(
         payment_state=None,
         state_change=init_state_change,
@@ -203,7 +224,7 @@ def test_init_with_usable_routes():
     assert len(payment_state.routes) == 1
 
     initiator_state = get_transfer_at_index(payment_state, 0)
-    assert initiator_state.transfer_description == factories.UNIT_TRANSFER_DESCRIPTION
+    assert initiator_state.transfer_description == transfer_description
 
     mediated_transfers = [e for e in transition.events if isinstance(e, SendLockedTransfer)]
     assert len(mediated_transfers) == 1, "mediated_transfer should /not/ split the transfer"
@@ -213,15 +234,55 @@ def test_init_with_usable_routes():
     expiration = channel.get_safe_initial_expiration(block_number, channels[0].reveal_timeout)
 
     assert transfer.balance_proof.token_network_address == channels[0].token_network_address
-    assert transfer.lock.amount == factories.UNIT_TRANSFER_DESCRIPTION.amount
+    assert (
+        transfer.balance_proof.locked_amount
+        == transfer_description.amount + flat_fee + expected_fee_margin
+    )
+    assert transfer.lock.amount == transfer_description.amount + flat_fee + expected_fee_margin
     assert transfer.lock.expiration == expiration
-    assert transfer.lock.secrethash == factories.UNIT_TRANSFER_DESCRIPTION.secrethash
+    assert transfer.lock.secrethash == transfer_description.secrethash
     # pylint: disable=E1101
     assert send_mediated_transfer.recipient == channels[0].partner_state.address
 
 
+def test_init_with_fees_more_than_max_limit():
+    transfer_amount = TokenAmount(100)
+    flat_fee = FeeAmount(int(transfer_amount + MAX_MEDIATION_FEE_PERC * transfer_amount))
+    expected_fee_margin = int(flat_fee * DEFAULT_MEDIATION_FEE_MARGIN)
+    properties = factories.NettingChannelStateProperties(
+        our_state=factories.NettingChannelEndStateProperties(
+            balance=TokenAmount(transfer_amount + flat_fee + expected_fee_margin)
+        )
+    )
+    channels = factories.make_channel_set([properties])
+    pseudo_random_generator = random.Random()
+
+    transfer_description = create(
+        TransferDescriptionProperties(secret=UNIT_SECRET, amount=transfer_amount)
+    )
+    routes = channels.get_routes(estimated_fee=flat_fee)
+    init_state_change = ActionInitInitiator(transfer=transfer_description, routes=routes)
+
+    block_number = BlockNumber(1)
+    transition = initiator_manager.state_transition(
+        payment_state=None,
+        state_change=init_state_change,
+        channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
+        pseudo_random_generator=pseudo_random_generator,
+        block_number=block_number,
+    )
+    assert transition.new_state is None
+    assert isinstance(transition.events[0], EventPaymentSentFailed)
+    reason_msg = (
+        "none of the available routes could be used and at least one of them "
+        "exceeded the maximum fee limit"
+    )
+    assert transition.events[0].reason == reason_msg
+
+
 def test_init_without_routes():
-    block_number = 1
+    block_number = BlockNumber(1)
     routes = []
     pseudo_random_generator = random.Random()
 
@@ -442,7 +503,9 @@ def test_state_wait_unlock_invalid():
     assert iteration.new_state == before_state
 
 
-def channels_setup(amount, our_address, refund_address):
+def channels_setup(
+    amount: TokenAmount, our_address: Address, refund_address: Address
+) -> ChannelSet:
     funded = factories.NettingChannelEndStateProperties(balance=amount, address=our_address)
     broke = factories.replace(funded, balance=0)
     funded_partner = factories.replace(funded, address=refund_address)
@@ -457,24 +520,52 @@ def channels_setup(amount, our_address, refund_address):
 
 
 def test_refund_transfer_with_reroute():
-    amount = UNIT_TRANSFER_AMOUNT
+    transfer_amount = TokenAmount(1000)
+    block_number = BlockNumber(10)
     our_address = factories.ADDR
     refund_pkey, refund_address = factories.make_privkey_address()
     prng = random.Random()
 
-    channels = channels_setup(amount, our_address, refund_address)
-
-    block_number = 10
-    current_state = make_initiator_manager_state(
-        channels=channels, pseudo_random_generator=prng, block_number=block_number
+    transfer_description = create(
+        TransferDescriptionProperties(secret=UNIT_SECRET, amount=transfer_amount)
     )
+    channels = channels_setup(TokenAmount(transfer_amount * 2), our_address, refund_address)
+
+    fee_1 = 20
+    expected_fee_margin_1 = int(fee_1 * DEFAULT_MEDIATION_FEE_MARGIN)
+    fee_3 = 40
+    expected_fee_margin_3 = int(fee_3 * DEFAULT_MEDIATION_FEE_MARGIN)
+
+    routes = channels.get_routes()
+    routes[0].estimated_fee = fee_1  # this one will be tried first and fail
+    routes[1].estimated_fee = 30  # this one is not funded
+    routes[2].estimated_fee = fee_3  # this one will be tried after the first fail
+
+    init = ActionInitInitiator(transfer=transfer_description, routes=routes)
+    initial_state = None
+    iteration = initiator_manager.state_transition(
+        payment_state=initial_state,
+        state_change=init,
+        channelidentifiers_to_channels=channels.channel_map,
+        nodeaddresses_to_networkstates=channels.nodeaddresses_to_networkstates,
+        pseudo_random_generator=prng,
+        block_number=block_number,
+    )
+    current_state = iteration.new_state
 
     initiator_state = get_transfer_at_index(current_state, 0)
     original_transfer = initiator_state.transfer
 
+    # Check that fees for route 1 have been set correctly
+    assert (
+        original_transfer.balance_proof.locked_amount
+        == transfer_amount + fee_1 + expected_fee_margin_1
+    )
+    assert original_transfer.lock.amount == transfer_amount + fee_1 + expected_fee_margin_1
+
     refund_transfer = factories.create(
         factories.LockedTransferSignedStateProperties(
-            amount=amount,
+            amount=original_transfer.balance_proof.locked_amount,
             initiator=our_address,
             target=original_transfer.target,
             expiration=original_transfer.lock.expiration,
@@ -485,7 +576,6 @@ def test_refund_transfer_with_reroute():
         )
     )
 
-    # pylint: disable=E1101
     assert channels[0].partner_state.address == refund_address
 
     state_change = ReceiveTransferCancelRoute(
@@ -526,10 +616,16 @@ def test_refund_transfer_with_reroute():
     )
 
     new_transfer = search_for_item(iteration.events, SendLockedTransfer, {})
-
     assert new_transfer, "No mediated transfer event emitted, should have tried a new route"
     msg = "the new transfer must use a new secret / secrethash"
     assert new_transfer.transfer.lock.secrethash != refund_transfer.lock.secrethash, msg
+
+    # Check that fees for route 3 have been set correctly
+    assert (
+        new_transfer.transfer.balance_proof.locked_amount
+        == transfer_amount + fee_3 + expected_fee_margin_3
+    )
+    assert new_transfer.transfer.lock.amount == transfer_amount + fee_3 + expected_fee_margin_3
 
     initiator_state = get_transfer_at_index(iteration.new_state, 0)
     assert initiator_state is not None
@@ -852,7 +948,7 @@ def test_init_with_maximum_pending_transfers_exceeded():
                 state_change=init_state_change,
                 channelidentifiers_to_channels=channel_map,
                 nodeaddresses_to_networkstates={
-                    channel1.partner_state.address: NODE_NETWORK_REACHABLE
+                    channel1.partner_state.address: NetworkState.REACHABLE
                 },
                 pseudo_random_generator=pseudo_random_generator,
                 block_number=block_number,
@@ -1627,7 +1723,7 @@ def test_state_wait_secretrequest_valid_amount_and_fee():
 
     state_change = ReceiveSecretRequest(
         payment_identifier=UNIT_TRANSFER_IDENTIFIER,
-        amount=setup.lock.amount - 1,  # Assuming 1 is the fee amount that was deducted
+        amount=setup.lock.amount - fee_amount,
         expiration=setup.lock.expiration,
         secrethash=setup.lock.secrethash,
         sender=UNIT_TRANSFER_TARGET,
@@ -1651,7 +1747,7 @@ def test_state_wait_secretrequest_valid_amount_and_fee():
 
     state_change_2 = ReceiveSecretRequest(
         payment_identifier=UNIT_TRANSFER_IDENTIFIER,
-        amount=setup.lock.amount - fee_amount - 1,
+        amount=setup.lock.amount - fee_amount - 1,  # Now the amount becomes too small
         expiration=setup.lock.expiration,
         secrethash=setup.lock.secrethash,
         sender=UNIT_TRANSFER_TARGET,
@@ -1666,7 +1762,8 @@ def test_state_wait_secretrequest_valid_amount_and_fee():
         block_number=setup.block_number,
     )
 
-    assert len(iteration2.events) == 0
+    assert len(iteration2.events) == 1
+    assert search_for_item(iteration2.events, EventInvalidSecretRequest, {}) is not None
 
 
 def test_initiator_manager_drops_invalid_state_changes():
@@ -1848,7 +1945,9 @@ def test_initiator_init():
 
     route_states = [
         RouteState(
-            route=[factories.make_address(), factories.make_address()], forward_channel_id=1
+            route=[factories.make_address(), factories.make_address()],
+            forward_channel_id=ChannelID(1),
+            estimated_fee=FeeAmount(123),
         )
     ]
     feedback_token = uuid.uuid4()
@@ -1864,7 +1963,6 @@ def test_initiator_init():
             transfer_amount=PaymentAmount(100),
             transfer_secret=secret,
             transfer_secrethash=sha3(secret),
-            transfer_fee=FeeAmount(0),
             token_network_address=factories.make_token_network_address(),
             target_address=factories.make_address(),
         )

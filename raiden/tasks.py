@@ -1,5 +1,4 @@
 import re
-from json.decoder import JSONDecodeError
 from typing import TYPE_CHECKING, Dict
 
 import click
@@ -20,8 +19,7 @@ from raiden.constants import (
     RELEASE_PAGE,
     SECURITY_EXPRESSION,
 )
-from raiden.exceptions import EthNodeCommunicationError
-from raiden.network.blockchain_service import BlockChainService
+from raiden.network.proxies.proxy_manager import ProxyManager
 from raiden.network.proxies.user_deposit import UserDeposit
 from raiden.settings import MIN_REI_THRESHOLD
 from raiden.utils import gas_reserve, to_rdn
@@ -140,30 +138,32 @@ def check_network_id(network_id: ChainID, web3: Web3) -> None:  # pragma: no uni
 class AlarmTask(Runnable):
     """ Task to notify when a block is mined. """
 
-    def __init__(self, chain: BlockChainService) -> None:
+    def __init__(self, proxy_manager: ProxyManager, sleep_time: float) -> None:
         super().__init__()
 
         self.callbacks: List[Callable] = list()
-        self.chain = chain
+        self.proxy_manager = proxy_manager
+        self.rpc_client = proxy_manager.client
+
         self.known_block_number: Optional[BlockNumber] = None
         self._stop_event: Optional[AsyncResult] = None
 
         # TODO: Start with a larger sleep_time and decrease it as the
         # probability of a new block increases.
-        self.sleep_time = 0.5
+        self.sleep_time = sleep_time
 
     def __repr__(self) -> str:
-        return f"<{self.__class__.__name__} node:{to_checksum_address(self.chain.client.address)}>"
+        return (
+            f"<{self.__class__.__name__} node:" f"{to_checksum_address(self.rpc_client.address)}>"
+        )
 
     def start(self) -> None:
-        log.debug("Alarm task started", node=to_checksum_address(self.chain.node_address))
+        log.debug("Alarm task started", node=to_checksum_address(self.rpc_client.address))
         self._stop_event = AsyncResult()
         super().start()
 
     def _run(self, *args: Any, **kwargs: Any) -> None:  # pylint: disable=method-hidden
-        self.greenlet.name = (
-            f"AlarmTask._run node:{to_checksum_address(self.chain.client.address)}"
-        )
+        self.greenlet.name = f"AlarmTask._run node:{to_checksum_address(self.rpc_client.address)}"
         try:
             self.loop_until_stop()
         finally:
@@ -202,17 +202,14 @@ class AlarmTask(Runnable):
 
         sleep_time = self.sleep_time
         while self._stop_event and self._stop_event.wait(sleep_time) is not True:
-            try:
-                latest_block = self.chain.get_block(block_identifier="latest")
-            except JSONDecodeError as e:
-                raise EthNodeCommunicationError(str(e))
+            latest_block = self.rpc_client.get_block(block_identifier="latest")
 
             self._maybe_run_callbacks(latest_block)
 
     def first_run(self, known_block_number: BlockNumber) -> None:
         """ Blocking call to update the local state, if necessary. """
         assert self.callbacks, "callbacks not set"
-        latest_block = self.chain.get_block(block_identifier="latest")
+        latest_block = self.rpc_client.get_block(block_identifier="latest")
 
         log.debug(
             "Alarm task first run",
@@ -220,7 +217,7 @@ class AlarmTask(Runnable):
             latest_block_number=latest_block["number"],
             latest_gas_limit=latest_block["gasLimit"],
             latest_block_hash=to_hex(latest_block["hash"]),
-            node=to_checksum_address(self.chain.node_address),
+            node=to_checksum_address(self.rpc_client.address),
         )
 
         self.known_block_number = known_block_number
@@ -241,12 +238,12 @@ class AlarmTask(Runnable):
         if missed_blocks < 0:
             log.critical(
                 "Block number decreased",
-                chain_id=self.chain.network_id,
+                chain_id=self.rpc_client.chain_id,
                 known_block_number=self.known_block_number,
                 old_block_number=latest_block["number"],
                 old_gas_limit=latest_block["gasLimit"],
                 old_block_hash=to_hex(latest_block["hash"]),
-                node=to_checksum_address(self.chain.node_address),
+                node=to_checksum_address(self.rpc_client.address),
             )
         elif missed_blocks > 0:
             log_details = dict(
@@ -254,7 +251,7 @@ class AlarmTask(Runnable):
                 latest_block_number=latest_block_number,
                 latest_block_hash=to_hex(latest_block["hash"]),
                 latest_block_gas_limit=latest_block["gasLimit"],
-                node=to_checksum_address(self.chain.node_address),
+                node=to_checksum_address(self.rpc_client.address),
             )
             if missed_blocks > 1:
                 log_details["num_missed_blocks"] = missed_blocks - 1
@@ -275,7 +272,7 @@ class AlarmTask(Runnable):
     def stop(self) -> Any:
         if self._stop_event:
             self._stop_event.set(True)
-        log.debug("Alarm task stopped", node=to_checksum_address(self.chain.node_address))
+        log.debug("Alarm task stopped", node=to_checksum_address(self.rpc_client.address))
         result = self.join()
         # Callbacks should be cleaned after join
         self.callbacks = []

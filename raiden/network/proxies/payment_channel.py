@@ -42,6 +42,7 @@ class PaymentChannel:
             token_network=token_network,
             channel_identifier=channel_identifier,
             contract_manager=contract_manager,
+            from_block=token_network.metadata.filters_start_at,
         )
 
         if not participants:

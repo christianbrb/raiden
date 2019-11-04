@@ -45,6 +45,7 @@ def open_and_wait_for_channels(app_channels, registry_address, token, deposit, s
     wait_for_channels(app_channels, registry_address, [token], deposit)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [5])
 @pytest.mark.parametrize("channels_per_node", [0])
 @pytest.mark.parametrize("settle_timeout", [64])  # default settlement is too low for 3 hops
@@ -54,19 +55,6 @@ def test_regression_unfiltered_routes(raiden_network, token_addresses, settle_ti
     Transfers failed in networks where two or more paths to the destination are
     possible but they share same node as a first hop.
     """
-    raise_on_failure(
-        raiden_network,
-        run_test_regression_unfiltered_routes,
-        raiden_network=raiden_network,
-        token_addresses=token_addresses,
-        settle_timeout=settle_timeout,
-        deposit=deposit,
-    )
-
-
-def run_test_regression_unfiltered_routes(
-    raiden_network, token_addresses, settle_timeout, deposit
-):
     app0, app1, app2, app3, app4 = raiden_network
     token = token_addresses[0]
     registry_address = app0.raiden.default_registry.address
@@ -82,24 +70,13 @@ def run_test_regression_unfiltered_routes(
     transfer(initiator_app=app0, target_app=app4, token_address=token, amount=1, identifier=1)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [3])
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 def test_regression_revealsecret_after_secret(raiden_network, token_addresses, transport_protocol):
     """ A RevealSecret message received after a Unlock message must be cleanly
     handled.
     """
-    raise_on_failure(
-        raiden_network,
-        run_test_regression_revealsecret_after_secret,
-        raiden_network=raiden_network,
-        token_addresses=token_addresses,
-        transport_protocol=transport_protocol,
-    )
-
-
-def run_test_regression_revealsecret_after_secret(
-    raiden_network, token_addresses, transport_protocol
-):
     app0, app1, app2 = raiden_network
     token = token_addresses[0]
 
@@ -129,6 +106,7 @@ def run_test_regression_revealsecret_after_secret(
         raise TypeError("Unknown TransportProtocol")
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 def test_regression_multiple_revealsecret(raiden_network, token_addresses, transport_protocol):
@@ -149,16 +127,6 @@ def test_regression_multiple_revealsecret(raiden_network, token_addresses, trans
     unregistered. And because the channel was already updated an exception was raised
     for an unknown secret.
     """
-    raise_on_failure(
-        raiden_network,
-        run_test_regression_multiple_revealsecret,
-        raiden_network=raiden_network,
-        token_addresses=token_addresses,
-        transport_protocol=transport_protocol,
-    )
-
-
-def run_test_regression_multiple_revealsecret(raiden_network, token_addresses, transport_protocol):
     app0, app1 = raiden_network
     token = token_addresses[0]
     token_network_address = views.get_token_network_address_by_token_address(
@@ -234,43 +202,31 @@ def run_test_regression_multiple_revealsecret(raiden_network, token_addresses, t
     gevent.joinall(wait)
 
 
-def test_regression_register_secret_once(secret_registry_address, deploy_service):
+def test_regression_register_secret_once(secret_registry_address, proxy_manager):
     """Register secret transaction must not be sent if the secret is already registered"""
     # pylint: disable=protected-access
 
-    secret_registry = deploy_service.secret_registry(secret_registry_address)
+    secret_registry = proxy_manager.secret_registry(secret_registry_address)
 
     secret = sha3(b"test_regression_register_secret_once")
     secret_registry.register_secret(secret=secret)
 
-    previous_nonce = deploy_service.client._available_nonce
+    previous_nonce = proxy_manager.client._available_nonce
     secret_registry.register_secret(secret=secret)
-    assert previous_nonce == deploy_service.client._available_nonce
+    assert previous_nonce == proxy_manager.client._available_nonce
 
-    previous_nonce = deploy_service.client._available_nonce
+    previous_nonce = proxy_manager.client._available_nonce
     secret_registry.register_secret_batch(secrets=[secret])
-    assert previous_nonce == deploy_service.client._available_nonce
+    assert previous_nonce == proxy_manager.client._available_nonce
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [5])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_regression_payment_complete_after_refund_to_the_initiator(
     raiden_network, token_addresses, settle_timeout, deposit
 ):
     """Regression test for issue #3915"""
-    raise_on_failure(
-        raiden_apps=raiden_network,
-        test_function=run_regression_payment_complete_after_refund_to_the_initiator,
-        raiden_network=raiden_network,
-        token_addresses=token_addresses,
-        settle_timeout=settle_timeout,
-        deposit=deposit,
-    )
-
-
-def run_regression_payment_complete_after_refund_to_the_initiator(
-    raiden_network, token_addresses, settle_timeout, deposit
-):
     app0, app1, app2, app3, app4 = raiden_network
     token = token_addresses[0]
     registry_address = app0.raiden.default_registry.address
@@ -299,7 +255,7 @@ def run_regression_payment_complete_after_refund_to_the_initiator(
         initiator_app=app0,
         target_app=app2,
         token_address=token,
-        amount=deposit,
+        amount=50,
         identifier=PaymentID(2),
         timeout=20,
     )

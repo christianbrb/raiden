@@ -3,18 +3,15 @@ from eth_utils import to_canonical_address, to_checksum_address
 
 from raiden.constants import (
     EMPTY_ADDRESS,
-    RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT,
-    RED_EYES_PER_TOKEN_NETWORK_LIMIT,
+    GENESIS_BLOCK_NUMBER,
     SECONDS_PER_DAY,
     UINT256_MAX,
     Environment,
 )
-from raiden.network.blockchain_service import BlockChainService
+from raiden.network.proxies.proxy_manager import ProxyManager, ProxyManagerMetadata
 from raiden.network.proxies.secret_registry import SecretRegistry
 from raiden.network.proxies.token import Token
-from raiden.network.proxies.token_network import TokenNetwork
-from raiden.network.proxies.token_network_registry import TokenNetworkRegistry
-from raiden.settings import DEVELOPMENT_CONTRACT_VERSION, MONITORING_REWARD
+from raiden.settings import MONITORING_REWARD
 from raiden.tests.utils.smartcontracts import (
     deploy_contract_web3,
     deploy_token,
@@ -31,6 +28,9 @@ from raiden_contracts.constants import (
     CONTRACT_USER_DEPOSIT,
 )
 
+RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT = int(0.075 * 10 ** 18)
+RED_EYES_PER_TOKEN_NETWORK_LIMIT = int(250 * 10 ** 18)
+
 
 @pytest.fixture
 def token_contract_name() -> str:
@@ -42,7 +42,7 @@ def deploy_all_tokens_register_and_return_their_addresses(
     token_amount,
     number_of_tokens,
     private_keys,
-    deploy_service,
+    proxy_manager,
     token_network_registry_address,
     register_tokens,
     contract_manager,
@@ -63,7 +63,7 @@ def deploy_all_tokens_register_and_return_their_addresses(
     token_addresses = deploy_tokens_and_fund_accounts(
         token_amount=token_amount,
         number_of_tokens=number_of_tokens,
-        deploy_service=deploy_service,
+        proxy_manager=proxy_manager,
         participants=participants,
         contract_manager=contract_manager,
         token_contract_name=token_contract_name,
@@ -71,17 +71,13 @@ def deploy_all_tokens_register_and_return_their_addresses(
 
     if register_tokens:
         for token in token_addresses:
-            registry = deploy_service.token_network_registry(token_network_registry_address)
-            if contract_manager.contracts_version == DEVELOPMENT_CONTRACT_VERSION:
-                registry.add_token_with_limits(
-                    token_address=token,
-                    channel_participant_deposit_limit=RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT,
-                    token_network_deposit_limit=RED_EYES_PER_TOKEN_NETWORK_LIMIT,
-                )
-            else:
-                registry.add_token_without_limits(
-                    token_address=token, given_block_identifier="latest"
-                )
+            registry = proxy_manager.token_network_registry(token_network_registry_address)
+            registry.add_token(
+                token_address=token,
+                channel_participant_deposit_limit=RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT,
+                token_network_deposit_limit=RED_EYES_PER_TOKEN_NETWORK_LIMIT,
+                block_identifier=proxy_manager.client.blockhash_from_blocknumber("latest"),
+            )
 
     return token_addresses
 
@@ -125,7 +121,7 @@ def maybe_deploy_service_registry_and_return_address(
 
 @pytest.fixture(name="user_deposit_address")
 def deploy_user_deposit_and_return_address(
-    deploy_service, deploy_client, contract_manager, token_proxy, private_keys, environment_type
+    proxy_manager, deploy_client, contract_manager, token_proxy, private_keys, environment_type
 ) -> typing.Optional[typing.Address]:
     """ Deploy UserDeposit and fund accounts with some balances """
     if environment_type != Environment.DEVELOPMENT:
@@ -139,7 +135,7 @@ def deploy_user_deposit_and_return_address(
         constructor_arguments=constructor_arguments,
     )
 
-    user_deposit = deploy_service.user_deposit(user_deposit_address)
+    user_deposit = proxy_manager.user_deposit(user_deposit_address)
 
     participants = [privatekey_to_address(key) for key in private_keys]
     for transfer_to in participants:
@@ -225,31 +221,32 @@ def register_token_and_return_the_network_proxy(
 ):
     registry_address = to_canonical_address(token_network_registry_address)
 
-    blockchain_service = BlockChainService(
-        jsonrpc_client=deploy_client, contract_manager=contract_manager
+    blockchain_service = ProxyManager(
+        rpc_client=deploy_client,
+        contract_manager=contract_manager,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
     )
 
-    token_network_registry_proxy = TokenNetworkRegistry(
-        jsonrpc_client=deploy_client,
-        registry_address=registry_address,
-        contract_manager=contract_manager,
-        blockchain_service=blockchain_service,
-    )
-    token_network_address = token_network_registry_proxy.add_token_with_limits(
+    token_network_registry_proxy = blockchain_service.token_network_registry(registry_address)
+    token_network_address = token_network_registry_proxy.add_token(
         token_address=token_proxy.address,
         channel_participant_deposit_limit=RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT,
         token_network_deposit_limit=RED_EYES_PER_TOKEN_NETWORK_LIMIT,
+        block_identifier=deploy_client.get_confirmed_blockhash(),
     )
 
-    blockchain_service = BlockChainService(
-        jsonrpc_client=deploy_client, contract_manager=contract_manager
-    )
-    return TokenNetwork(
-        jsonrpc_client=deploy_client,
-        token_network_address=token_network_address,
+    blockchain_service = ProxyManager(
+        rpc_client=deploy_client,
         contract_manager=contract_manager,
-        blockchain_service=blockchain_service,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
     )
+    return blockchain_service.token_network(token_network_address)
 
 
 @pytest.fixture(name="token_proxy")

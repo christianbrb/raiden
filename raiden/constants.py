@@ -1,7 +1,7 @@
 import math
 from enum import Enum
 
-from eth_utils import keccak, to_checksum_address
+from eth_utils import keccak, to_canonical_address, to_checksum_address
 
 from raiden.utils.secrethash import sha256_secrethash
 from raiden.utils.typing import (
@@ -15,6 +15,7 @@ from raiden.utils.typing import (
     Secret,
     SecretHash,
     Signature,
+    TokenAddress,
     TokenAmount,
     TransactionHash,
 )
@@ -32,10 +33,47 @@ UINT64_MAX = 2 ** 64 - 1
 
 SECONDS_PER_DAY = 24 * 60 * 60
 
-RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT = int(0.075 * 10 ** 18)
-RED_EYES_PER_TOKEN_NETWORK_LIMIT = int(250 * 10 ** 18)
-
 GENESIS_BLOCK_NUMBER = BlockNumber(0)
+
+# Relevant forks:
+# BYZANTIUM https://eips.ethereum.org/EIPS/eip-609
+# CONSTANTINOPLE https://eips.ethereum.org/EIPS/eip-1013
+
+
+class EthereumForks(Enum):
+    BYZANTIUM = BlockNumber(4_370_000)
+    CONSTANTINOPLE = BlockNumber(7_280_000)
+
+
+class RopstenForks(Enum):
+    BYZANTIUM = BlockNumber(1_700_000)
+    CONSTANTINOPLE = BlockNumber(4_230_000)
+
+
+class KovanForks(Enum):
+    BYZANTIUM = BlockNumber(0)
+    CONSTANTINOPLE = BlockNumber(4_230_000)
+
+
+class RinkebyForks(Enum):
+    BYZANTIUM = BlockNumber(0)
+    CONSTANTINOPLE = BlockNumber(3_660_663)
+
+
+class GoerliForks(Enum):
+    BYZANTIUM = BlockNumber(0)
+    CONSTANTINOPLE = BlockNumber(0)
+
+
+class Networks(Enum):
+    MAINNET = 1
+    ROPSTEN = 3
+    RINKEBY = 4
+    GOERLI = 5
+    KOVAN = 42
+    SMOKETEST = 627
+
+
 # Set at 64 since parity's default is 64 and Geth's default is 128
 # TODO: Make this configurable. Since in parity this is also a configurable value
 STATE_PRUNING_AFTER_BLOCKS = 64
@@ -125,7 +163,15 @@ EMPTY_ADDRESS = b"\0" * 20
 
 # Keep in sync with .circleci/config.yaml
 HIGHEST_SUPPORTED_GETH_VERSION = "1.9.2"
-LOWEST_SUPPORTED_GETH_VERSION = "1.7.2"
+LOWEST_SUPPORTED_GETH_VERSION = "1.8.21"
 # this is the last stable version as of this comment
 HIGHEST_SUPPORTED_PARITY_VERSION = "2.5.5"
 LOWEST_SUPPORTED_PARITY_VERSION = "1.7.6"
+
+
+WETH_TOKEN_ADDRESS = TokenAddress(
+    to_canonical_address("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+)
+DAI_TOKEN_ADDRESS = TokenAddress(
+    to_canonical_address("0x89d24A6b4CcB1B6fAA2625fE562bDD9a23260359")
+)

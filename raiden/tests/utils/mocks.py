@@ -23,12 +23,15 @@ from raiden.utils.typing import (
     TokenNetworkAddress,
     TokenNetworkRegistryAddress,
 )
+from raiden_contracts.utils.type_aliases import ChainID
 
 
 class MockJSONRPCClient:
-    def __init__(self):
+    def __init__(self, address: Address):
         # To be manually set by each test
-        self.balances_mapping = {}
+        self.balances_mapping: Dict[Address, int] = {}
+        self.chain_id = ChainID(17)
+        self.address = address
 
     @staticmethod
     def can_query_state_for_block(block_identifier):  # pylint: disable=unused-argument
@@ -44,8 +47,8 @@ class MockJSONRPCClient:
 
 
 class MockTokenNetworkProxy:
-    def __init__(self):
-        self.client = MockJSONRPCClient()
+    def __init__(self, client: MockJSONRPCClient):
+        self.client = client
 
     @staticmethod
     def detail_participants(  # pylint: disable=unused-argument
@@ -60,13 +63,11 @@ class MockPaymentChannel:
         self.token_network = token_network
 
 
-class MockChain:
-    def __init__(self, network_id: int, node_address: Address):
-        self.network_id = network_id
+class MockProxyManager:
+    def __init__(self, node_address: Address):
         # let's make a single mock token network for testing
-        self.token_network = MockTokenNetworkProxy()
-        self.node_address = node_address
-        self.client = MockJSONRPCClient()
+        self.client = MockJSONRPCClient(node_address)
+        self.token_network = MockTokenNetworkProxy(client=self.client)
 
     def payment_channel(self, canonical_identifier: CanonicalIdentifier):
         return MockPaymentChannel(self.token_network, canonical_identifier.channel_identifier)
@@ -118,7 +119,8 @@ class MockRaidenService:
             self.privkey = private_key
             self.address = privatekey_to_address(private_key)
 
-        self.chain = MockChain(network_id=17, node_address=self.address)
+        self.rpc_client = MockJSONRPCClient(self.address)
+        self.proxy_manager = MockProxyManager(node_address=self.address)
         self.signer = LocalSigner(self.privkey)
 
         self.message_handler = message_handler
@@ -146,8 +148,8 @@ class MockRaidenService:
             pseudo_random_generator=random.Random(),
             block_number=0,
             block_hash=factories.make_block_hash(),
-            our_address=self.chain.node_address,
-            chain_id=self.chain.network_id,
+            our_address=self.rpc_client.address,
+            chain_id=self.rpc_client.chain_id,
         )
 
         self.wal.log_and_dispatch([state_change])

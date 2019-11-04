@@ -4,10 +4,20 @@ from time import CLOCK_MONOTONIC_RAW, clock_getres, clock_gettime_ns, time_ns
 
 from gevent.lock import Semaphore
 
-from raiden.utils.typing import Any, Generic, Iterable, Iterator, List, Tuple, TypeVar, cast
+from raiden.utils.typing import (
+    Any,
+    Generic,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+    cast,
+)
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True, order=True, repr=False)
 class ULID:
     """An ULID.
 
@@ -22,7 +32,7 @@ class ULID:
     def __post_init__(self) -> None:
         assert len(self.identifier) == 16, "id_ must be 16 bytes long"
 
-    def __str__(self) -> str:
+    def __repr__(self) -> str:
         return f"ULID<{self.identifier.hex()}>"
 
     @property
@@ -49,7 +59,7 @@ class ULIDMonotonicFactory(Generic[ID]):
     because of leap seconds, etc. Therefore a monotonic clock must be used.
     """
 
-    def __init__(self, start: int) -> None:
+    def __init__(self, start: Optional[int]) -> None:
         resolution = clock_getres(CLOCK_MONOTONIC_RAW)
 
         msg = (

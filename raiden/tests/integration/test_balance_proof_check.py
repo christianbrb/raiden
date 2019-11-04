@@ -4,7 +4,6 @@ from eth_utils import encode_hex, to_checksum_address
 from raiden import waiting
 from raiden.api.python import RaidenAPI
 from raiden.constants import EMPTY_BALANCE_HASH, EMPTY_HASH, EMPTY_SIGNATURE
-from raiden.network.proxies.token_network import TokenNetwork
 from raiden.storage.sqlite import RANGE_ALL_STATE_CHANGES
 from raiden.tests.integration.network.proxies import BalanceProof
 from raiden.tests.utils.detect_failure import raise_on_failure
@@ -16,6 +15,7 @@ from raiden.transfer.state_change import ContractReceiveChannelSettled
 from raiden_contracts.constants import MessageTypeId
 
 
+@raise_on_failure
 @pytest.mark.parametrize("deposit", [10])
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 @pytest.mark.parametrize("number_of_nodes", [2])
@@ -32,19 +32,6 @@ def test_node_can_settle_if_close_didnt_use_any_balance_proof(
     - Assert that app0 can settle the closed channel, even though app1 didn't
     use the latest balance proof
     """
-    raise_on_failure(
-        raiden_network,
-        run_test_node_can_settle_if_close_didnt_use_any_balance_proof,
-        raiden_network=raiden_network,
-        number_of_nodes=number_of_nodes,
-        token_addresses=token_addresses,
-        network_wait=network_wait,
-    )
-
-
-def run_test_node_can_settle_if_close_didnt_use_any_balance_proof(
-    raiden_network, number_of_nodes, token_addresses, network_wait
-):
     app0, app1 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
@@ -69,12 +56,7 @@ def run_test_node_can_settle_if_close_didnt_use_any_balance_proof(
     )
     # stop app1 - the test uses token_network_contract now
     app1.stop()
-    token_network_contract = TokenNetwork(
-        jsonrpc_client=app1.raiden.chain.client,
-        token_network_address=token_network_address,
-        contract_manager=app1.raiden.contract_manager,
-        blockchain_service=app1.raiden.chain,
-    )
+    token_network_contract = app1.raiden.proxy_manager.token_network(token_network_address)
     empty_balance_proof = BalanceProof(
         channel_identifier=channel_identifier,
         token_network_address=to_checksum_address(token_network_contract.address),
@@ -115,6 +97,7 @@ def run_test_node_can_settle_if_close_didnt_use_any_balance_proof(
     )
 
 
+@raise_on_failure
 @pytest.mark.parametrize("deposit", [10])
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 @pytest.mark.parametrize("number_of_nodes", [2])
@@ -132,19 +115,6 @@ def test_node_can_settle_if_partner_does_not_call_update_transfer(
     - Assert that app0 can settle the closed channel, even though app1 didn't
     use the latest balance proof
     """
-    raise_on_failure(
-        raiden_network,
-        run_test_node_can_settle_if_partner_does_not_call_update_transfer,
-        raiden_network=raiden_network,
-        number_of_nodes=number_of_nodes,
-        token_addresses=token_addresses,
-        network_wait=network_wait,
-    )
-
-
-def run_test_node_can_settle_if_partner_does_not_call_update_transfer(
-    raiden_network, number_of_nodes, token_addresses, network_wait
-):
     app0, app1 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)

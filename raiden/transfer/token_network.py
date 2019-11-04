@@ -5,7 +5,7 @@ from raiden.transfer.architecture import Event, StateChange, TransitionResult
 from raiden.transfer.state import TokenNetworkState
 from raiden.transfer.state_change import (
     ActionChannelClose,
-    ActionChannelUpdateFee,
+    ActionChannelSetRevealTimeout,
     ActionChannelWithdraw,
     ContractReceiveChannelBatchUnlock,
     ContractReceiveChannelClosed,
@@ -26,8 +26,8 @@ from raiden.utils.typing import MYPY_ANNOTATION, BlockHash, BlockNumber, List, U
 # that contains channel IDs and other specific channel attributes
 StateChangeWithChannelID = Union[
     ActionChannelClose,
-    ActionChannelUpdateFee,
     ActionChannelWithdraw,
+    ActionChannelSetRevealTimeout,
     ContractReceiveChannelClosed,
     ContractReceiveChannelDeposit,
     ContractReceiveChannelSettled,
@@ -96,6 +96,22 @@ def handle_channel_close(
 def handle_channel_withdraw(
     token_network_state: TokenNetworkState,
     state_change: ActionChannelWithdraw,
+    block_number: BlockNumber,
+    block_hash: BlockHash,
+    pseudo_random_generator: random.Random,
+) -> TransitionResult:
+    return subdispatch_to_channel_by_id(
+        token_network_state=token_network_state,
+        state_change=state_change,
+        block_number=block_number,
+        block_hash=block_hash,
+        pseudo_random_generator=pseudo_random_generator,
+    )
+
+
+def handle_channel_set_reveal_timeout(
+    token_network_state: TokenNetworkState,
+    state_change: ActionChannelSetRevealTimeout,
     block_number: BlockNumber,
     block_hash: BlockHash,
     pseudo_random_generator: random.Random,
@@ -364,18 +380,18 @@ def state_transition(
             block_hash=block_hash,
             pseudo_random_generator=pseudo_random_generator,
         )
-    elif type(state_change) == ActionChannelUpdateFee:
-        assert isinstance(state_change, ActionChannelUpdateFee), MYPY_ANNOTATION
-        iteration = subdispatch_to_channel_by_id(
+    if type(state_change) == ActionChannelWithdraw:
+        assert isinstance(state_change, ActionChannelWithdraw), MYPY_ANNOTATION
+        iteration = handle_channel_withdraw(
             token_network_state=token_network_state,
             state_change=state_change,
             block_number=block_number,
             block_hash=block_hash,
             pseudo_random_generator=pseudo_random_generator,
         )
-    if type(state_change) == ActionChannelWithdraw:
-        assert isinstance(state_change, ActionChannelWithdraw), MYPY_ANNOTATION
-        iteration = handle_channel_withdraw(
+    if type(state_change) == ActionChannelSetRevealTimeout:
+        assert isinstance(state_change, ActionChannelSetRevealTimeout), MYPY_ANNOTATION
+        iteration = handle_channel_set_reveal_timeout(
             token_network_state=token_network_state,
             state_change=state_change,
             block_number=block_number,

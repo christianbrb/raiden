@@ -6,13 +6,13 @@ from eth_utils import to_canonical_address, to_checksum_address
 
 from raiden.constants import Environment, RoutingMode
 from raiden.exceptions import AddressWithoutCode, AddressWrongContract, ContractCodeMismatch
-from raiden.network.blockchain_service import BlockChainService
 from raiden.network.pathfinding import PFSConfig, check_pfs_for_production, configure_pfs_or_exit
+from raiden.network.proxies.proxy_manager import ProxyManager
 from raiden.network.proxies.secret_registry import SecretRegistry
 from raiden.network.proxies.service_registry import ServiceRegistry
 from raiden.network.proxies.token_network_registry import TokenNetworkRegistry
 from raiden.network.proxies.user_deposit import UserDeposit
-from raiden.settings import DEVELOPMENT_CONTRACT_VERSION, PRODUCTION_CONTRACT_VERSION
+from raiden.settings import RAIDEN_CONTRACT_VERSION
 from raiden.ui.checks import (
     check_pfs_configuration,
     check_raiden_environment,
@@ -30,15 +30,6 @@ from raiden_contracts.contract_manager import (
     contracts_precompiled_path,
     get_contracts_deployment_info,
 )
-
-
-def environment_type_to_contracts_version(environment_type: Environment) -> str:
-    if environment_type == Environment.DEVELOPMENT:
-        contracts_version = DEVELOPMENT_CONTRACT_VERSION
-    else:
-        contracts_version = PRODUCTION_CONTRACT_VERSION
-
-    return contracts_version
 
 
 def setup_environment(config: Dict[str, Any], environment_type: Environment) -> None:
@@ -64,7 +55,7 @@ def setup_contracts_or_exit(config: Dict[str, Any], network_id: ChainID) -> Dict
     check_raiden_environment(network_id, environment_type)
 
     contracts: Dict[str, Any] = dict()
-    contracts_version = environment_type_to_contracts_version(environment_type)
+    contracts_version = RAIDEN_CONTRACT_VERSION
 
     config["contracts_path"] = contracts_precompiled_path(contracts_version)
 
@@ -114,7 +105,7 @@ def setup_proxies_or_exit(
     secret_registry_contract_address: Address,
     user_deposit_contract_address: Address,
     service_registry_contract_address: Address,
-    blockchain_service: BlockChainService,
+    proxy_manager: ProxyManager,
     contracts: Dict[str, Any],
     routing_mode: RoutingMode,
     pathfinding_service_address: str,
@@ -148,7 +139,7 @@ def setup_proxies_or_exit(
             registered_address = to_canonical_address(
                 contracts[CONTRACT_TOKEN_NETWORK_REGISTRY]["address"]
             )
-        token_network_registry = blockchain_service.token_network_registry(registered_address)
+        token_network_registry = proxy_manager.token_network_registry(registered_address)
     except ContractCodeMismatch as e:
         handle_contract_code_mismatch(e)
     except AddressWithoutCode:
@@ -162,7 +153,7 @@ def setup_proxies_or_exit(
 
     secret_registry = None
     try:
-        secret_registry = blockchain_service.secret_registry(
+        secret_registry = proxy_manager.secret_registry(
             secret_registry_contract_address
             or to_canonical_address(contracts[CONTRACT_SECRET_REGISTRY]["address"])
         )
@@ -187,7 +178,7 @@ def setup_proxies_or_exit(
     )
     if should_use_user_deposit:
         try:
-            user_deposit = blockchain_service.user_deposit(
+            user_deposit = proxy_manager.user_deposit(
                 user_deposit_contract_address
                 or to_canonical_address(contracts[CONTRACT_USER_DEPOSIT]["address"])
             )
@@ -201,7 +192,7 @@ def setup_proxies_or_exit(
     service_registry = None
     if CONTRACT_SERVICE_REGISTRY in contracts or service_registry_contract_address:
         try:
-            service_registry = blockchain_service.service_registry(
+            service_registry = proxy_manager.service_registry(
                 service_registry_contract_address
                 or to_canonical_address(contracts[CONTRACT_SERVICE_REGISTRY]["address"])
             )

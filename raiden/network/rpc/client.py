@@ -8,7 +8,7 @@ import structlog
 from eth_utils import encode_hex, is_checksum_address, to_canonical_address, to_checksum_address
 from gevent.lock import Semaphore
 from hexbytes import HexBytes
-from requests.exceptions import ConnectTimeout, ReadTimeout
+from requests.exceptions import ReadTimeout
 from web3 import Web3
 from web3.contract import ContractFunction
 from web3.eth import Eth
@@ -23,11 +23,10 @@ from raiden.blockchain.filters import StatelessFilter
 from raiden.exceptions import (
     AddressWithoutCode,
     ContractCodeMismatch,
-    EthNodeCommunicationError,
     EthNodeInterfaceError,
     InsufficientFunds,
 )
-from raiden.network.rpc.middleware import block_hash_cache_middleware, connection_test_middleware
+from raiden.network.rpc.middleware import block_hash_cache_middleware
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
 from raiden.utils import privatekey_to_address
 from raiden.utils.ethereum_clients import is_supported_client
@@ -42,6 +41,7 @@ from raiden.utils.typing import (
     PrivateKey,
     TransactionHash,
 )
+from raiden_contracts.utils.type_aliases import ChainID
 
 log = structlog.get_logger(__name__)
 
@@ -61,7 +61,7 @@ def geth_assert_rpc_interfaces(web3: Web3):
     except ValueError:
         raise EthNodeInterfaceError(
             "The underlying geth node does not have the web3 rpc interface "
-            "enabled. Please run it with --rpcapi eth,net,web3,txpool"
+            "enabled. Please run it with --rpcapi eth,net,web3"
         )
 
     try:
@@ -69,7 +69,7 @@ def geth_assert_rpc_interfaces(web3: Web3):
     except ValueError:
         raise EthNodeInterfaceError(
             "The underlying geth node does not have the eth rpc interface "
-            "enabled. Please run it with --rpcapi eth,net,web3,txpool"
+            "enabled. Please run it with --rpcapi eth,net,web3"
         )
 
     try:
@@ -77,15 +77,7 @@ def geth_assert_rpc_interfaces(web3: Web3):
     except ValueError:
         raise EthNodeInterfaceError(
             "The underlying geth node does not have the net rpc interface "
-            "enabled. Please run it with --rpcapi eth,net,web3,txpool"
-        )
-
-    try:
-        web3.txpool.inspect
-    except ValueError:
-        raise EthNodeInterfaceError(
-            "The underlying geth node does not have the txpool rpc interface "
-            "enabled. Please run it with --rpcapi eth,net,web3,txpool"
+            "enabled. Please run it with --rpcapi eth,net,web3"
         )
 
 
@@ -134,33 +126,7 @@ def parity_discover_next_available_nonce(web3: Web3, address: AddressHex) -> Non
 
 def geth_discover_next_available_nonce(web3: Web3, address: AddressHex) -> Nonce:
     """Returns the next available nonce for `address`."""
-
-    # The nonces of the mempool transactions are considered used, and it's
-    # assumed these transactions are different from the ones currently pending
-    # in the client. This is a simplification, otherwise it would be necessary
-    # to filter the local pending transactions based on the mempool.
-    pool = web3.txpool.inspect or {}
-
-    # pool is roughly:
-    #
-    # {'queued': {'account1': {nonce1: ... nonce2: ...}, 'account2': ...}, 'pending': ...}
-    #
-    # Pending refers to the current block and if it contains transactions from
-    # the user, these will be the younger transactions. Because this needs the
-    # largest nonce, queued is checked first.
-
-    address = to_checksum_address(address)
-    queued = pool.get("queued", {}).get(address)
-    if queued:
-        return Nonce(max(int(k) for k in queued.keys()) + 1)
-
-    pending = pool.get("pending", {}).get(address)
-    if pending:
-        return Nonce(max(int(k) for k in pending.keys()) + 1)
-
-    # The first valid nonce is 0, therefore the count is already the next
-    # available nonce
-    return web3.eth.getTransactionCount(address, "latest")
+    return web3.eth.getTransactionCount(address, "pending")
 
 
 def check_address_has_code(
@@ -352,10 +318,6 @@ def monkey_patch_web3(web3, gas_price_strategy):
         # scoped web3 instance is used for all clients
         pass
 
-    # create the connection test middleware (but only for non-tester chain)
-    if not hasattr(web3, "testing"):
-        web3.middleware_stack.inject(connection_test_middleware, layer=0)
-
     # Temporary until next web3.py release (5.X.X)
     ContractFunction.estimateGas = patched_contractfunction_estimateGas
     Eth.estimateGas = patched_web3_eth_estimate_gas
@@ -393,11 +355,7 @@ class JSONRPCClient:
 
         monkey_patch_web3(web3, gas_price_strategy)
 
-        try:
-            version = web3.version.node
-        except ConnectTimeout:
-            raise EthNodeCommunicationError("couldnt reach the ethereum node")
-
+        version = web3.version.node
         supported, eth_node, _ = is_supported_client(version)
 
         if not supported:
@@ -433,6 +391,9 @@ class JSONRPCClient:
         self.address = address
         self.web3 = web3
         self.default_block_num_confirmations = block_num_confirmations
+
+        # Ask for the chain id only once and store it here
+        self.chain_id = ChainID(int(self.web3.version.network))
 
         self._available_nonce = available_nonce
         self._nonce_lock = Semaphore()
@@ -640,7 +601,18 @@ class JSONRPCClient:
             return TransactionHash(tx_hash)
 
     def poll(self, transaction_hash: TransactionHash) -> Dict[str, Any]:
-        """ Wait until the `transaction_hash` is mined.
+        """ Wait until the `transaction_hash` is mined, confirmed, handling
+        reorgs.
+
+        Consider the following reorg, were a transaction is mined at block B,
+        but it is not mined in the canonical chain A-C-D:
+
+             A -> B   D
+             *--> C --^
+
+        When the Ethereum node looks at block B, from its perspective the
+        transaction is mined and it has a receipt. After the reorg it does not
+        have a receipt. This can happen on PoW and PoA based chains.
 
         Args:
             transaction_hash: Transaction hash that we are waiting for.
@@ -651,20 +623,39 @@ class JSONRPCClient:
         transaction_hash_hex = encode_hex(transaction_hash)
 
         while True:
-            # Returns `None` while the transaction isn't yet mined. A
-            # transaction is not guaranteed to be mined until the confirmation
-            # block is reached, because of this it is possible for the receipt
-            # to be set on one interation and for it to disappear on another
-            # (assuming a properly chosen confirmation_block number).
             tx_receipt = self.web3.eth.getTransactionReceipt(transaction_hash_hex)
 
-            if tx_receipt:
+            # Parity (as of 2.5.7) always returns a receipt. When the
+            # transaction is not mined in the canonical chain, the receipt will
+            # not have meaningful values. Example of receipt for a transaction
+            # that is not mined:
+            #
+            #   blockHash: None
+            #   blockNumber: None
+            #   contractAddress: None
+            #   cumulativeGasUsed: The transaction's gas
+            #   from: None
+            #   gasUsed: The transaction's gas
+            #   logs: []
+            #   logsBloom: Zero is hex
+            #   root: None
+            #   status: 1
+            #   to: None
+            #   transactionHash: The transaction's hash
+            #   transactionIndex: 0
+            #
+            # Geth only returns a receipt if the transaction was mined on the
+            # canonical chain. https://github.com/raiden-network/raiden/issues/4529
+            is_transaction_mined = tx_receipt and tx_receipt.get("blockNumber") is not None
+
+            if is_transaction_mined:
                 confirmation_block = (
                     tx_receipt["blockNumber"] + self.default_block_num_confirmations
                 )
                 block_number = self.block_number()
 
-                if block_number >= confirmation_block:
+                is_transaction_confirmed = block_number >= confirmation_block
+                if is_transaction_confirmed:
                     return tx_receipt
 
             gevent.sleep(1.0)
@@ -745,3 +736,18 @@ class JSONRPCClient:
         if self.eth_node is constants.EthClient.PARITY:
             checking_block = "latest"
         return checking_block
+
+    def is_synced(self) -> bool:
+        result = self.web3.eth.syncing
+
+        # the node is synchronized
+        if result is False:
+            return True
+
+        current_block = self.block_number()
+        highest_block = result["highestBlock"]
+
+        if highest_block - current_block > 2:
+            return False
+
+        return True

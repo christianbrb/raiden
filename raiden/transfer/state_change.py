@@ -3,16 +3,17 @@ from dataclasses import dataclass, field
 from random import Random
 
 from raiden.constants import EMPTY_SECRETHASH
+from raiden.settings import MediationFeeConfig
 from raiden.transfer.architecture import (
     AuthenticatedSenderStateChange,
     ContractReceiveStateChange,
     StateChange,
 )
 from raiden.transfer.identifiers import CanonicalIdentifier
-from raiden.transfer.mediated_transfer.mediation_fee import FeeScheduleState
 from raiden.transfer.state import (
     BalanceProofSignedState,
     NettingChannelState,
+    NetworkState,
     TokenNetworkRegistryState,
     TokenNetworkState,
     TransactionChannelDeposit,
@@ -24,6 +25,7 @@ from raiden.utils.typing import (
     BlockGasLimit,
     BlockHash,
     BlockNumber,
+    BlockTimeout,
     ChainID,
     ChannelID,
     Locksroot,
@@ -126,16 +128,6 @@ class ActionChannelWithdraw(StateChange):
 
 
 @dataclass(frozen=True)
-class ActionChannelUpdateFee(StateChange):
-    canonical_identifier: CanonicalIdentifier
-    fee_schedule: FeeScheduleState
-
-    @property
-    def channel_identifier(self) -> ChannelID:
-        return self.canonical_identifier.channel_identifier
-
-
-@dataclass(frozen=True)
 class ContractReceiveChannelNew(ContractReceiveStateChange):
     """ A new channel was created and this node IS a participant. """
 
@@ -199,6 +191,7 @@ class ContractReceiveChannelDeposit(ContractReceiveStateChange):
 
     canonical_identifier: CanonicalIdentifier
     deposit_transaction: TransactionChannelDeposit
+    fee_config: MediationFeeConfig
 
     @property
     def channel_identifier(self) -> ChannelID:
@@ -216,6 +209,7 @@ class ContractReceiveChannelWithdraw(ContractReceiveStateChange):
     canonical_identifier: CanonicalIdentifier
     participant: Address
     total_withdraw: WithdrawAmount
+    fee_config: MediationFeeConfig
 
     @property
     def channel_identifier(self) -> ChannelID:
@@ -248,10 +242,26 @@ class ActionChangeNodeNetworkState(StateChange):
     """ The network state of `node_address` changed. """
 
     node_address: Address
-    network_state: str
+    network_state: NetworkState
 
     def __post_init__(self) -> None:
         typecheck(self.node_address, T_Address)
+
+
+@dataclass(frozen=True)
+class ActionChannelSetRevealTimeout(StateChange):
+    """ Change the reveal timeout value of a given channel. """
+
+    canonical_identifier: CanonicalIdentifier
+    reveal_timeout: BlockTimeout
+
+    @property
+    def channel_identifier(self) -> ChannelID:
+        return self.canonical_identifier.channel_identifier
+
+    @property
+    def token_network_address(self) -> TokenNetworkAddress:
+        return self.canonical_identifier.token_network_address
 
 
 @dataclass(frozen=True)
@@ -448,7 +458,6 @@ class ReceiveWithdrawExpired(AuthenticatedSenderStateChange):
     total_withdraw: WithdrawAmount
     expiration: BlockExpiration
     nonce: Nonce
-    signature: Signature
     participant: Address
 
     @property

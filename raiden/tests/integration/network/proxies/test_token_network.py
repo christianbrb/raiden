@@ -7,6 +7,7 @@ from raiden.constants import (
     EMPTY_BALANCE_HASH,
     EMPTY_HASH,
     EMPTY_SIGNATURE,
+    GENESIS_BLOCK_NUMBER,
     LOCKSROOT_OF_NO_LOCKS,
     STATE_PRUNING_AFTER_BLOCKS,
 )
@@ -18,10 +19,10 @@ from raiden.exceptions import (
     RaidenUnrecoverableError,
     SamePeerAddress,
 )
-from raiden.network.blockchain_service import BlockChainService
-from raiden.network.proxies.token_network import TokenNetwork
+from raiden.network.proxies.proxy_manager import ProxyManager, ProxyManagerMetadata
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.tests.integration.network.proxies import BalanceProof
+from raiden.tests.utils.factories import make_address
 from raiden.utils.signer import LocalSigner
 from raiden.utils.typing import T_ChannelID
 from raiden_contracts.constants import (
@@ -44,16 +45,16 @@ def test_token_network_deposit_race(
     c1_client = JSONRPCClient(web3, private_keys[1])
     c2_client = JSONRPCClient(web3, private_keys[2])
 
-    blockchain_service = BlockChainService(
-        jsonrpc_client=c1_client, contract_manager=contract_manager
+    proxy_manager = ProxyManager(
+        rpc_client=c1_client,
+        contract_manager=contract_manager,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
     )
 
-    c1_token_network_proxy = TokenNetwork(
-        jsonrpc_client=c1_client,
-        token_network_address=token_network_address,
-        contract_manager=contract_manager,
-        blockchain_service=blockchain_service,
-    )
+    c1_token_network_proxy = proxy_manager.token_network(token_network_address)
     token_proxy.transfer(c1_client.address, 10)
     channel_identifier = c1_token_network_proxy.new_netting_channel(
         partner=c2_client.address,
@@ -87,22 +88,26 @@ def test_token_network_proxy(
 
     c1_signer = LocalSigner(private_keys[1])
     c1_client = JSONRPCClient(web3, private_keys[1])
-    c1_chain = BlockChainService(jsonrpc_client=c1_client, contract_manager=contract_manager)
+    c1_proxy_manager = ProxyManager(
+        rpc_client=c1_client,
+        contract_manager=contract_manager,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
+    )
     c2_client = JSONRPCClient(web3, private_keys[2])
-    c2_chain = BlockChainService(jsonrpc_client=c2_client, contract_manager=contract_manager)
+    c2_proxy_manager = ProxyManager(
+        rpc_client=c2_client,
+        contract_manager=contract_manager,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
+    )
     c2_signer = LocalSigner(private_keys[2])
-    c1_token_network_proxy = TokenNetwork(
-        jsonrpc_client=c1_client,
-        token_network_address=token_network_address,
-        contract_manager=contract_manager,
-        blockchain_service=c1_chain,
-    )
-    c2_token_network_proxy = TokenNetwork(
-        jsonrpc_client=c2_client,
-        token_network_address=token_network_address,
-        contract_manager=contract_manager,
-        blockchain_service=c2_chain,
-    )
+    c1_token_network_proxy = c1_proxy_manager.token_network(token_network_address)
+    c2_token_network_proxy = c2_proxy_manager.token_network(token_network_address)
 
     initial_token_balance = 100
     token_proxy.transfer(c1_client.address, initial_token_balance)
@@ -165,6 +170,13 @@ def test_token_network_proxy(
         )
         pytest.fail(msg)
 
+    # Using exactly the minimal timeout must succeed
+    c1_token_network_proxy.new_netting_channel(
+        partner=make_address(),
+        settle_timeout=TEST_SETTLE_TIMEOUT_MIN,
+        given_block_identifier="latest",
+    )
+
     msg = (
         "Opening a channel with a settle_timeout larger then token "
         "network's maximum will fail. This must be validated and the "
@@ -177,6 +189,13 @@ def test_token_network_proxy(
             given_block_identifier="latest",
         )
         pytest.fail(msg)
+
+    # Using exactly the maximal timeout must succeed
+    c1_token_network_proxy.new_netting_channel(
+        partner=make_address(),
+        settle_timeout=TEST_SETTLE_TIMEOUT_MAX,
+        given_block_identifier="latest",
+    )
 
     msg = (
         "Opening a channel with itself is not allow. This must be validated and "
@@ -194,14 +213,14 @@ def test_token_network_proxy(
     with pytest.raises(BrokenPreconditionError):
         c1_token_network_proxy.set_total_deposit(
             given_block_identifier="latest",
-            channel_identifier=1,
+            channel_identifier=100,
             total_deposit=1,
             partner=c2_client.address,
         )
         pytest.fail(msg)
 
     empty_balance_proof = BalanceProof(
-        channel_identifier=1,
+        channel_identifier=100,
         token_network_address=c1_token_network_proxy.address,
         balance_hash=encode_hex(EMPTY_BALANCE_HASH),
         nonce=0,
@@ -216,7 +235,7 @@ def test_token_network_proxy(
     match = "The channel was not open at the provided block"
     with pytest.raises(RaidenUnrecoverableError, match=match):
         c1_token_network_proxy.close(
-            channel_identifier=1,
+            channel_identifier=100,
             partner=c2_client.address,
             balance_hash=EMPTY_HASH,
             nonce=0,
@@ -409,7 +428,7 @@ def test_token_network_proxy(
         pytest.fail(msg)
 
     msg = "depositing to a closed channel must fail"
-    match = "Channel is already closed"
+    match = "closed"
     with pytest.raises(RaidenRecoverableError, match=match):
         c2_token_network_proxy.set_total_deposit(
             given_block_identifier=blocknumber_prior_to_close,
@@ -419,8 +438,8 @@ def test_token_network_proxy(
         )
         pytest.fail(msg)
 
-    c1_chain.wait_until_block(
-        target_block_number=c1_chain.block_number() + TEST_SETTLE_TIMEOUT_MIN
+    c1_proxy_manager.wait_until_block(
+        target_block_number=c1_proxy_manager.client.block_number() + TEST_SETTLE_TIMEOUT_MIN
     )
 
     invalid_transferred_amount = 1
@@ -462,8 +481,7 @@ def test_token_network_proxy(
     assert token_proxy.balance_of(c2_client.address) == (initial_balance_c2 + transferred_amount)
 
     msg = "depositing to a settled channel must fail"
-    match = "The channel was not opened"
-    with pytest.raises(BrokenPreconditionError, match=match):
+    with pytest.raises(BrokenPreconditionError):
         c1_token_network_proxy.set_total_deposit(
             given_block_identifier="latest",
             channel_identifier=channel_identifier,
@@ -480,22 +498,26 @@ def test_token_network_proxy_update_transfer(
     token_network_address = to_canonical_address(token_network_proxy.proxy.contract.address)
 
     c1_client = JSONRPCClient(web3, private_keys[1])
-    c1_chain = BlockChainService(jsonrpc_client=c1_client, contract_manager=contract_manager)
+    c1_proxy_manager = ProxyManager(
+        rpc_client=c1_client,
+        contract_manager=contract_manager,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
+    )
     c1_signer = LocalSigner(private_keys[1])
     c2_client = JSONRPCClient(web3, private_keys[2])
-    c2_chain = BlockChainService(jsonrpc_client=c2_client, contract_manager=contract_manager)
-    c1_token_network_proxy = TokenNetwork(
-        jsonrpc_client=c1_client,
-        token_network_address=token_network_address,
+    c2_proxy_manager = ProxyManager(
+        rpc_client=c2_client,
         contract_manager=contract_manager,
-        blockchain_service=c1_chain,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
     )
-    c2_token_network_proxy = TokenNetwork(
-        jsonrpc_client=c2_client,
-        token_network_address=token_network_address,
-        contract_manager=contract_manager,
-        blockchain_service=c2_chain,
-    )
+    c1_token_network_proxy = c1_proxy_manager.token_network(token_network_address)
+    c2_token_network_proxy = c2_proxy_manager.token_network(token_network_address)
     # create a channel
     channel_identifier = c1_token_network_proxy.new_netting_channel(
         partner=c2_client.address, settle_timeout=10, given_block_identifier="latest"
@@ -639,7 +661,9 @@ def test_token_network_proxy_update_transfer(
 
         assert "cannot be settled before settlement window is over" in str(exc)
 
-    c1_chain.wait_until_block(target_block_number=c1_chain.block_number() + 10)
+    c1_proxy_manager.wait_until_block(
+        target_block_number=c1_proxy_manager.client.block_number() + 10
+    )
 
     # settling with an invalid amount
     with pytest.raises(BrokenPreconditionError):
@@ -694,14 +718,16 @@ def test_query_pruned_state(token_network_proxy, private_keys, web3, contract_ma
 
     token_network_address = to_canonical_address(token_network_proxy.proxy.contract.address)
     c1_client = JSONRPCClient(web3, private_keys[1])
-    c1_chain = BlockChainService(jsonrpc_client=c1_client, contract_manager=contract_manager)
-    c2_client = JSONRPCClient(web3, private_keys[2])
-    c1_token_network_proxy = TokenNetwork(
-        jsonrpc_client=c1_client,
-        token_network_address=token_network_address,
+    c1_proxy_manager = ProxyManager(
+        rpc_client=c1_client,
         contract_manager=contract_manager,
-        blockchain_service=c1_chain,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
     )
+    c2_client = JSONRPCClient(web3, private_keys[2])
+    c1_token_network_proxy = c1_proxy_manager.token_network(token_network_address)
     # create a channel and query the state at the current block hash
     channel_identifier = c1_token_network_proxy.new_netting_channel(
         partner=c2_client.address, settle_timeout=10, given_block_identifier="latest"
@@ -717,7 +743,7 @@ def test_query_pruned_state(token_network_proxy, private_keys, web3, contract_ma
 
     # wait until state pruning kicks in
     target_block = block_number + STATE_PRUNING_AFTER_BLOCKS + 1
-    c1_chain.wait_until_block(target_block_number=target_block)
+    c1_proxy_manager.wait_until_block(target_block_number=target_block)
 
     # and now query again for the old block identifier and see we can't query
     assert not c1_client.can_query_state_for_block(block_hash)
@@ -729,23 +755,27 @@ def test_token_network_actions_at_pruned_blocks(
     token_network_address = to_canonical_address(token_network_proxy.proxy.contract.address)
     c1_client = JSONRPCClient(web3, private_keys[1])
 
-    c1_chain = BlockChainService(jsonrpc_client=c1_client, contract_manager=contract_manager)
-    c1_token_network_proxy = TokenNetwork(
-        jsonrpc_client=c1_client,
-        token_network_address=token_network_address,
+    c1_proxy_manager = ProxyManager(
+        rpc_client=c1_client,
         contract_manager=contract_manager,
-        blockchain_service=c1_chain,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
     )
+    c1_token_network_proxy = c1_proxy_manager.token_network(token_network_address)
 
     c2_client = JSONRPCClient(web3, private_keys[2])
-    c2_chain = BlockChainService(jsonrpc_client=c2_client, contract_manager=contract_manager)
-
-    c2_token_network_proxy = TokenNetwork(
-        jsonrpc_client=c2_client,
-        token_network_address=token_network_address,
+    c2_proxy_manager = ProxyManager(
+        rpc_client=c2_client,
         contract_manager=contract_manager,
-        blockchain_service=c2_chain,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
     )
+
+    c2_token_network_proxy = c2_proxy_manager.token_network(token_network_address)
     initial_token_balance = 100
     token_proxy.transfer(c1_client.address, initial_token_balance)
     token_proxy.transfer(c2_client.address, initial_token_balance)
@@ -760,8 +790,10 @@ def test_token_network_actions_at_pruned_blocks(
     )
 
     # Now wait until this block becomes pruned
-    pruned_number = c1_chain.block_number()
-    c1_chain.wait_until_block(target_block_number=pruned_number + STATE_PRUNING_AFTER_BLOCKS)
+    pruned_number = c1_proxy_manager.client.block_number()
+    c1_proxy_manager.wait_until_block(
+        target_block_number=pruned_number + STATE_PRUNING_AFTER_BLOCKS
+    )
 
     # deposit with given block being pruned
     c1_token_network_proxy.set_total_deposit(
@@ -810,7 +842,7 @@ def test_token_network_actions_at_pruned_blocks(
         closing_signature=LocalSigner(c1_client.privkey).sign(data=closing_data),
         given_block_identifier=pruned_number,
     )
-    close_pruned_number = c1_chain.block_number()
+    close_pruned_number = c1_proxy_manager.client.block_number()
 
     assert (
         c1_token_network_proxy.channel_is_closed(
@@ -830,7 +862,9 @@ def test_token_network_actions_at_pruned_blocks(
         is not None
     )
 
-    c1_chain.wait_until_block(target_block_number=close_pruned_number + STATE_PRUNING_AFTER_BLOCKS)
+    c1_proxy_manager.wait_until_block(
+        target_block_number=close_pruned_number + STATE_PRUNING_AFTER_BLOCKS
+    )
 
     # update transfer with given block being pruned
     c2_token_network_proxy.update_transfer(
@@ -845,7 +879,7 @@ def test_token_network_actions_at_pruned_blocks(
     )
 
     # update transfer
-    c1_chain.wait_until_block(target_block_number=close_pruned_number + settle_timeout)
+    c1_proxy_manager.wait_until_block(target_block_number=close_pruned_number + settle_timeout)
 
     # Test that settling will fail because at closed_pruned_number
     # the settlement period isn't over.
@@ -865,7 +899,7 @@ def test_token_network_actions_at_pruned_blocks(
     settle_block_number = close_pruned_number + settle_timeout
 
     # Wait until the settle block is pruned
-    c1_chain.wait_until_block(
+    c1_proxy_manager.wait_until_block(
         target_block_number=settle_block_number + STATE_PRUNING_AFTER_BLOCKS + 1
     )
 

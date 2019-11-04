@@ -7,7 +7,7 @@ from raiden.transfer.architecture import State
 from raiden.utils.typing import (
     Balance,
     FeeAmount,
-    PaymentAmount,
+    PaymentWithFeeAmount,
     ProportionalFeeAmount,
     TokenAmount,
 )
@@ -58,17 +58,43 @@ class FeeScheduleState(State):
             x_list, y_list = tuple(zip(*self.imbalance_penalty))
             self._penalty_func = Interpolate(x_list, y_list)
 
-    def fee(self, amount: PaymentAmount, channel_balance: Balance) -> FeeAmount:
+    def imbalance_fee(self, amount: PaymentWithFeeAmount, balance: Balance) -> FeeAmount:
         if self._penalty_func:
             # Total channel balance - node balance = balance (used as x-axis for the penalty)
-            balance = self._penalty_func.x_list[-1] - channel_balance
+            balance = self._penalty_func.x_list[-1] - balance
             try:
-                imbalance_fee = self._penalty_func(balance + amount) - self._penalty_func(balance)
+                return FeeAmount(
+                    round(self._penalty_func(balance + amount) - self._penalty_func(balance))
+                )
             except ValueError:
                 raise UndefinedMediationFee()
-        else:
-            imbalance_fee = 0
-        return FeeAmount(round(self.flat + amount * self.proportional / 1e6 + imbalance_fee))
+
+        return FeeAmount(0)
+
+    def fee_payer(self, amount: PaymentWithFeeAmount, balance: Balance) -> FeeAmount:
+        imbalance_fee = self.imbalance_fee(amount=PaymentWithFeeAmount(-amount), balance=balance)
+
+        flat_fee = self.flat
+        prop_fee = int(round(amount * self.proportional / 1e6))
+        return FeeAmount(flat_fee + prop_fee + imbalance_fee)
+
+    def fee_payee(
+        self, amount: PaymentWithFeeAmount, balance: Balance, iterations: int = 2
+    ) -> FeeAmount:
+        def fee_out(imbalance_fee: FeeAmount) -> FeeAmount:
+            return FeeAmount(
+                round(
+                    amount - ((amount - self.flat - imbalance_fee) / (1 + self.proportional / 1e6))
+                )
+            )
+
+        imbalance_fee = FeeAmount(0)
+        for _ in range(iterations):
+            imbalance_fee = self.imbalance_fee(
+                amount=PaymentWithFeeAmount(amount - fee_out(imbalance_fee)), balance=balance
+            )
+
+        return fee_out(imbalance_fee)
 
     def reversed(self: T) -> T:
         if not self.imbalance_penalty:
@@ -101,10 +127,10 @@ def linspace(start: TokenAmount, stop: TokenAmount, num: int) -> List[TokenAmoun
 def calculate_imbalance_fees(
     channel_capacity: TokenAmount, proportional_imbalance_fee: ProportionalFeeAmount
 ) -> Optional[List[Tuple[TokenAmount, FeeAmount]]]:
-    """ Calculates a quadratic rebalancing curve.
+    """ Calculates a U-shaped imbalance curve
 
     The penalty term takes the following value at the extrema:
-        channel_capacity * (proportional_imbalance_fee / 1_000_000)
+    channel_capacity * (proportional_imbalance_fee / 1_000_000)
     """
     assert channel_capacity >= 0
     assert proportional_imbalance_fee >= 0
@@ -115,16 +141,23 @@ def calculate_imbalance_fees(
     if channel_capacity == 0:
         return None
 
-    # calculate the maximum imbalance fee for the channel
-    max_imbalance_fee = round(channel_capacity * proportional_imbalance_fee / int(1e6))
+    MAXIMUM_SLOPE = 0.1
+    max_imbalance_fee = channel_capacity * proportional_imbalance_fee / 1e6
 
-    def f(balance: TokenAmount) -> FeeAmount:
-        constant = max_imbalance_fee / (channel_capacity / 2) ** 2
-        inner = balance - (channel_capacity / 2)
+    assert proportional_imbalance_fee / 1e6 <= MAXIMUM_SLOPE / 2, "Too high imbalance fee"
 
-        return FeeAmount(int(round(constant * inner ** 2)))
+    # calculate function parameters
+    s = MAXIMUM_SLOPE
+    c = max_imbalance_fee
+    o = channel_capacity / 2
+    b = s * o / c
+    b = min(b, 10)  # limit exponent to keep numerical stability
+    a = c / o ** b
 
-    # Do not duplicate base points when not enough token are available
+    def f(x: TokenAmount) -> FeeAmount:
+        return FeeAmount(int(round(a * abs(x - o) ** b)))
+
+    # calculate discrete function points
     num_base_points = min(NUM_DISCRETISATION_POINTS, channel_capacity + 1)
     x_values = linspace(TokenAmount(0), channel_capacity, num_base_points)
     y_values = [f(x) for x in x_values]

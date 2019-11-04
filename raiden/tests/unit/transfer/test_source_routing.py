@@ -6,6 +6,7 @@ from raiden.routing import resolve_routes
 from raiden.storage.serialization import DictSerializer
 from raiden.tests.utils import factories
 from raiden.tests.utils.events import search_for_item
+from raiden.tests.utils.factories import UNIT_TRANSFER_AMOUNT
 from raiden.transfer import views
 from raiden.transfer.architecture import TransitionResult
 from raiden.transfer.events import EventPaymentSentFailed
@@ -16,9 +17,10 @@ from raiden.transfer.mediated_transfer.state_change import (
     ReceiveTransferCancelRoute,
     ReceiveTransferRefund,
 )
-from raiden.transfer.node import handle_init_initiator, state_transition
+from raiden.transfer.node import handle_action_init_initiator, state_transition
+from raiden.transfer.state import NetworkState
 from raiden.utils.signer import LocalSigner, recover
-from raiden.utils.typing import BlockNumber, TokenAmount
+from raiden.utils.typing import BlockNumber, FeeAmount, TokenAmount
 
 PARTNER_PRIVKEY, PARTNER_ADDRESS = factories.make_privkey_address()
 PRIVKEY, ADDRESS = factories.make_privkey_address()
@@ -163,18 +165,16 @@ def test_initiator_accounts_for_fees_when_selecting_routes():
     """
 
     def make_mediated_transfer_state_change(
-        transfer_amount: int, allocated_fee_amount: int, channel_capacity: TokenAmount
+        transfer_amount: int, allocated_fee_amount: FeeAmount, channel_capacity: TokenAmount
     ) -> TransitionResult:
-        transfer = factories.replace(
-            factories.UNIT_TRANSFER_DESCRIPTION,
-            amount=transfer_amount,
-            allocated_fee=allocated_fee_amount,
-        )
+        transfer = factories.replace(factories.UNIT_TRANSFER_DESCRIPTION, amount=transfer_amount)
         channel_set = factories.make_channel_set_from_amounts([channel_capacity])
         mediating_channel = channel_set.channels[0]
         pnrg = random.Random()
 
-        nodeaddresses_to_networkstates = {mediating_channel.partner_state.address: "reachable"}
+        nodeaddresses_to_networkstates = {
+            mediating_channel.partner_state.address: NetworkState.REACHABLE
+        }
 
         channelidentifiers_to_channels = {mediating_channel.identifier: mediating_channel}
 
@@ -187,7 +187,10 @@ def test_initiator_accounts_for_fees_when_selecting_routes():
         ]
 
         init_action = factories.initiator_make_init_action(
-            channels=channel_set, routes=routes, transfer=transfer
+            channels=channel_set,
+            routes=routes,
+            transfer=transfer,
+            estimated_fee=allocated_fee_amount,
         )
         return initiator_manager.handle_init(
             payment_state=None,
@@ -256,9 +259,9 @@ def test_initiator_skips_used_routes():
         )
     )
     init_action = factories.initiator_make_init_action(
-        channels=channels, routes=routes, transfer=transfer
+        channels=channels, routes=routes, transfer=transfer, estimated_fee=FeeAmount(0)
     )
-    transition_result = handle_init_initiator(
+    transition_result = handle_action_init_initiator(
         chain_state=test_chain_state.chain_state, state_change=init_action
     )
 
@@ -324,7 +327,7 @@ def test_mediator_skips_used_routes():
     block_number = 3
     defaults = factories.NettingChannelStateProperties(
         our_state=factories.NettingChannelEndStateProperties.OUR_STATE,
-        partner_state=factories.NettingChannelEndStateProperties(balance=10),
+        partner_state=factories.NettingChannelEndStateProperties(balance=UNIT_TRANSFER_AMOUNT),
         open_transaction=factories.TransactionExecutionStatusProperties(
             started_block_number=1, finished_block_number=2, result="success"
         ),
@@ -368,7 +371,7 @@ def test_mediator_skips_used_routes():
     )
     init_action = factories.mediator_make_init_action(channels=channels, transfer=locked_transfer)
     nodeaddresses_to_networkstates = {
-        channel.partner_state.address: "reachable" for channel in channels.channels
+        channel.partner_state.address: NetworkState.REACHABLE for channel in channels.channels
     }
 
     transition_result = mediator.handle_init(

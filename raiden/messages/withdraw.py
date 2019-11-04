@@ -130,6 +130,10 @@ class WithdrawExpired(SignedRetrieableMessage):
 
     def _data_to_sign(self) -> bytes:
         return pack_data(
+            (self.cmdid.value, "uint8"),
+            (b"\x00" * 3, "bytes"),  # padding
+            (self.nonce, "uint256"),
+            (self.message_identifier, "uint64"),
             (self.token_network_address, "address"),
             (self.chain_id, "uint256"),
             (self.message_type, "uint256"),

@@ -15,6 +15,7 @@ from raiden.utils.secrethash import sha256_secrethash
 from raiden.utils.typing import (
     Address,
     BlockExpiration,
+    BlockTimeout,
     ChannelID,
     InitiatorAddress,
     List,
@@ -300,5 +301,32 @@ class EventInvalidActionWithdraw(Event):
 
 
 @dataclass(frozen=True)
+class EventInvalidActionSetRevealTimeout(Event):
+    """ Event emitted when an invalid withdraw is initiated. """
+
+    reveal_timeout: BlockTimeout
+    reason: str
+
+
+@dataclass(frozen=True)
 class SendProcessed(SendMessageEvent):
     pass
+
+
+@dataclass(frozen=True)
+class EventInvalidSecretRequest(Event):
+    """ Event emitted when an invalid SecretRequest is received. """
+
+    payment_identifier: PaymentID
+    intended_amount: PaymentAmount
+    actual_amount: PaymentAmount
+
+
+@dataclass(frozen=True)
+class SendPFSFeeUpdate(Event):
+    """ Tell the PFSs about changed fee schedules
+
+    For example when a deposit or a withdrawal is made into a channel
+    """
+
+    canonical_identifier: CanonicalIdentifier

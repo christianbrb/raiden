@@ -38,6 +38,7 @@ from raiden.utils.typing import (
     ChannelID,
     Dict,
     EncodedData,
+    FeeAmount,
     List,
     Locksroot,
     MessageID,
@@ -84,9 +85,11 @@ CHANNEL_AFTER_CLOSE_STATES = (
     ChannelState.STATE_SETTLED,
 )
 
-NODE_NETWORK_UNKNOWN = "unknown"
-NODE_NETWORK_UNREACHABLE = "unreachable"
-NODE_NETWORK_REACHABLE = "reachable"
+
+class NetworkState(Enum):
+    UNKNOWN = "unknown"
+    UNREACHABLE = "unreachable"
+    REACHABLE = "reachable"
 
 
 def message_identifier_from_prng(prng: Random) -> MessageID:
@@ -162,6 +165,7 @@ class RouteState(State):
     # TODO: Add timestamp
     route: List[Address]
     forward_channel_id: ChannelID
+    estimated_fee: FeeAmount = FeeAmount(0)
 
     @property
     def next_hop_address(self) -> Address:
@@ -169,8 +173,10 @@ class RouteState(State):
         return self.route[1]
 
     def __repr__(self) -> str:
-        return "RouteState ({}), channel_id: {}".format(
-            " -> ".join(to_checksum_address(addr) for addr in self.route), self.forward_channel_id
+        return "RouteState ({}), channel_id: {}, fee: {}".format(
+            " -> ".join(to_checksum_address(addr) for addr in self.route),
+            self.forward_channel_id,
+            self.estimated_fee,
         )
 
 
@@ -366,9 +372,6 @@ class NettingChannelState(State):
         typecheck(self.open_transaction, TransactionExecutionStatus)
         typecheck(self.canonical_identifier.channel_identifier, T_ChannelID)
 
-        if self.reveal_timeout >= self.settle_timeout:
-            raise ValueError("reveal_timeout must be smaller than settle_timeout")
-
         if self.our_state.address == self.partner_state.address:
             raise ValueError("it is illegal to open a channel with itself")
 
@@ -512,7 +515,9 @@ class ChainState(State):
     identifiers_to_tokennetworkregistries: Dict[
         TokenNetworkRegistryAddress, TokenNetworkRegistryState
     ] = field(repr=False, default_factory=dict)
-    nodeaddresses_to_networkstates: Dict[Address, str] = field(repr=False, default_factory=dict)
+    nodeaddresses_to_networkstates: Dict[Address, NetworkState] = field(
+        repr=False, default_factory=dict
+    )
     payment_mapping: PaymentMappingState = field(repr=False, default_factory=PaymentMappingState)
     pending_transactions: List[ContractSendEvent] = field(repr=False, default_factory=list)
     queueids_to_queues: QueueIdsToQueues = field(repr=False, default_factory=dict)

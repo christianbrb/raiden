@@ -4,15 +4,17 @@ from eth_utils import to_checksum_address
 from raiden.constants import DISCOVERY_DEFAULT_ROOM, PATH_FINDING_BROADCASTING_ROOM, RoutingMode
 from raiden.exceptions import InvalidSettleTimeout
 from raiden.message_handler import MessageHandler
-from raiden.network.blockchain_service import BlockChainService
+from raiden.network.proxies.proxy_manager import ProxyManager
 from raiden.network.proxies.secret_registry import SecretRegistry
 from raiden.network.proxies.service_registry import ServiceRegistry
 from raiden.network.proxies.token_network_registry import TokenNetworkRegistry
 from raiden.network.proxies.user_deposit import UserDeposit
+from raiden.network.rpc.client import JSONRPCClient
 from raiden.network.transport.matrix.transport import MatrixTransport
 from raiden.raiden_event_handler import EventHandler
 from raiden.raiden_service import RaidenService
 from raiden.settings import (
+    DEFAULT_BLOCKCHAIN_QUERY_INTERVAL,
     DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
     DEFAULT_PATHFINDING_IOU_TIMEOUT,
     DEFAULT_PATHFINDING_MAX_FEE,
@@ -22,7 +24,7 @@ from raiden.settings import (
     DEFAULT_SHUTDOWN_TIMEOUT,
     DEFAULT_TRANSPORT_MATRIX_RETRY_INTERVAL,
     DEFAULT_TRANSPORT_RETRIES_BEFORE_BACKOFF,
-    PRODUCTION_CONTRACT_VERSION,
+    RAIDEN_CONTRACT_VERSION,
 )
 from raiden.utils import typing
 from raiden.utils.typing import Address
@@ -35,10 +37,13 @@ class App:  # pylint: disable=too-few-public-methods
     DEFAULT_CONFIG = {
         "reveal_timeout": DEFAULT_REVEAL_TIMEOUT,
         "settle_timeout": DEFAULT_SETTLE_TIMEOUT,
-        "contracts_path": contracts_precompiled_path(PRODUCTION_CONTRACT_VERSION),
+        "contracts_path": contracts_precompiled_path(RAIDEN_CONTRACT_VERSION),
         "database_path": "",
         "transport_type": "matrix",
-        "blockchain": {"confirmation_blocks": DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS},
+        "blockchain": {
+            "confirmation_blocks": DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
+            "query_interval": DEFAULT_BLOCKCHAIN_QUERY_INTERVAL,
+        },
         "transport": {
             "matrix": {
                 # None causes fetching from url in raiden.settings.py::DEFAULT_MATRIX_KNOWN_SERVERS
@@ -67,7 +72,8 @@ class App:  # pylint: disable=too-few-public-methods
     def __init__(
         self,
         config: typing.Dict,
-        chain: BlockChainService,
+        rpc_client: JSONRPCClient,
+        proxy_manager: ProxyManager,
         query_start_block: typing.BlockNumber,
         default_registry: TokenNetworkRegistry,
         default_secret_registry: SecretRegistry,
@@ -81,7 +87,8 @@ class App:  # pylint: disable=too-few-public-methods
         user_deposit: UserDeposit = None,
     ):
         raiden = RaidenService(
-            chain=chain,
+            rpc_client=rpc_client,
+            proxy_manager=proxy_manager,
             query_start_block=query_start_block,
             default_registry=default_registry,
             default_one_to_n_address=default_one_to_n_address,
@@ -97,9 +104,11 @@ class App:  # pylint: disable=too-few-public-methods
         )
 
         # check that the settlement timeout fits the limits of the contract
+        settlement_timeout_min = default_registry.settlement_timeout_min("latest")
+        settlement_timeout_max = default_registry.settlement_timeout_max("latest")
         invalid_settle_timeout = (
-            config["settle_timeout"] < default_registry.settlement_timeout_min()
-            or config["settle_timeout"] > default_registry.settlement_timeout_max()
+            config["settle_timeout"] < settlement_timeout_min
+            or config["settle_timeout"] > settlement_timeout_max
             or config["settle_timeout"] < config["reveal_timeout"] * 2
         )
         if invalid_settle_timeout:
@@ -109,8 +118,8 @@ class App:  # pylint: disable=too-few-public-methods
                     "be in range [{}, {}], is {}"
                 ).format(
                     to_checksum_address(default_registry.address),
-                    default_registry.settlement_timeout_min(),
-                    default_registry.settlement_timeout_max(),
+                    settlement_timeout_min,
+                    settlement_timeout_max,
                     config["settle_timeout"],
                 )
             )
@@ -126,10 +135,10 @@ class App:  # pylint: disable=too-few-public-methods
         """ Start the raiden app. """
         if self.raiden.stop_event.is_set():
             self.raiden.start()
-            log.info("Raiden started", node=self.raiden.address)
+            log.info("Raiden started", node=to_checksum_address(self.raiden.address))
 
     def stop(self) -> None:
         """ Stop the raiden app. """
         if not self.raiden.stop_event.is_set():
             self.raiden.stop()
-            log.info("Raiden stopped", node=self.raiden.address)
+            log.info("Raiden stopped", node=to_checksum_address(self.raiden.address))

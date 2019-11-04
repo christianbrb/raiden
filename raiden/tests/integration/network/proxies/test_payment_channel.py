@@ -1,13 +1,19 @@
 import pytest
 from eth_utils import encode_hex
 
-from raiden.constants import EMPTY_BALANCE_HASH, EMPTY_HASH, EMPTY_SIGNATURE, LOCKSROOT_OF_NO_LOCKS
+from raiden.constants import (
+    EMPTY_BALANCE_HASH,
+    EMPTY_HASH,
+    EMPTY_SIGNATURE,
+    GENESIS_BLOCK_NUMBER,
+    LOCKSROOT_OF_NO_LOCKS,
+)
 from raiden.exceptions import (
     BrokenPreconditionError,
     RaidenRecoverableError,
     RaidenUnrecoverableError,
 )
-from raiden.network.blockchain_service import BlockChainService
+from raiden.network.proxies.proxy_manager import ProxyManager, ProxyManagerMetadata
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.tests.integration.network.proxies import BalanceProof
 from raiden.transfer.identifiers import CanonicalIdentifier
@@ -23,8 +29,15 @@ def test_payment_channel_proxy_basics(
     partner = privatekey_to_address(private_keys[0])
 
     client = JSONRPCClient(web3, private_keys[1])
-    chain = BlockChainService(jsonrpc_client=client, contract_manager=contract_manager)
-    token_network_proxy = chain.token_network(address=token_network_address)
+    proxy_manager = ProxyManager(
+        rpc_client=client,
+        contract_manager=contract_manager,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
+    )
+    token_network_proxy = proxy_manager.token_network(address=token_network_address)
     start_block = web3.eth.blockNumber
 
     channel_identifier = token_network_proxy.new_netting_channel(
@@ -32,7 +45,7 @@ def test_payment_channel_proxy_basics(
     )
     assert channel_identifier is not None
 
-    channel_proxy_1 = chain.payment_channel(
+    channel_proxy_1 = proxy_manager.payment_channel(
         canonical_identifier=CanonicalIdentifier(
             chain_identifier=chain_id,
             token_network_address=token_network_address,
@@ -84,7 +97,9 @@ def test_payment_channel_proxy_basics(
     # update transfer -- we need to wait on +1 since we use the latest block on parity for
     # estimate gas and at the time the latest block is the settle timeout block.
     # More info: https://github.com/raiden-network/raiden/pull/3699#discussion_r270477227
-    chain.wait_until_block(target_block_number=client.block_number() + TEST_SETTLE_TIMEOUT_MIN + 1)
+    proxy_manager.wait_until_block(
+        target_block_number=client.block_number() + TEST_SETTLE_TIMEOUT_MIN + 1
+    )
 
     channel_proxy_1.settle(
         transferred_amount=0,
@@ -104,7 +119,7 @@ def test_payment_channel_proxy_basics(
     )
     assert new_channel_identifier is not None
 
-    channel_proxy_2 = chain.payment_channel(
+    channel_proxy_2 = proxy_manager.payment_channel(
         canonical_identifier=CanonicalIdentifier(
             chain_identifier=chain_id,
             token_network_address=token_network_address,

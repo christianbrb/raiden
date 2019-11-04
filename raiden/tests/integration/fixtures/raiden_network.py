@@ -1,10 +1,11 @@
 import os
+import subprocess
 
 import gevent
 import pytest
 
 from raiden.app import App
-from raiden.constants import GENESIS_BLOCK_NUMBER, Environment
+from raiden.constants import GENESIS_BLOCK_NUMBER, Environment, RoutingMode
 from raiden.tests.utils.network import (
     CHAIN,
     BlockchainServices,
@@ -39,6 +40,11 @@ def timeout(blockchain_type: str) -> float:
 
 
 @pytest.fixture
+def routing_mode():
+    return RoutingMode.PRIVATE
+
+
+@pytest.fixture
 def raiden_chain(
     token_addresses: List[TokenAddress],
     token_network_registry_address: TokenNetworkRegistryAddress,
@@ -61,6 +67,9 @@ def raiden_chain(
     monitoring_service_contract_address: Address,
     global_rooms: List[str],
     logs_storage: str,
+    routing_mode: RoutingMode,
+    blockchain_query_interval: float,
+    resolver_ports: List[Optional[int]],
 ) -> Iterable[List[App]]:
 
     if len(token_addresses) != 1:
@@ -96,10 +105,13 @@ def raiden_chain(
         private_rooms=private_rooms,
         contracts_path=contracts_path,
         global_rooms=global_rooms,
+        routing_mode=routing_mode,
+        blockchain_query_interval=blockchain_query_interval,
+        resolver_ports=resolver_ports,
     )
 
     confirmed_block = raiden_apps[0].raiden.confirmation_blocks + 1
-    blockchain_services.deploy_service.wait_until_block(target_block_number=confirmed_block)
+    blockchain_services.proxy_manager.wait_until_block(target_block_number=confirmed_block)
 
     parallel_start_apps(raiden_apps)
 
@@ -146,6 +158,28 @@ def monitoring_service_contract_address() -> Address:
 
 
 @pytest.fixture
+def resolvers(resolver_ports):
+    """Invoke resolver process for each node having a resolver port
+
+    By default, Raiden nodes start without hash resolvers (all ports are None)
+    """
+    resolvers = []
+    for port in resolver_ports:
+        resolver = None
+        if port is not None:
+            args = ["python", "tools/dummy_resolver_server.py", str(port)]
+            resolver = subprocess.Popen(args, stdout=subprocess.PIPE)
+            assert resolver.poll() is None
+        resolvers.append(resolver)
+
+    yield resolvers
+
+    for resolver in resolvers:
+        if resolver is not None:
+            resolver.terminate()
+
+
+@pytest.fixture
 def raiden_network(
     token_addresses: List[TokenAddress],
     token_network_registry_address: TokenNetworkRegistryAddress,
@@ -169,6 +203,9 @@ def raiden_network(
     global_rooms: List[str],
     logs_storage: str,
     start_raiden_apps: bool,
+    routing_mode: RoutingMode,
+    blockchain_query_interval: float,
+    resolver_ports: List[Optional[int]],
 ) -> Iterable[List[App]]:
     service_registry_address = None
     if blockchain_services.service_registry:
@@ -196,10 +233,13 @@ def raiden_network(
         local_matrix_url=local_matrix_servers[0],
         private_rooms=private_rooms,
         global_rooms=global_rooms,
+        routing_mode=routing_mode,
+        blockchain_query_interval=blockchain_query_interval,
+        resolver_ports=resolver_ports,
     )
 
     confirmed_block = raiden_apps[0].raiden.confirmation_blocks + 1
-    blockchain_services.deploy_service.wait_until_block(target_block_number=confirmed_block)
+    blockchain_services.proxy_manager.wait_until_block(target_block_number=confirmed_block)
 
     if start_raiden_apps:
         parallel_start_apps(raiden_apps)

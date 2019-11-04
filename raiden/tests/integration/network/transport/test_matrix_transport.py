@@ -26,6 +26,7 @@ from raiden.services import send_pfs_update, update_monitoring_service_from_bala
 from raiden.settings import MONITORING_REWARD
 from raiden.tests.utils import factories
 from raiden.tests.utils.client import burn_eth
+from raiden.tests.utils.factories import HOP1
 from raiden.tests.utils.mocks import MockRaidenService
 from raiden.tests.utils.transfer import wait_assert
 from raiden.transfer import views
@@ -251,7 +252,7 @@ def test_matrix_tx_error_handling(  # pylint: disable=unused-argument
         token_address=token_address,
         partner_address=app1.raiden.address,
     )
-    burn_eth(app0.raiden.chain.client)
+    burn_eth(app0.raiden.rpc_client)
 
     def make_tx(*args, **kwargs):  # pylint: disable=unused-argument
         close_channel = ActionChannelClose(canonical_identifier=channel_state.canonical_identifier)
@@ -374,7 +375,7 @@ def test_join_invalid_discovery(
 
     transport.start(raiden_service, raiden_service.message_handler, None)
     transport.log = MagicMock()
-    discovery_room_name = make_room_alias(transport.network_id, "discovery")
+    discovery_room_name = make_room_alias(transport.chain_id, "discovery")
     assert isinstance(transport._global_rooms.get(discovery_room_name), Room)
 
     transport.stop()
@@ -435,7 +436,7 @@ def test_matrix_discovery_room_offline_server(
     )
     transport.start(MockRaidenService(None), MessageHandler(set()), "")
 
-    discovery_room_name = make_room_alias(transport.network_id, "discovery")
+    discovery_room_name = make_room_alias(transport.chain_id, "discovery")
     with gevent.Timeout(1):
         while not isinstance(transport._global_rooms.get(discovery_room_name), Room):
             gevent.sleep(0.1)
@@ -461,7 +462,7 @@ def test_matrix_send_global(
     transport.start(MockRaidenService(None), MessageHandler(set()), "")
     gevent.idle()
 
-    ms_room_name = make_room_alias(transport.network_id, MONITORING_BROADCASTING_ROOM)
+    ms_room_name = make_room_alias(transport.chain_id, MONITORING_BROADCASTING_ROOM)
     ms_room = transport._global_rooms.get(ms_room_name)
     assert isinstance(ms_room, Room)
 
@@ -471,7 +472,7 @@ def test_matrix_send_global(
         message = Processed(message_identifier=i, signature=EMPTY_SIGNATURE)
         transport._raiden_service.sign(message)
         transport.send_global(MONITORING_BROADCASTING_ROOM, message)
-    transport._spawn(transport._global_send_worker)
+    transport._schedule_new_greenlet(transport._global_send_worker)
 
     gevent.idle()
 
@@ -515,7 +516,7 @@ def test_monitoring_global_messages(
 
     transport.start(raiden_service, raiden_service.message_handler, None)
 
-    ms_room_name = make_room_alias(transport.network_id, MONITORING_BROADCASTING_ROOM)
+    ms_room_name = make_room_alias(transport.chain_id, MONITORING_BROADCASTING_ROOM)
     ms_room = transport._global_rooms.get(ms_room_name)
     assert isinstance(ms_room, Room)
     ms_room.send_text = MagicMock(spec=ms_room.send_text)
@@ -536,7 +537,10 @@ def test_monitoring_global_messages(
     raiden_service.user_deposit.effective_balance.return_value = MONITORING_REWARD
 
     update_monitoring_service_from_balance_proof(
-        raiden=raiden_service, chain_state=None, new_balance_proof=balance_proof
+        raiden=raiden_service,
+        chain_state=None,
+        new_balance_proof=balance_proof,
+        non_closing_participant=HOP1,
     )
     gevent.idle()
 
@@ -583,7 +587,7 @@ def test_pfs_global_messages(
 
     transport.start(raiden_service, raiden_service.message_handler, None)
 
-    pfs_room_name = make_room_alias(transport.network_id, PATH_FINDING_BROADCASTING_ROOM)
+    pfs_room_name = make_room_alias(transport.chain_id, PATH_FINDING_BROADCASTING_ROOM)
     pfs_room = transport._global_rooms.get(pfs_room_name)
     assert isinstance(pfs_room, Room)
     pfs_room.send_text = MagicMock(spec=pfs_room.send_text)
@@ -909,6 +913,7 @@ def test_matrix_user_roaming(matrix_transports):
 
     transport0.start(raiden_service0, message_handler0, "")
     transport0.start_health_check(raiden_service1.address)
+
     with Timeout(TIMEOUT_MESSAGE_RECEIVE):
         while not is_reachable(transport1, raiden_service0.address):
             gevent.sleep(0.1)

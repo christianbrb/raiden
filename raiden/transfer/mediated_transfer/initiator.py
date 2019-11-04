@@ -1,10 +1,18 @@
 import random
 
 from raiden.constants import ABSENT_SECRET
-from raiden.settings import DEFAULT_WAIT_BEFORE_LOCK_REMOVAL
+from raiden.settings import (
+    DEFAULT_MEDIATION_FEE_MARGIN,
+    DEFAULT_WAIT_BEFORE_LOCK_REMOVAL,
+    MAX_MEDIATION_FEE_PERC,
+)
 from raiden.transfer import channel, routes
 from raiden.transfer.architecture import Event, TransitionResult
-from raiden.transfer.events import EventPaymentSentFailed, EventPaymentSentSuccess
+from raiden.transfer.events import (
+    EventInvalidSecretRequest,
+    EventPaymentSentFailed,
+    EventPaymentSentSuccess,
+)
 from raiden.transfer.identifiers import CANONICAL_IDENTIFIER_GLOBAL_QUEUE
 from raiden.transfer.mediated_transfer.events import (
     EventRouteFailed,
@@ -36,14 +44,30 @@ from raiden.utils.typing import (
     BlockNumber,
     ChannelID,
     Dict,
+    FeeAmount,
     List,
     MessageID,
     NodeNetworkStateMap,
     Optional,
+    PaymentAmount,
     PaymentWithFeeAmount,
     Secret,
     SecretHash,
 )
+
+
+def calculate_safe_amount_with_fee(
+    payment_amount: PaymentAmount, estimated_fee: FeeAmount
+) -> PaymentWithFeeAmount:
+    """ Calculates the total payment amount
+
+    This total amount consists of the payment amount, the estimated fees as well as a
+    small margin that is added to increase the likelihood of payments succeeding in
+    conditions where channels are used for multiple payments.
+    """
+    # `max` is taken as `estimated_fee` can be negative
+    fee_margin = round(max(estimated_fee, FeeAmount(0)) * DEFAULT_MEDIATION_FEE_MARGIN)
+    return PaymentWithFeeAmount(payment_amount + estimated_fee + fee_margin)
 
 
 def events_for_unlock_lock(
@@ -183,9 +207,7 @@ def try_new_route(
 
     initiator_state = None
     events: List[Event] = list()
-    amount_with_fee: PaymentWithFeeAmount = PaymentWithFeeAmount(
-        transfer_description.amount + transfer_description.allocated_fee
-    )
+    route_fee_exceeds_max = False
 
     channel_state = None
     route_state = None
@@ -203,8 +225,24 @@ def try_new_route(
 
         assert isinstance(candidate_channel_state, NettingChannelState)
 
+        amount_with_fee = calculate_safe_amount_with_fee(
+            payment_amount=transfer_description.amount,
+            estimated_fee=reachable_route_state.estimated_fee,
+        )
+        # https://github.com/raiden-network/raiden/issues/4751
+        # If the transfer amount + fees exceeds a percentage of the
+        # initial amount then don't use this route
+        max_amount_limit = transfer_description.amount + int(
+            transfer_description.amount * MAX_MEDIATION_FEE_PERC
+        )
+        if amount_with_fee > max_amount_limit:
+            route_fee_exceeds_max = True
+            continue
+
         is_channel_usable = channel.is_channel_usable_for_new_transfer(
-            channel_state=candidate_channel_state, transfer_amount=amount_with_fee
+            channel_state=candidate_channel_state,
+            transfer_amount=amount_with_fee,
+            lock_timeout=transfer_description.lock_timeout,
         )
         if is_channel_usable:
             channel_state = candidate_channel_state
@@ -216,6 +254,9 @@ def try_new_route(
             reason = "there is no route available"
         else:
             reason = "none of the available routes could be used"
+
+        if route_fee_exceeds_max:
+            reason += " and at least one of them exceeded the maximum fee limit"
 
         transfer_failed = EventPaymentSentFailed(
             token_network_registry_address=transfer_description.token_network_registry_address,
@@ -265,14 +306,14 @@ def send_lockedtransfer(
     assert channel_state.token_network_address == transfer_description.token_network_address
 
     lock_expiration = channel.get_safe_initial_expiration(
-        block_number, channel_state.reveal_timeout
+        block_number, channel_state.reveal_timeout, transfer_description.lock_timeout
     )
 
     # The payment amount and the fee amount must be included in the locked
     # amount, as a guarantee to the mediator that the fee will be claimable
     # on-chain.
-    total_amount = PaymentWithFeeAmount(
-        transfer_description.amount + transfer_description.allocated_fee
+    total_amount = calculate_safe_amount_with_fee(
+        payment_amount=transfer_description.amount, estimated_fee=route_state.estimated_fee
     )
 
     lockedtransfer_event = channel.send_lockedtransfer(
@@ -315,12 +356,11 @@ def handle_secretrequest(
 
     already_received_secret_request = initiator_state.received_secret_request
 
-    # lock.amount includes the fees, transfer_description.amount is the actual
-    # payment amount, for the transfer to be valid and the unlock allowed the
-    # target must receive an amount between these values.
+    # transfer_description.amount is the actual payment amount without fees.
+    # For the transfer to be valid and the unlock allowed the target must
+    # receive at least that amount.
     is_valid_secretrequest = (
-        state_change.amount <= lock.amount
-        and state_change.amount >= initiator_state.transfer_description.amount
+        state_change.amount >= initiator_state.transfer_description.amount
         and state_change.expiration == lock.expiration
         and initiator_state.transfer_description.secret != ABSENT_SECRET
     )
@@ -353,7 +393,12 @@ def handle_secretrequest(
 
     elif not is_valid_secretrequest and is_message_from_target:
         initiator_state.received_secret_request = True
-        iteration = TransitionResult(initiator_state, list())
+        invalid_request = EventInvalidSecretRequest(
+            payment_identifier=state_change.payment_identifier,
+            intended_amount=initiator_state.transfer_description.amount,
+            actual_amount=state_change.amount,
+        )
+        iteration = TransitionResult(initiator_state, [invalid_request])
 
     else:
         iteration = TransitionResult(initiator_state, list())

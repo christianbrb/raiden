@@ -11,25 +11,29 @@ from web3 import HTTPProvider, Web3
 
 from raiden.accounts import AccountManager
 from raiden.constants import (
+    GENESIS_BLOCK_NUMBER,
     MONITORING_BROADCASTING_ROOM,
     PATH_FINDING_BROADCASTING_ROOM,
     RAIDEN_DB_VERSION,
     Environment,
+    EthereumForks,
+    GoerliForks,
+    KovanForks,
+    Networks,
+    RinkebyForks,
+    RopstenForks,
     RoutingMode,
 )
 from raiden.exceptions import RaidenError
 from raiden.message_handler import MessageHandler
-from raiden.network.blockchain_service import BlockChainService
+from raiden.network.proxies.proxy_manager import ProxyManager, ProxyManagerMetadata
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.network.transport import MatrixTransport
 from raiden.raiden_event_handler import EventHandler, PFSFeedbackEventHandler, RaidenEventHandler
 from raiden.settings import (
     DEFAULT_HTTP_SERVER_PORT,
     DEFAULT_MATRIX_KNOWN_SERVERS,
-    DEFAULT_MEDIATION_PROPORTIONAL_FEE,
-    DEFAULT_MEDIATION_PROPORTIONAL_IMBALANCE_FEE,
     DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
-    MediationFeeConfig,
 )
 from raiden.ui.checks import (
     check_ethereum_client_is_supported,
@@ -47,6 +51,7 @@ from raiden.ui.prompt import (
 from raiden.ui.startup import setup_contracts_or_exit, setup_environment, setup_proxies_or_exit
 from raiden.utils import BlockNumber, pex, split_endpoint
 from raiden.utils.cli import get_matrix_servers
+from raiden.utils.mediation_fees import prepare_mediation_fee_config
 from raiden.utils.typing import (
     Address,
     ChainID,
@@ -56,7 +61,7 @@ from raiden.utils.typing import (
     Port,
     PrivateKey,
     ProportionalFeeAmount,
-    TokenNetworkAddress,
+    TokenAddress,
     TokenNetworkRegistryAddress,
     Tuple,
 )
@@ -116,6 +121,23 @@ def get_account_and_private_key(
     return to_canonical_address(address_hex), privatekey_bin
 
 
+def get_smart_contracts_start_at(network_id: ChainID) -> BlockNumber:
+    if network_id == Networks.MAINNET:
+        smart_contracts_start_at = EthereumForks.CONSTANTINOPLE.value
+    elif network_id == Networks.ROPSTEN:
+        smart_contracts_start_at = RopstenForks.CONSTANTINOPLE.value
+    elif network_id == Networks.KOVAN:
+        smart_contracts_start_at = KovanForks.CONSTANTINOPLE.value
+    elif network_id == Networks.RINKEBY:
+        smart_contracts_start_at = RinkebyForks.CONSTANTINOPLE.value
+    elif network_id == Networks.GOERLI:
+        smart_contracts_start_at = GoerliForks.CONSTANTINOPLE.value
+    else:
+        smart_contracts_start_at = GENESIS_BLOCK_NUMBER
+
+    return smart_contracts_start_at
+
+
 def rpc_normalized_endpoint(eth_rpc_endpoint: str) -> str:
     parsed_eth_rpc_endpoint = urlparse(eth_rpc_endpoint)
 
@@ -154,13 +176,17 @@ def run_app(
     resolver_endpoint: str,
     routing_mode: RoutingMode,
     config: Dict[str, Any],
-    flat_fee: Tuple[Tuple[TokenNetworkAddress, FeeAmount], ...],
-    proportional_fee: ProportionalFeeAmount,
-    proportional_imbalance_fee: ProportionalFeeAmount,
+    flat_fee: Tuple[Tuple[TokenAddress, FeeAmount], ...],
+    proportional_fee: Tuple[Tuple[TokenAddress, ProportionalFeeAmount], ...],
+    proportional_imbalance_fee: Tuple[Tuple[TokenAddress, ProportionalFeeAmount], ...],
+    blockchain_query_interval: float,
     **kwargs: Any,  # FIXME: not used here, but still receives stuff in smoketest
 ):
     # pylint: disable=too-many-locals,too-many-branches,too-many-statements,unused-argument
     from raiden.app import App
+
+    token_network_registry_deployed_at: Optional[BlockNumber]
+    smart_contracts_start_at: BlockNumber
 
     if datadir is None:
         datadir = os.path.join(os.path.expanduser("~"), ".raiden")
@@ -180,14 +206,10 @@ def run_app(
     if not api_port:
         api_port = Port(DEFAULT_HTTP_SERVER_PORT)
 
-    # Store the flat fee settings for the given token networks
-    token_network_to_flat_fee: Dict[TokenNetworkAddress, FeeAmount] = {
-        address: fee for address, fee in flat_fee
-    }
-    fee_config = MediationFeeConfig(
-        token_network_to_flat_fee=token_network_to_flat_fee,
-        proportional_fee=proportional_fee,
-        proportional_imbalance_fee=proportional_imbalance_fee,
+    fee_config = prepare_mediation_fee_config(
+        cli_token_to_flat_fee=flat_fee,
+        cli_token_to_proportional_fee=proportional_fee,
+        cli_token_to_proportional_imbalance_fee=proportional_imbalance_fee,
     )
 
     config["console"] = console
@@ -203,6 +225,7 @@ def run_app(
     config["services"]["monitoring_enabled"] = enable_monitoring
     config["chain_id"] = network_id
     config["mediation_fees"] = fee_config
+    config["blockchain"]["query_interval"] = blockchain_query_interval
 
     setup_environment(config, environment_type)
 
@@ -216,12 +239,28 @@ def run_app(
         uses_infura="infura.io" in eth_rpc_endpoint,
     )
 
-    blockchain_service = BlockChainService(
-        jsonrpc_client=rpc_client, contract_manager=ContractManager(config["contracts_path"])
+    token_network_registry_deployed_at = None
+    if "TokenNetworkRegistry" in contracts:
+        token_network_registry_deployed_at = BlockNumber(
+            contracts["TokenNetworkRegistry"]["block_number"]
+        )
+
+    if token_network_registry_deployed_at is None:
+        smart_contracts_start_at = get_smart_contracts_start_at(network_id)
+    else:
+        smart_contracts_start_at = token_network_registry_deployed_at
+
+    proxy_manager = ProxyManager(
+        rpc_client=rpc_client,
+        contract_manager=ContractManager(config["contracts_path"]),
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=token_network_registry_deployed_at,
+            filters_start_at=smart_contracts_start_at,
+        ),
     )
 
     if sync_check:
-        check_synced(blockchain_service)
+        check_synced(proxy_manager)
 
     proxies = setup_proxies_or_exit(
         config=config,
@@ -229,7 +268,7 @@ def run_app(
         secret_registry_contract_address=secret_registry_contract_address,
         user_deposit_contract_address=user_deposit_contract_address,
         service_registry_contract_address=service_registry_contract_address,
-        blockchain_service=blockchain_service,
+        proxy_manager=proxy_manager,
         contracts=contracts,
         routing_mode=routing_mode,
         pathfinding_service_address=pathfinding_service_address,
@@ -266,9 +305,9 @@ def run_app(
     # User should be told how to set fees, if using default fee settings
     log.debug("Fee Settings", fee_settings=fee_config)
     has_default_fees = (
-        len(fee_config.token_network_to_flat_fee) == 0
-        and fee_config.proportional_fee == DEFAULT_MEDIATION_PROPORTIONAL_FEE
-        and fee_config.proportional_imbalance_fee == DEFAULT_MEDIATION_PROPORTIONAL_IMBALANCE_FEE
+        len(fee_config.token_to_flat_fee) == 0
+        and len(fee_config.token_to_proportional_fee) == 0
+        and len(fee_config.token_to_proportional_imbalance_fee) == 0
     )
     if has_default_fees:
         click.secho(
@@ -285,14 +324,11 @@ def run_app(
     message_handler = MessageHandler()
 
     try:
-        start_block = 0
-        if "TokenNetworkRegistry" in contracts:
-            start_block = contracts["TokenNetworkRegistry"]["block_number"]
-
         raiden_app = App(
             config=config,
-            chain=blockchain_service,
-            query_start_block=BlockNumber(start_block),
+            rpc_client=rpc_client,
+            proxy_manager=proxy_manager,
+            query_start_block=smart_contracts_start_at,
             default_one_to_n_address=(
                 one_to_n_contract_address or contracts[CONTRACT_ONE_TO_N]["address"]
             ),

@@ -12,6 +12,10 @@ The scenarios serve the following purpose
 - Testing in a distributed environment
 - Understanding how Raiden and the Raiden Services can be used and interact
 
+## Writing scenarios
+
+If you want to write a new scenario you can check out the [following example file](https://github.com/raiden-network/scenario-player/blob/master/examples/scenario-example-v2.yaml).
+
 ## Scenarios
 
 #### [bf1_basic_functionality](./bf1_basic_functionality.yaml)
@@ -35,6 +39,14 @@ A channel between two nodes is opened, a transfer is made. Then, node1 goes offl
 #### [ms3_simple_monitoring](./ms3_simple_monitoring.yaml)
 
 A channel between two nodes is opened, a transfer is made. Then, node1 goes offline and node0 closes the channel. Before the monitoring trigger block is passed node1 gets back online. Node1 calls the smart contract itself and therefore the MS does not get triggered.
+
+#### [ms4_udc_too_low](./ms4_udc_too_low.yaml)
+
+This scenario tests that the MS does not kick in, if the node requesting monitoring does
+not have enough funds deposited in the UDC. A channel is opened between node0 and node1.
+A couple of transfers take place and node1 then goes offline. Node0 calls close and node1
+stays offline. It is then expected that the MS does not kick in, since node1 does not have
+enough tokens deposited.
 
 #### [pfs1_get_a_simple_path](./pfs1_get_a_simple_path.yaml)
 
@@ -69,7 +81,7 @@ This scenario sets up a topology of [0, 1, 2, 3] and [0, 4, 3] with deposits in 
 of requests and IOUs. During the transfers the [0, 4, 3] path will have too low capacity and the other one
 should be used.
 
-#### [pfs8__mediator_goes_offline](./pfs8_mediator_goes_offline.yaml)
+#### [pfs8_mediator_goes_offline](./pfs8_mediator_goes_offline.yaml)
 
 This scenario aims to make sure that the PFS reacts correctly if a node along
 a path goes offline and thus provides a new path is one is available.
@@ -84,3 +96,16 @@ A topology of 0 <-> 1 <-> 2 <-> 3 and 0 <-> 4 <-> 3 will be used.
 Node0 will first make a payment to node3 through [0, 4, 3] and then node4 makes a partial withdraw
 results in not enough capacity for a second transfer to be routes through that path.
 The expected path for the second transfer is then [0, 1, 2, 3].
+
+#### [mfee1_flat_fee](./mfee1_flat_fee.yaml)
+This scenario creates a network with topology 0 -> 1 -> 2 -> 3 and only enables flat mediation fees.
+It then checks whether a path is returned. It also checks that correct flat mediation fees are deducted.
+
+#### [mfee2_proportional_fees](./mfee2_proportional_fees.yaml)
+This is the MFEE2 scenario. It creates a network with topology 0 -> 1 -> 2 -> 3 and checks
+whether a path is returned. It also checks that correct proportional mediation fees are deducted
+and received by the mediating parties. For every 1000 TKNs tranferred a fee of 10 TKN is expected.
+
+#### [mfee4_combined_fees](./mfee4_combined_fees.yaml)
+This scenario creates a network with topology 0 -> 1 -> 2 -> 3 and only enables all mediation fee components.
+It then checks whether a path is returned. It also checks that correct mediation fees are deducted.

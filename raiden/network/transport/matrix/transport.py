@@ -42,12 +42,7 @@ from raiden.network.transport.utils import timeout_exponential_backoff
 from raiden.storage.serialization.serializer import MessageSerializer
 from raiden.transfer import views
 from raiden.transfer.identifiers import CANONICAL_IDENTIFIER_GLOBAL_QUEUE, QueueIdentifier
-from raiden.transfer.state import (
-    NODE_NETWORK_REACHABLE,
-    NODE_NETWORK_UNKNOWN,
-    NODE_NETWORK_UNREACHABLE,
-    QueueIdsToQueues,
-)
+from raiden.transfer.state import NetworkState, QueueIdsToQueues
 from raiden.transfer.state_change import (
     ActionChangeNodeNetworkState,
     ActionUpdateTransportAuthData,
@@ -396,7 +391,7 @@ class MatrixTransport(Runnable):
             self._client._handle_thread.get()
 
         for suffix in self._config["global_rooms"]:
-            room_name = make_room_alias(self.network_id, suffix)  # e.g. raiden_ropsten_discovery
+            room_name = make_room_alias(self.chain_id, suffix)  # e.g. raiden_ropsten_discovery
             room = join_global_room(
                 self._client, room_name, self._config.get("available_servers") or ()
             )
@@ -413,7 +408,7 @@ class MatrixTransport(Runnable):
         self._client.sync_thread.link_exception(self.on_error)
         self._client.sync_thread.link_value(on_success)
         self.greenlets = [self._client.sync_thread]
-        self._spawn(self._address_mgr.log_status_message)
+        self._schedule_new_greenlet(self._address_mgr.log_status_message)
 
         self._client.set_presence_state(UserPresence.ONLINE.value)
 
@@ -430,7 +425,7 @@ class MatrixTransport(Runnable):
         self.log.debug("Matrix started", config=self._config)
 
         # Handle any delayed invites in the future
-        self._spawn_later(self._process_queued_invites, 1)
+        self._schedule_new_greenlet(self._process_queued_invites, in_seconds_from_now=1)
 
     def _process_queued_invites(self):
         if self._invite_queue:
@@ -491,30 +486,13 @@ class MatrixTransport(Runnable):
         self._client.api.session.close()
 
         self.log.debug("Matrix stopped", config=self._config)
-        del self.log
+        try:
+            del self.log
+        except AttributeError:
+            # During shutdown the log attribute may have already been collected
+            pass
         # parent may want to call get() after stop(), to ensure _run errors are re-raised
         # we don't call it here to avoid deadlock when self crashes and calls stop() on finally
-
-    def _spawn_later(self, func: Callable, delay: int, *args, **kwargs) -> gevent.Greenlet:
-        """ Spawn a sub-task and ensures an error on it crashes self/main greenlet """
-
-        def on_success(greenlet):
-            if greenlet in self.greenlets:
-                self.greenlets.remove(greenlet)
-
-        greenlet = gevent.Greenlet(func, *args, **kwargs)
-        greenlet.link_exception(self.on_error)
-        greenlet.link_value(on_success)
-        self.greenlets.append(greenlet)
-        if delay:
-            greenlet.start_later(delay)
-        else:
-            greenlet.start()
-        return greenlet
-
-    def _spawn(self, func: Callable, *args, **kwargs) -> gevent.Greenlet:
-        """ Spawn a sub-task and ensures an error on it crashes self/main greenlet """
-        return self._spawn_later(func, 0, *args, **kwargs)
 
     def whitelist(self, address: Address):
         """Whitelist peer address to receive communications from
@@ -596,7 +574,7 @@ class MatrixTransport(Runnable):
                     f'Send global called on non-global room "{room_name}". '
                     f'Known global rooms: {self._config["global_rooms"]}.'
                 )
-            room_name = make_room_alias(self.network_id, room_name)
+            room_name = make_room_alias(self.chain_id, room_name)
             if room_name not in self._global_rooms:
                 room = join_global_room(
                     self._client, room_name, self._config.get("available_servers") or ()
@@ -647,9 +625,9 @@ class MatrixTransport(Runnable):
         return getattr(self, "_client", None) and getattr(self._client, "user_id", None)
 
     @property
-    def network_id(self) -> ChainID:
+    def chain_id(self) -> ChainID:
         assert self._raiden_service is not None
-        return ChainID(self._raiden_service.chain.network_id)
+        return self._raiden_service.rpc_client.chain_id
 
     @property
     def _private_rooms(self) -> bool:
@@ -989,7 +967,7 @@ class MatrixTransport(Runnable):
         address_pair = sorted(
             [to_normalized_address(address) for address in [address, self._raiden_service.address]]
         )
-        room_name = make_room_alias(self.network_id, *address_pair)
+        room_name = make_room_alias(self.chain_id, *address_pair)
 
         # no room with expected name => create one and invite peer
         peer_candidates = [
@@ -1133,22 +1111,22 @@ class MatrixTransport(Runnable):
     def _user_presence_changed(self, user: User, _presence: UserPresence):
         # maybe inviting user used to also possibly invite user's from presence changes
         assert self._raiden_service is not None  # make mypy happy
-        greenlet = self._spawn(self._maybe_invite_user, user)
+        greenlet = self._schedule_new_greenlet(self._maybe_invite_user, user)
         greenlet.name = (
             f"invite node:{to_checksum_address(self._raiden_service.address)} user:{user}"
         )
 
     def _address_reachability_changed(self, address: Address, reachability: AddressReachability):
         if reachability is AddressReachability.REACHABLE:
-            node_reachability = NODE_NETWORK_REACHABLE
+            node_reachability = NetworkState.REACHABLE
             # _QueueRetry.notify when partner comes online
             retrier = self._address_to_retrier.get(address)
             if retrier:
                 retrier.notify()
         elif reachability is AddressReachability.UNKNOWN:
-            node_reachability = NODE_NETWORK_UNKNOWN
+            node_reachability = NetworkState.UNKNOWN
         elif reachability is AddressReachability.UNREACHABLE:
-            node_reachability = NODE_NETWORK_UNREACHABLE
+            node_reachability = NetworkState.UNREACHABLE
         else:
             raise TypeError(f'Unexpected reachability state "{reachability}".')
 
@@ -1194,7 +1172,7 @@ class MatrixTransport(Runnable):
         As all users are supposed to be in discovery room, its members dict is used for caching"""
         user_id: str = getattr(user, "user_id", user)
         discovery_room = self._global_rooms.get(
-            make_room_alias(self.network_id, DISCOVERY_DEFAULT_ROOM)
+            make_room_alias(self.chain_id, DISCOVERY_DEFAULT_ROOM)
         )
         if discovery_room and user_id in discovery_room._members:
             duser = discovery_room._members[user_id]

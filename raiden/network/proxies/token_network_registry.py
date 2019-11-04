@@ -2,18 +2,27 @@ from typing import Any, List, Optional
 
 import structlog
 from eth_utils import (
-    decode_hex,
     encode_hex,
     event_abi_to_log_topic,
-    is_binary_address,
     is_same_address,
     to_canonical_address,
     to_checksum_address,
 )
+from web3.exceptions import BadFunctionCallOutput
+from web3.utils.contracts import find_matching_event_abi
 
-from raiden.constants import GENESIS_BLOCK_NUMBER, NULL_ADDRESS
-from raiden.exceptions import InvalidToken, RaidenRecoverableError, RaidenUnrecoverableError
-from raiden.network.proxies.utils import log_transaction
+from raiden.constants import NULL_ADDRESS, NULL_ADDRESS_BYTES
+from raiden.exceptions import (
+    BrokenPreconditionError,
+    InvalidChannelParticipantDepositLimit,
+    InvalidToken,
+    InvalidTokenAddress,
+    InvalidTokenNetworkDepositLimit,
+    RaidenRecoverableError,
+    RaidenUnrecoverableError,
+)
+from raiden.network.proxies.metadata import SmartContractMetadata
+from raiden.network.proxies.utils import log_transaction, raise_on_call_returned_empty
 from raiden.network.rpc.client import JSONRPCClient, StatelessFilter, check_address_has_code
 from raiden.network.rpc.transactions import check_transaction_threw
 from raiden.utils import safe_gas_limit
@@ -22,6 +31,7 @@ from raiden.utils.typing import (
     Address,
     BlockSpecification,
     Dict,
+    SecretRegistryAddress,
     T_TargetAddress,
     TokenAddress,
     TokenAmount,
@@ -30,11 +40,10 @@ from raiden.utils.typing import (
     typecheck,
 )
 from raiden_contracts.constants import CONTRACT_TOKEN_NETWORK_REGISTRY, EVENT_TOKEN_NETWORK_CREATED
-from raiden_contracts.contract_manager import ContractManager, gas_measurements
 
 if TYPE_CHECKING:
     # pylint: disable=unused-import
-    from raiden.network.blockchain_service import BlockChainService
+    from raiden.network.proxies.proxy_manager import ProxyManager
 
 
 log = structlog.get_logger(__name__)
@@ -43,37 +52,29 @@ log = structlog.get_logger(__name__)
 class TokenNetworkRegistry:
     def __init__(
         self,
-        jsonrpc_client: JSONRPCClient,
-        registry_address: TokenNetworkRegistryAddress,
-        contract_manager: ContractManager,
-        blockchain_service: "BlockChainService",
+        rpc_client: JSONRPCClient,
+        metadata: SmartContractMetadata,
+        proxy_manager: "ProxyManager",
     ) -> None:
-        if not is_binary_address(registry_address):
-            raise ValueError("Expected binary address format for token network registry")
 
         check_address_has_code(
-            client=jsonrpc_client,
-            address=Address(registry_address),
+            client=rpc_client,
+            address=Address(metadata.address),
             contract_name=CONTRACT_TOKEN_NETWORK_REGISTRY,
-            expected_code=decode_hex(
-                contract_manager.get_runtime_hexcode(CONTRACT_TOKEN_NETWORK_REGISTRY)
-            ),
+            expected_code=metadata.runtime_bytecode,
         )
 
-        self.contract_manager = contract_manager
-        proxy = jsonrpc_client.new_contract_proxy(
-            abi=self.contract_manager.get_contract_abi(CONTRACT_TOKEN_NETWORK_REGISTRY),
-            contract_address=Address(registry_address),
+        proxy = rpc_client.new_contract_proxy(
+            abi=metadata.abi, contract_address=Address(metadata.address)
         )
 
-        self.gas_measurements = gas_measurements(self.contract_manager.contracts_version)
-
-        self.blockchain_service = blockchain_service
-
-        self.address = registry_address
+        self.address = TokenNetworkRegistryAddress(metadata.address)
+        self.proxy_manager = proxy_manager
+        self.rpc_client = rpc_client
+        self.gas_measurements = metadata.gas_measurements
+        self.metadata = metadata
+        self.node_address = self.rpc_client.address
         self.proxy = proxy
-        self.client = jsonrpc_client
-        self.node_address = self.client.address
 
     def get_token_network(
         self, token_address: TokenAddress, block_identifier: BlockSpecification
@@ -93,120 +94,359 @@ class TokenNetworkRegistry:
 
         return address
 
-    def add_token_with_limits(
+    def add_token(
         self,
         token_address: TokenAddress,
         channel_participant_deposit_limit: TokenAmount,
         token_network_deposit_limit: TokenAmount,
+        block_identifier: BlockSpecification,
     ) -> TokenNetworkAddress:
         """
         Register token of `token_address` with the token network.
         The limits apply for version 0.13.0 and above of raiden-contracts,
         since instantiation also takes the limits as constructor arguments.
         """
-        return self._add_token(
-            token_address=token_address,
-            additional_arguments={
-                "_channel_participant_deposit_limit": channel_participant_deposit_limit,
-                "_token_network_deposit_limit": token_network_deposit_limit,
-            },
-        )
-
-    def add_token_without_limits(self, token_address: TokenAddress) -> TokenNetworkAddress:
-        """
-        Register token of `token_address` with the token network.
-        This applies for versions prior to 0.13.0 of raiden-contracts,
-        since limits were hardcoded into the TokenNetwork contract.
-        """
-        return self._add_token(token_address=token_address, additional_arguments=dict())
-
-    def _add_token(
-        self, token_address: TokenAddress, additional_arguments: Dict
-    ) -> TokenNetworkAddress:
-        if not is_binary_address(token_address):
-            raise ValueError("Expected binary address format for token")
-
-        token_proxy = self.blockchain_service.token(token_address)
-
-        if token_proxy.total_supply() == "":
-            raise InvalidToken(
-                "Given token address does not follow the ERC20 standard (missing `totalSupply()`)"
+        if block_identifier == "latest":
+            raise ValueError(
+                'Calling a proxy with "latest" is usually wrong because '
+                "the result of the precondition check is not precisely predictable."
             )
 
-        log_details: Dict[str, Any] = {
+        if token_address == NULL_ADDRESS_BYTES:
+            raise InvalidTokenAddress("The call to register a token at 0x00..00 will fail.")
+
+        if token_network_deposit_limit <= 0:
+            raise InvalidTokenNetworkDepositLimit(
+                f"Token network deposit limit of {token_network_deposit_limit} is invalid"
+            )
+
+        if channel_participant_deposit_limit > token_network_deposit_limit:
+            raise InvalidChannelParticipantDepositLimit(
+                f"Channel participant deposit limit of "
+                f"{channel_participant_deposit_limit} is invalid"
+            )
+
+        token_proxy = self.proxy_manager.token(token_address)
+        try:
+            token_supply = token_proxy.total_supply(block_identifier=block_identifier)
+            already_registered = self.get_token_network(
+                token_address=token_address, block_identifier=block_identifier
+            )
+            deprecation_executor = self.get_deprecation_executor(block_identifier=block_identifier)
+            settlement_timeout_min = self.settlement_timeout_min(block_identifier=block_identifier)
+            settlement_timeout_max = self.settlement_timeout_max(block_identifier=block_identifier)
+            chain_id = self.get_chain_id(block_identifier=block_identifier)
+            secret_registry_address = self.get_secret_registry_address(
+                block_identifier=block_identifier
+            )
+            max_token_networks = self.get_max_token_networks(block_identifier=block_identifier)
+            token_networks_created = self.get_token_network_created(
+                block_identifier=block_identifier
+            )
+        except ValueError:
+            # If `block_identifier` has been pruned the checks cannot be performed
+            pass
+        except BadFunctionCallOutput:
+            raise_on_call_returned_empty(block_identifier)
+        else:
+            if token_networks_created + 1 >= max_token_networks:
+                raise BrokenPreconditionError(
+                    f"Number of token networks will exceed the max of {max_token_networks}"
+                )
+
+            if token_supply == "":
+                raise InvalidToken(
+                    "Given token address does not follow the "
+                    "ERC20 standard (missing `totalSupply()`)"
+                )
+            if already_registered:
+                raise BrokenPreconditionError(
+                    "The token is already registered in the TokenNetworkRegistry."
+                )
+
+            if deprecation_executor == NULL_ADDRESS:
+                raise BrokenPreconditionError(
+                    "The deprecation executor property for the TokenNetworkRegistry is invalid."
+                )
+
+            if chain_id == 0:
+                raise BrokenPreconditionError(
+                    "The chain ID property for the TokenNetworkRegistry is invalid."
+                )
+
+            if secret_registry_address == NULL_ADDRESS:
+                raise BrokenPreconditionError(
+                    "The secret registry address for the token network is invalid."
+                )
+
+            if settlement_timeout_min == 0:
+                raise BrokenPreconditionError(
+                    "The minimum settlement timeout for the token network "
+                    "should be larger than zero."
+                )
+
+            if settlement_timeout_min == 0:
+                raise BrokenPreconditionError(
+                    "The minimum settlement timeout for the token network "
+                    "should be larger than zero."
+                )
+
+            if settlement_timeout_max <= settlement_timeout_min:
+                raise BrokenPreconditionError(
+                    "The maximum settlement timeout for the token network "
+                    "should be larger than the minimum settlement timeout."
+                )
+
+        log_details = {
             "node": to_checksum_address(self.node_address),
             "contract": to_checksum_address(self.address),
             "token_address": to_checksum_address(token_address),
         }
-
-        failed_receipt = None
         with log_transaction(log, "add_token", log_details):
-            checking_block = self.client.get_checking_block()
-            error_prefix = "Call to createERC20TokenNetwork will fail"
-
-            kwarguments = {"_token_address": token_address}
-            kwarguments.update(additional_arguments)
-            gas_limit = self.proxy.estimate_gas(
-                checking_block, "createERC20TokenNetwork", **kwarguments
+            return self._add_token(
+                token_address=token_address,
+                channel_participant_deposit_limit=channel_participant_deposit_limit,
+                token_network_deposit_limit=token_network_deposit_limit,
+                log_details=log_details,
             )
 
-            if gas_limit:
-                error_prefix = "Call to createERC20TokenNetwork failed"
-                gas_limit = safe_gas_limit(
-                    gas_limit,
-                    self.gas_measurements["TokenNetworkRegistry createERC20TokenNetwork"],
+    def _add_token(
+        self,
+        token_address: TokenAddress,
+        channel_participant_deposit_limit: TokenAmount,
+        token_network_deposit_limit: TokenAmount,
+        log_details: Dict[Any, Any],
+    ) -> TokenNetworkAddress:
+        token_network_address = None
+
+        checking_block = self.rpc_client.get_checking_block()
+
+        kwargs = {
+            "_token_address": token_address,
+            "_channel_participant_deposit_limit": channel_participant_deposit_limit,
+            "_token_network_deposit_limit": token_network_deposit_limit,
+        }
+        gas_limit = self.proxy.estimate_gas(checking_block, "createERC20TokenNetwork", **kwargs)
+
+        if gas_limit:
+            gas_limit = safe_gas_limit(
+                gas_limit, self.gas_measurements["TokenNetworkRegistry createERC20TokenNetwork"]
+            )
+            log_details["gas_limit"] = gas_limit
+            transaction_hash = self.proxy.transact("createERC20TokenNetwork", gas_limit, **kwargs)
+
+            receipt = self.rpc_client.poll(transaction_hash)
+            failed_receipt = check_transaction_threw(receipt=receipt)
+
+            if failed_receipt:
+                failed_at_blocknumber = failed_receipt["blockNumber"]
+
+                max_token_networks = self.get_max_token_networks(
+                    block_identifier=failed_at_blocknumber
                 )
-                log_details["gas_limit"] = gas_limit
-                transaction_hash = self.proxy.transact(
-                    "createERC20TokenNetwork", gas_limit, **kwarguments
+                token_networks_created = self.get_token_network_created(
+                    block_identifier=failed_at_blocknumber
+                )
+                already_registered = self.get_token_network(
+                    token_address=token_address, block_identifier=failed_at_blocknumber
+                )
+                deprecation_executor = self.get_deprecation_executor(
+                    block_identifier=failed_at_blocknumber
+                )
+                settlement_timeout_min = self.settlement_timeout_min(
+                    block_identifier=failed_at_blocknumber
+                )
+                settlement_timeout_max = self.settlement_timeout_max(
+                    block_identifier=failed_at_blocknumber
+                )
+                chain_id = self.get_chain_id(block_identifier=failed_at_blocknumber)
+                secret_registry_address = self.get_secret_registry_address(
+                    block_identifier=failed_at_blocknumber
                 )
 
-                receipt = self.client.poll(transaction_hash)
-                failed_receipt = check_transaction_threw(receipt=receipt)
+                if failed_receipt["cumulativeGasUsed"] == gas_limit:
+                    msg = (
+                        f"createERC20TokenNetwork failed and all gas was used "
+                        f"({gas_limit}). Estimate gas may have underestimated "
+                        f"createERC20TokenNetwork, or succeeded even though an assert is "
+                        f"triggered, or the smart contract code has an "
+                        f"conditional assert."
+                    )
+                    raise RaidenRecoverableError(msg)
 
-            transaction_executed = gas_limit is not None
-            if not transaction_executed or failed_receipt:
-                if failed_receipt:
-                    block = failed_receipt["blockNumber"]
-                else:
-                    block = checking_block
+                if token_networks_created >= max_token_networks:
+                    raise RaidenRecoverableError(
+                        "The number of existing token networks reached the maximum allowed"
+                    )
 
-                required_gas = (
-                    gas_limit
-                    if gas_limit
-                    else self.gas_measurements["TokenNetworkRegistry createERC20TokenNetwork"]
+                if already_registered:
+                    # Race condition lost, the token network was created in a different
+                    # transaction which got mined first.
+                    raise RaidenRecoverableError(
+                        "The token was already registered in the TokenNetworkRegistry."
+                    )
+
+                if deprecation_executor == NULL_ADDRESS:
+                    raise RaidenUnrecoverableError(
+                        "The deprecation executor property for the "
+                        "TokenNetworkRegistry is invalid."
+                    )
+
+                if chain_id == 0:
+                    raise RaidenUnrecoverableError(
+                        "The chain ID property for the TokenNetworkRegistry is invalid."
+                    )
+
+                if secret_registry_address == NULL_ADDRESS:
+                    raise RaidenUnrecoverableError(
+                        "The secret registry address for the token network is invalid."
+                    )
+
+                if settlement_timeout_min == 0:
+                    raise RaidenUnrecoverableError(
+                        "The minimum settlement timeout for the token network "
+                        "should be larger than zero."
+                    )
+
+                if settlement_timeout_min == 0:
+                    raise RaidenUnrecoverableError(
+                        "The minimum settlement timeout for the token network "
+                        "should be larger than zero."
+                    )
+
+                if settlement_timeout_max <= settlement_timeout_min:
+                    raise RaidenUnrecoverableError(
+                        "The maximum settlement timeout for the token network "
+                        "should be larger than the minimum settlement timeout."
+                    )
+
+                # At this point, the TokenNetworkRegistry fails to instantiate
+                # a new TokenNetwork.
+                raise RaidenUnrecoverableError(
+                    "createERC20TokenNetwork failed for an unknown reason"
                 )
-                self.proxy.jsonrpc_client.check_for_insufficient_eth(
-                    transaction_name="createERC20TokenNetwork",
-                    transaction_executed=transaction_executed,
-                    required_gas=required_gas,
-                    block_identifier=block,
-                )
 
-                if self.get_token_network(token_address, block):
-                    raise RaidenRecoverableError(f"{error_prefix}. Token already registered")
-
-                raise RaidenUnrecoverableError(error_prefix)
-
-            token_network_address = self.get_token_network(token_address, "latest")
+            token_network_address = self.get_token_network(token_address, receipt["blockHash"])
             if token_network_address is None:
                 msg = "createERC20TokenNetwork succeeded but token network address is Null"
-                raise RuntimeError(msg)
+                raise RaidenUnrecoverableError(msg)
+        else:
+            # The latest block can not be used reliably because of reorgs,
+            # therefore every call using this block has to handle pruned data.
+            failed_at = self.proxy.jsonrpc_client.get_block("latest")
+            failed_at_blocknumber = failed_at["number"]
 
+            max_token_networks = self.get_max_token_networks(
+                block_identifier=failed_at_blocknumber
+            )
+            token_networks_created = self.get_token_network_created(
+                block_identifier=failed_at_blocknumber
+            )
+
+            already_registered = self.get_token_network(
+                token_address=token_address, block_identifier=failed_at_blocknumber
+            )
+            deprecation_executor = self.get_deprecation_executor(
+                block_identifier=failed_at_blocknumber
+            )
+            settlement_timeout_min = self.settlement_timeout_min(
+                block_identifier=failed_at_blocknumber
+            )
+            settlement_timeout_max = self.settlement_timeout_max(
+                block_identifier=failed_at_blocknumber
+            )
+            chain_id = self.get_chain_id(block_identifier=failed_at_blocknumber)
+            secret_registry_address = self.get_secret_registry_address(
+                block_identifier=failed_at_blocknumber
+            )
+
+            required_gas = (
+                gas_limit
+                if gas_limit
+                else self.gas_measurements.get("TokenNetworkRegistry createERC20TokenNetwork")
+            )
+            self.proxy.jsonrpc_client.check_for_insufficient_eth(
+                transaction_name="createERC20TokenNetwork",
+                transaction_executed=False,
+                required_gas=required_gas,
+                block_identifier=failed_at_blocknumber,
+            )
+
+            if token_networks_created >= max_token_networks:
+                raise RaidenRecoverableError(
+                    "The number of existing token networks reached the maximum allowed"
+                )
+
+            if already_registered:
+                # Race condition lost, the token network was created in a different
+                # transaction which got mined first.
+                raise RaidenRecoverableError(
+                    "The token was already registered in the TokenNetworkRegistry."
+                )
+
+            if deprecation_executor == NULL_ADDRESS:
+                raise RaidenUnrecoverableError(
+                    "The deprecation executor property for the " "TokenNetworkRegistry is invalid."
+                )
+
+            if chain_id == 0:
+                raise RaidenUnrecoverableError(
+                    "The chain ID property for the TokenNetworkRegistry is invalid."
+                )
+
+            if chain_id != self.rpc_client.chain_id:
+                raise RaidenUnrecoverableError(
+                    f"The provided chain ID {chain_id} does not match the "
+                    f"network Raiden is running on: {self.rpc_client.chain_id}."
+                )
+
+            if secret_registry_address == NULL_ADDRESS:
+                raise RaidenUnrecoverableError(
+                    "The secret registry address for the token network is invalid."
+                )
+
+            if settlement_timeout_min == 0:
+                raise RaidenUnrecoverableError(
+                    "The minimum settlement timeout for the token network "
+                    "should be larger than zero."
+                )
+
+            if settlement_timeout_min == 0:
+                raise RaidenUnrecoverableError(
+                    "The minimum settlement timeout for the token network "
+                    "should be larger than zero."
+                )
+
+            if settlement_timeout_max <= settlement_timeout_min:
+                raise RaidenUnrecoverableError(
+                    "The maximum settlement timeout for the token network "
+                    "should be larger than the minimum settlement timeout."
+                )
+
+            if self.get_token_network(token_address, failed_at_blocknumber):
+                raise RaidenRecoverableError("Token already registered")
+
+            # At this point, the TokenNetworkRegistry fails to instantiate
+            # a new TokenNetwork.
+            raise RaidenUnrecoverableError("createERC20TokenNetwork failed for an unknown reason")
         return token_network_address
 
     def tokenadded_filter(
         self,
-        from_block: BlockSpecification = GENESIS_BLOCK_NUMBER,
+        from_block: Optional[BlockSpecification] = None,
         to_block: BlockSpecification = "latest",
     ) -> StatelessFilter:
-        event_abi = self.contract_manager.get_event_abi(
-            CONTRACT_TOKEN_NETWORK_REGISTRY, EVENT_TOKEN_NETWORK_CREATED
+        event_abi = find_matching_event_abi(
+            abi=self.metadata.abi, event_name=EVENT_TOKEN_NETWORK_CREATED
         )
+
         topics: List[Optional[str]] = [encode_hex(event_abi_to_log_topic(event_abi))]
 
+        if from_block is None:
+            from_block = self.metadata.filters_start_at
+
         registry_address_bin = self.proxy.contract_address
-        return self.client.new_filter(
+        return self.rpc_client.new_filter(
             contract_address=registry_address_bin,
             topics=topics,
             from_block=from_block,
@@ -214,17 +454,58 @@ class TokenNetworkRegistry:
         )
 
     def filter_token_added_events(self) -> List[Dict[str, Any]]:
-        filter_ = self.proxy.contract.events.TokenNetworkCreated.createFilter(fromBlock=0)
+        filter_ = self.proxy.contract.events.TokenNetworkCreated.createFilter(
+            fromBlock=self.metadata.filters_start_at
+        )
         events = filter_.get_all_entries()
         if filter_.filter_id:
             self.proxy.contract.web3.eth.uninstallFilter(filter_.filter_id)
 
         return events
 
-    def settlement_timeout_min(self) -> int:
-        """ Returns the minimal settlement timeout for the token network registry. """
-        return self.proxy.contract.functions.settlement_timeout_min().call()
+    def get_chain_id(self, block_identifier: BlockSpecification) -> int:
+        return self.proxy.contract.functions.chain_id().call(block_identifier=block_identifier)
 
-    def settlement_timeout_max(self) -> int:
+    def get_secret_registry_address(
+        self, block_identifier: BlockSpecification
+    ) -> SecretRegistryAddress:
+        return SecretRegistryAddress(
+            self.proxy.contract.functions.secret_registry_address().call(
+                block_identifier=block_identifier
+            )
+        )
+
+    def get_deprecation_executor(self, block_identifier: BlockSpecification) -> Address:
+        return Address(
+            self.proxy.contract.functions.deprecation_executor().call(
+                block_identifier=block_identifier
+            )
+        )
+
+    def settlement_timeout_min(self, block_identifier: BlockSpecification) -> int:
+        """ Returns the minimal settlement timeout for the token network registry. """
+        return self.proxy.contract.functions.settlement_timeout_min().call(
+            block_identifier=block_identifier
+        )
+
+    def settlement_timeout_max(self, block_identifier: BlockSpecification) -> int:
         """ Returns the maximal settlement timeout for the token network registry. """
-        return self.proxy.contract.functions.settlement_timeout_max().call()
+        return self.proxy.contract.functions.settlement_timeout_max().call(
+            block_identifier=block_identifier
+        )
+
+    def get_token_network_created(self, block_identifier: BlockSpecification) -> int:
+        """ Returns the number of TokenNetwork contracts created so far in the
+        token network registry.
+        """
+        return self.proxy.contract.functions.token_network_created().call(
+            block_identifier=block_identifier
+        )
+
+    def get_max_token_networks(self, block_identifier: BlockSpecification) -> int:
+        """ Returns the maximal number of TokenNetwork contracts that the
+        token network registry.
+        """
+        return self.proxy.contract.functions.max_token_networks().call(
+            block_identifier=block_identifier
+        )

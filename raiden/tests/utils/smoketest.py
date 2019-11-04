@@ -8,7 +8,7 @@ from http import HTTPStatus
 
 import click
 import requests
-from eth_utils import encode_hex, remove_0x_prefix, to_canonical_address, to_checksum_address
+from eth_utils import remove_0x_prefix, to_canonical_address, to_checksum_address
 from gevent import sleep
 from web3 import HTTPProvider, Web3
 from web3.middleware import geth_poa_middleware
@@ -19,17 +19,15 @@ from raiden.api.rest import APIServer, RestAPI
 from raiden.connection_manager import ConnectionManager
 from raiden.constants import (
     EMPTY_ADDRESS,
-    RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT,
-    RED_EYES_PER_TOKEN_NETWORK_LIMIT,
+    GENESIS_BLOCK_NUMBER,
     SECONDS_PER_DAY,
     UINT256_MAX,
     EthClient,
 )
-from raiden.network.blockchain_service import BlockChainService
-from raiden.network.proxies.token_network_registry import TokenNetworkRegistry
+from raiden.network.proxies.proxy_manager import ProxyManager, ProxyManagerMetadata
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
-from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS, DEVELOPMENT_CONTRACT_VERSION
+from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS
 from raiden.tests.fixtures.constants import DEFAULT_BALANCE, DEFAULT_PASSPHRASE
 from raiden.tests.utils.eth_node import (
     AccountDescription,
@@ -119,10 +117,8 @@ def deploy_smoketest_contracts(
         chain_id,
         TEST_SETTLE_TIMEOUT_MIN,
         TEST_SETTLE_TIMEOUT_MAX,
+        UINT256_MAX,
     ]
-
-    if contract_manager.contracts_version == DEVELOPMENT_CONTRACT_VERSION:
-        constructor_arguments.append(UINT256_MAX)
 
     token_network_registry_address = deploy_contract_web3(
         contract_name=CONTRACT_TOKEN_NETWORK_REGISTRY,
@@ -135,28 +131,27 @@ def deploy_smoketest_contracts(
         CONTRACT_SECRET_REGISTRY: secret_registry_address,
         CONTRACT_TOKEN_NETWORK_REGISTRY: token_network_registry_address,
     }
-    if contract_manager.contracts_version == DEVELOPMENT_CONTRACT_VERSION:
-        service_registry_address = deploy_contract_web3(
-            contract_name=CONTRACT_SERVICE_REGISTRY,
-            deploy_client=client,
-            contract_manager=contract_manager,
-            constructor_arguments=(
-                token_address,
-                EMPTY_ADDRESS,
-                int(500e18),
-                6,
-                5,
-                180 * SECONDS_PER_DAY,
-                1000,
-                200 * SECONDS_PER_DAY,
-            ),
-        )
-        addresses[CONTRACT_SERVICE_REGISTRY] = service_registry_address
+    service_registry_address = deploy_contract_web3(
+        contract_name=CONTRACT_SERVICE_REGISTRY,
+        deploy_client=client,
+        contract_manager=contract_manager,
+        constructor_arguments=(
+            token_address,
+            EMPTY_ADDRESS,
+            int(500e18),
+            6,
+            5,
+            180 * SECONDS_PER_DAY,
+            1000,
+            200 * SECONDS_PER_DAY,
+        ),
+    )
+    addresses[CONTRACT_SERVICE_REGISTRY] = service_registry_address
 
-        # The MSC is not used, no need to waste time on deployment
-        addresses[CONTRACT_MONITORING_SERVICE] = make_address()
-        # The OneToN contract is not used, no need to waste time on deployment
-        addresses[CONTRACT_ONE_TO_N] = make_address()
+    # The MSC is not used, no need to waste time on deployment
+    addresses[CONTRACT_MONITORING_SERVICE] = make_address()
+    # The OneToN contract is not used, no need to waste time on deployment
+    addresses[CONTRACT_ONE_TO_N] = make_address()
 
     return addresses
 
@@ -202,8 +197,7 @@ def setup_testchain(
         chain_id=NETWORKNAME_TO_ID["smoketest"],
     )
 
-    nodekeyhex = remove_0x_prefix(encode_hex(TEST_PRIVKEY))
-    datadir = eth_node_to_datadir(nodekeyhex, base_datadir)
+    datadir = eth_node_to_datadir(privatekey_to_address(TEST_PRIVKEY), base_datadir)
     if eth_client is EthClient.GETH:
         keystore = geth_keystore(datadir)
     elif eth_client is EthClient.PARITY:
@@ -280,8 +274,13 @@ def setup_raiden(
         client = JSONRPCClient(web3, get_private_key(keystore))
     contract_manager = ContractManager(contracts_precompiled_path(contracts_version))
 
-    blockchain_service = BlockChainService(
-        jsonrpc_client=client, contract_manager=contract_manager
+    proxy_manager = ProxyManager(
+        rpc_client=client,
+        contract_manager=contract_manager,
+        metadata=ProxyManagerMetadata(
+            token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
+            filters_start_at=GENESIS_BLOCK_NUMBER,
+        ),
     )
 
     token = deploy_token(
@@ -299,23 +298,16 @@ def setup_raiden(
         contract_manager=contract_manager,
         token_address=to_canonical_address(token.contract.address),
     )
-    registry = TokenNetworkRegistry(
-        jsonrpc_client=client,
-        registry_address=contract_addresses[CONTRACT_TOKEN_NETWORK_REGISTRY],
-        contract_manager=contract_manager,
-        blockchain_service=blockchain_service,
+    registry = proxy_manager.token_network_registry(
+        contract_addresses[CONTRACT_TOKEN_NETWORK_REGISTRY]
     )
 
-    if contracts_version == DEVELOPMENT_CONTRACT_VERSION:
-        registry.add_token_with_limits(
-            token_address=to_canonical_address(token.contract.address),
-            channel_participant_deposit_limit=RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT,
-            token_network_deposit_limit=RED_EYES_PER_TOKEN_NETWORK_LIMIT,
-        )
-    else:
-        registry.add_token_without_limits(
-            token_address=to_canonical_address(token.contract.address)
-        )
+    registry.add_token(
+        token_address=to_canonical_address(token.contract.address),
+        channel_participant_deposit_limit=UINT256_MAX,
+        token_network_deposit_limit=UINT256_MAX,
+        block_identifier=client.get_confirmed_blockhash(),
+    )
 
     print_step("Setting up Raiden")
     tokennetwork_registry_contract_address = to_checksum_address(
@@ -340,19 +332,18 @@ def setup_raiden(
         "transport": transport,
     }
 
-    if contracts_version == DEVELOPMENT_CONTRACT_VERSION:
-        service_registry_contract_address = to_checksum_address(
-            contract_addresses[CONTRACT_SERVICE_REGISTRY]
-        )
-        args["service_registry_contract_address"] = service_registry_contract_address
+    service_registry_contract_address = to_checksum_address(
+        contract_addresses[CONTRACT_SERVICE_REGISTRY]
+    )
+    args["service_registry_contract_address"] = service_registry_contract_address
 
-        monitoring_service_contract_address = to_checksum_address(
-            contract_addresses[CONTRACT_MONITORING_SERVICE]
-        )
-        args["monitoring_service_contract_address"] = monitoring_service_contract_address
+    monitoring_service_contract_address = to_checksum_address(
+        contract_addresses[CONTRACT_MONITORING_SERVICE]
+    )
+    args["monitoring_service_contract_address"] = monitoring_service_contract_address
 
-        one_to_n_contract_address = to_checksum_address(contract_addresses[CONTRACT_ONE_TO_N])
-        args["one_to_n_contract_address"] = one_to_n_contract_address
+    one_to_n_contract_address = to_checksum_address(contract_addresses[CONTRACT_ONE_TO_N])
+    args["one_to_n_contract_address"] = one_to_n_contract_address
 
     # Wait until the secret registry is confirmed, otherwise the App
     # inialization will fail, needed for the check

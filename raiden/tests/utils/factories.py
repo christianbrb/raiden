@@ -23,13 +23,13 @@ from raiden.transfer.mediated_transfer.state import (
 )
 from raiden.transfer.mediated_transfer.state_change import ActionInitInitiator, ActionInitMediator
 from raiden.transfer.state import (
-    NODE_NETWORK_REACHABLE,
     BalanceProofSignedState,
     BalanceProofUnsignedState,
     ChainState,
     HopState,
     NettingChannelEndState,
     NettingChannelState,
+    NetworkState,
     PendingLocksState,
     RouteState,
     TokenNetworkRegistryState,
@@ -307,8 +307,8 @@ def make_hop_to_channel(channel_state: NettingChannelState = EMPTY) -> HopState:
 # Prefixing with UNIT_ to differ from the default globals.
 UNIT_SETTLE_TIMEOUT = 50
 UNIT_REVEAL_TIMEOUT = 5
-UNIT_TRANSFER_AMOUNT = 10
-UNIT_TRANSFER_FEE = 5
+UNIT_TRANSFER_AMOUNT = 50
+UNIT_TRANSFER_FEE = 2
 UNIT_SECRET = Secret(b"secretsecretsecretsecretsecretse")
 UNIT_SECRETHASH = sha256_secrethash(UNIT_SECRET)
 UNIT_TOKEN_ADDRESS = b"tokentokentokentoken"
@@ -336,10 +336,10 @@ HOP2_KEY = b"22222222222222222222222222222222"
 HOP3_KEY = b"33333333333333333333333333333333"
 HOP4_KEY = b"44444444444444444444444444444444"
 HOP5_KEY = b"55555555555555555555555555555555"
-HOP1 = privatekey_to_address(HOP1_KEY)
-HOP2 = privatekey_to_address(HOP2_KEY)
-HOP3 = privatekey_to_address(HOP3_KEY)
-ADDR = b"addraddraddraddraddr"
+HOP1 = InitiatorAddress(privatekey_to_address(HOP1_KEY))
+HOP2 = Address(privatekey_to_address(HOP2_KEY))
+HOP3 = Address(privatekey_to_address(HOP3_KEY))
+ADDR = TargetAddress(b"addraddraddraddraddr")
 
 
 def make_pending_locks(locks: List[HashTimeLockState]) -> PendingLocksState:
@@ -526,7 +526,6 @@ class TransferDescriptionProperties(Properties):
     initiator: InitiatorAddress = EMPTY
     target: TargetAddress = EMPTY
     secret: Secret = EMPTY
-    allocated_fee: FeeAmount = EMPTY
     TARGET_TYPE = TransferDescriptionWithSecretState
 
 
@@ -538,7 +537,6 @@ TransferDescriptionProperties.DEFAULTS = TransferDescriptionProperties(
     initiator=UNIT_TRANSFER_INITIATOR,
     target=UNIT_TRANSFER_TARGET,
     secret=GENERATE,
-    allocated_fee=0,
 )
 
 
@@ -749,7 +747,13 @@ def _(properties, defaults=None) -> LockedTransferUnsignedState:
     if transfer.locksroot == LOCKSROOT_OF_NO_LOCKS:
         transfer = replace(transfer, locksroot=keccak(lock.encoded))
 
-    balance_proof = create(transfer.extract(BalanceProofProperties))
+    balance_proof_properties = transfer.extract(BalanceProofProperties)
+    if properties.transferred_amount == EMPTY:
+        balance_proof_properties = replace(balance_proof_properties, transferred_amount=0)
+    if properties.locked_amount == EMPTY:
+        balance_proof_properties = replace(balance_proof_properties, locked_amount=transfer.amount)
+    balance_proof = create(balance_proof_properties)
+
     netting_channel_state = create(
         NettingChannelStateProperties(canonical_identifier=balance_proof.canonical_identifier)
     )
@@ -828,6 +832,11 @@ def _(properties, defaults=None) -> LockedTransferSignedState:
     params["metadata"] = Metadata(routes=[RouteMetadata(route=route) for route in routes])
 
     locked_transfer = LockedTransfer(lock=lock, **params, signature=EMPTY_SIGNATURE)
+    if properties.locked_amount == EMPTY:
+        locked_transfer.locked_amount = transfer.amount
+    if properties.transferred_amount == EMPTY:
+        locked_transfer.transferred_amount = 0
+
     locked_transfer.sign(signer)
 
     assert locked_transfer.metadata
@@ -969,10 +978,14 @@ def make_signed_transfer_for(
             locksroot=locksroot,
             canonical_identifier=channel_state.canonical_identifier,
             locked_amount=properties.amount,
+            transferred_amount=0,
         )
     else:
         transfer_properties = LockedTransferUnsignedStateProperties(
-            locksroot=locksroot, canonical_identifier=channel_state.canonical_identifier
+            locksroot=locksroot,
+            canonical_identifier=channel_state.canonical_identifier,
+            locked_amount=properties.locked_amount,
+            transferred_amount=properties.transferred_amount,
         )
 
     transfer_properties.__dict__.pop("route_states", None)
@@ -1039,7 +1052,7 @@ class ChannelSet:
 
     @property
     def nodeaddresses_to_networkstates(self) -> NodeNetworkStateMap:
-        return {channel.partner_state.address: NODE_NETWORK_REACHABLE for channel in self.channels}
+        return {channel.partner_state.address: NetworkState.REACHABLE for channel in self.channels}
 
     def our_address(self, index: int) -> Address:
         return self.channels[index].our_state.address
@@ -1053,18 +1066,26 @@ class ChannelSet:
     def get_hops(self, *args) -> List[HopState]:
         return [self.get_hop(index) for index in (args or range(len(self.channels)))]
 
-    def get_route(self, channel_index: int) -> RouteState:
+    def get_route(
+        self, channel_index: int, estimated_fee: FeeAmount = FeeAmount(0)  # noqa: B008
+    ) -> RouteState:
         """ Creates an *outbound* RouteState, based on channel our/partner addresses. """
 
         channel = self.channels[channel_index]
         route = [channel.our_state.address, channel.partner_state.address]
 
         return RouteState(
-            route=route, forward_channel_id=channel.canonical_identifier.channel_identifier
+            route=route,
+            forward_channel_id=channel.canonical_identifier.channel_identifier,
+            estimated_fee=estimated_fee,
         )
 
-    def get_routes(self, *args) -> List[RouteState]:
-        return [self.get_route(index) for index in (args or range(len(self.channels)))]
+    def get_routes(
+        self, *args, estimated_fee: FeeAmount = FeeAmount(0)  # noqa: B008
+    ) -> List[RouteState]:
+        return [
+            self.get_route(index, estimated_fee) for index in (args or range(len(self.channels)))
+        ]
 
     def __getitem__(self, item: int) -> NettingChannelState:
         return self.channels[item]
@@ -1152,7 +1173,10 @@ def mediator_make_init_action(
 
 
 def initiator_make_init_action(
-    channels: ChannelSet, routes: List[List[Address]], transfer: TransferDescriptionWithSecretState
+    channels: ChannelSet,
+    routes: List[List[Address]],
+    transfer: TransferDescriptionWithSecretState,
+    estimated_fee: FeeAmount,
 ) -> ActionInitInitiator:
     def get_forward_channel(route: List[Address]) -> Optional[ChannelID]:
         for channel_state in channels.channels:
@@ -1164,7 +1188,7 @@ def initiator_make_init_action(
     assert len(forwards) == len(routes)
 
     route_states = [
-        RouteState(route=route, forward_channel_id=forwards[idx])
+        RouteState(route=route, forward_channel_id=forwards[idx], estimated_fee=estimated_fee)
         for idx, route in enumerate(routes)
     ]
 
@@ -1365,7 +1389,7 @@ def make_chain_state(
 
 
 def make_node_availability_map(nodes):
-    return {node: NODE_NETWORK_REACHABLE for node in nodes}
+    return {node: NetworkState.REACHABLE for node in nodes}
 
 
 def make_route_from_channel(channel: NettingChannelState) -> RouteState:

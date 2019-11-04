@@ -2,6 +2,7 @@
 import random
 from copy import deepcopy
 from dataclasses import replace
+from typing import List, Optional, Tuple
 
 import pytest
 
@@ -42,6 +43,7 @@ from raiden.tests.utils.factories import (
 )
 from raiden.tests.utils.transfer import assert_dropped
 from raiden.transfer import channel, routes
+from raiden.transfer.architecture import Event
 from raiden.transfer.events import (
     ContractSendChannelClose,
     ContractSendSecretReveal,
@@ -60,7 +62,10 @@ from raiden.transfer.mediated_transfer.events import (
     SendRefundTransfer,
     SendSecretReveal,
 )
-from raiden.transfer.mediated_transfer.mediation_fee import FeeScheduleState
+from raiden.transfer.mediated_transfer.mediation_fee import (
+    FeeScheduleState,
+    calculate_imbalance_fees,
+)
 from raiden.transfer.mediated_transfer.mediator import get_payee_channel, set_offchain_secret
 from raiden.transfer.mediated_transfer.state import (
     MediationPairState,
@@ -73,12 +78,11 @@ from raiden.transfer.mediated_transfer.state_change import (
     ReceiveSecretReveal,
 )
 from raiden.transfer.state import (
-    NODE_NETWORK_REACHABLE,
-    NODE_NETWORK_UNREACHABLE,
     ChannelState,
     HashTimeLockState,
     HopState,
     NettingChannelState,
+    NetworkState,
     RouteState,
     message_identifier_from_prng,
 )
@@ -90,7 +94,7 @@ from raiden.transfer.state_change import (
     ReceiveUnlock,
 )
 from raiden.utils import random_secret
-from raiden.utils.typing import FeeAmount
+from raiden.utils.typing import BlockExpiration, BlockNumber, FeeAmount, TokenAmount
 
 
 def make_route_from_channelstate(channel_state):
@@ -381,7 +385,7 @@ def test_events_for_secretreveal():
         setup.transfers_pair, our_address, pseudo_random_generator
     )
 
-    # the payeee from the first_pair did not send a secret reveal message, do
+    # the payee from the first_pair did not send a secret reveal message, do
     # nothing
     assert not events
 
@@ -439,7 +443,7 @@ def test_events_for_balanceproof():
     """
     pseudo_random_generator = random.Random()
 
-    setup = factories.make_transfers_pair(2, amount=10, block_number=1)
+    setup = factories.make_transfers_pair(2, amount=UNIT_TRANSFER_AMOUNT, block_number=1)
     last_pair = setup.transfers_pair[-1]
     last_pair.payee_state = "payee_secret_revealed"
 
@@ -1141,7 +1145,7 @@ def test_do_not_claim_an_almost_expiring_lock_if_a_payment_didnt_occur():
         sender=from_transfer.balance_proof.sender,
     )
 
-    nodeaddresses_to_networkstates = {UNIT_TRANSFER_TARGET: NODE_NETWORK_REACHABLE}
+    nodeaddresses_to_networkstates = {UNIT_TRANSFER_TARGET: NetworkState.REACHABLE}
 
     iteration = mediator.state_transition(
         mediator_state=None,
@@ -1553,14 +1557,14 @@ def test_mediator_lock_expired_with_receive_lock_expired():
             "recipient": UNIT_TRANSFER_TARGET,
             "transfer": {
                 "lock": {
-                    "amount": 10,
+                    "amount": UNIT_TRANSFER_AMOUNT,
                     "expiration": expiration,
                     "secrethash": transfer.lock.secrethash,
                 },
                 "balance_proof": {
                     "nonce": 1,
                     "transferred_amount": 0,
-                    "locked_amount": 10,
+                    "locked_amount": UNIT_TRANSFER_AMOUNT,
                     # pylint: disable=no-member
                     "locksroot": transfer.balance_proof.locksroot,
                 },
@@ -1843,7 +1847,7 @@ def test_node_change_network_state_reachable_node():
 
     iteration = mediator.state_transition(
         mediator_state=mediator_state,
-        state_change=ActionChangeNodeNetworkState(HOP2, NODE_NETWORK_REACHABLE),
+        state_change=ActionChangeNodeNetworkState(HOP2, NetworkState.REACHABLE),
         channelidentifiers_to_channels=setup.channel_map,
         nodeaddresses_to_networkstates=setup.channels.nodeaddresses_to_networkstates,
         pseudo_random_generator=random.Random(),
@@ -1873,7 +1877,7 @@ def test_node_change_network_state_unreachable_node():
     mediator_state = MediatorTransferState(secrethash=UNIT_SECRETHASH, routes=[])
     iteration = mediator.handle_node_change_network_state(
         mediator_state=mediator_state,
-        state_change=ActionChangeNodeNetworkState(HOP1, NODE_NETWORK_UNREACHABLE),
+        state_change=ActionChangeNodeNetworkState(HOP1, NetworkState.UNREACHABLE),
         channelidentifiers_to_channels={},
         pseudo_random_generator=random.Random(),
         block_number=1,
@@ -1885,29 +1889,18 @@ def test_node_change_network_state_unreachable_node():
     assert iteration.events == []
 
 
-def test_next_transfer_pair_with_fees_deducted():
-    balance = 10
-    fee_in = 1
-    fee_out = 2
-
+def _foward_transfer_pair(
+    amount: TokenAmount,
+    channel_in: NettingChannelStateProperties,
+    channel_out: NettingChannelStateProperties,
+) -> Tuple[Optional[MediationPairState], List[Event]]:
     payer_transfer = create(
         LockedTransferSignedStateProperties(
-            amount=balance + fee_in + fee_out, initiator=HOP1, target=ADDR, expiration=50
+            amount=amount, initiator=HOP1, target=ADDR, expiration=BlockExpiration(50)
         )
     )
 
-    channels = make_channel_set(
-        [
-            NettingChannelStateProperties(
-                our_state=NettingChannelEndStateProperties(balance=balance),
-                fee_schedule=FeeScheduleState(flat=fee_in),
-            ),
-            NettingChannelStateProperties(
-                our_state=NettingChannelEndStateProperties(balance=balance),
-                fee_schedule=FeeScheduleState(flat=fee_out),
-            ),
-        ]
-    )
+    channels = make_channel_set([channel_in, channel_out])
 
     pair, events = mediator.forward_transfer_pair(
         payer_transfer=payer_transfer,
@@ -1916,12 +1909,172 @@ def test_next_transfer_pair_with_fees_deducted():
         route_state_table=channels.get_routes(),
         channelidentifiers_to_channels=channels.channel_map,
         pseudo_random_generator=random.Random(),
-        block_number=2,
+        block_number=BlockNumber(2),
+    )
+    return pair, events
+
+
+def test_next_transfer_pair_with_fees_deducted():
+    balance = 10
+    fee_in = 1
+    fee_out = 2
+
+    pair, events = _foward_transfer_pair(
+        balance,
+        NettingChannelStateProperties(
+            our_state=NettingChannelEndStateProperties(balance=balance),
+            fee_schedule=FeeScheduleState(flat=fee_in),
+        ),
+        NettingChannelStateProperties(
+            our_state=NettingChannelEndStateProperties(balance=balance - fee_in - fee_out),
+            fee_schedule=FeeScheduleState(flat=fee_out),
+        ),
     )
     assert pair
 
     event = search_for_item(events, SendLockedTransfer, {"recipient": pair.payee_address})
-    assert event.transfer.lock.amount == balance
+    assert event.transfer.lock.amount == balance - fee_in - fee_out
+
+
+def test_imbalance_penalty_at_insufficent_payer_balance():
+    """
+    Test that having an imbalance penalty fee during a transfer where payer has
+    insufficient balance does not throw an UndefinedMediationFee exception from
+    the state machine.
+
+    Regression test for https://github.com/raiden-network/raiden/issues/4835
+    """
+    # imbalance_penalty result is not checked, we only verify that the calculation does not fail.
+    imbalance_penalty = calculate_imbalance_fees(channel_capacity=20, proportional_imbalance_fee=1)
+    pair, _ = _foward_transfer_pair(
+        10,
+        NettingChannelStateProperties(
+            # the payer's capacity is 20 - 11 = 9
+            our_state=NettingChannelEndStateProperties(balance=11),
+            fee_schedule=FeeScheduleState(flat=0, imbalance_penalty=imbalance_penalty),
+        ),
+        NettingChannelStateProperties(
+            our_state=NettingChannelEndStateProperties(balance=11),
+            fee_schedule=FeeScheduleState(flat=0, imbalance_penalty=imbalance_penalty),
+        ),
+    )
+    assert not pair
+
+
+def test_imbalance_penalty_at_insufficent_mediator_balance():
+    """
+    Test that having an imbalance penalty fee during a transfer where mediator has
+    insufficient balance does not throw an UndefinedMediationFee exception from
+    the state machine.
+    """
+    # imbalance_penalty result is not checked, we only verify that the calculation does not fail.
+    imbalance_penalty = calculate_imbalance_fees(channel_capacity=20, proportional_imbalance_fee=1)
+    pair, _ = _foward_transfer_pair(
+        10,
+        NettingChannelStateProperties(
+            our_state=NettingChannelEndStateProperties(balance=11),
+            fee_schedule=FeeScheduleState(flat=0, imbalance_penalty=imbalance_penalty),
+        ),
+        NettingChannelStateProperties(
+            our_state=NettingChannelEndStateProperties(balance=9),
+            fee_schedule=FeeScheduleState(flat=0, imbalance_penalty=imbalance_penalty),
+        ),
+    )
+    assert not pair
+
+
+def test_imbalance_penalty_with_barely_sufficient_balance():
+    """
+    Without keeping the flat fee, the mediator's balance would be insufficient.
+    This tests that the imbalance fee calculation does not fail in such a case.
+    """
+    # imbalance_penalty result is not checked, we only verify that the calculation does not fail.
+    imbalance_penalty = calculate_imbalance_fees(channel_capacity=20, proportional_imbalance_fee=1)
+    pair, _ = _foward_transfer_pair(
+        10,
+        NettingChannelStateProperties(
+            # the payer's capacity is 20 - 9 = 11
+            our_state=NettingChannelEndStateProperties(balance=9),
+            fee_schedule=FeeScheduleState(flat=0, imbalance_penalty=imbalance_penalty),
+        ),
+        NettingChannelStateProperties(
+            our_state=NettingChannelEndStateProperties(balance=9),
+            fee_schedule=FeeScheduleState(flat=1, imbalance_penalty=imbalance_penalty),
+        ),
+    )
+    assert pair
+
+
+def test_imbalance_penalty_prevents_transfer():
+    """
+    In this case the imbalance fee is negative and increases the amount
+    transferred from the mediator to the target above the mediators capacity on
+    that channel. The mediator has two choices:
+    1. Only transfer as much as he has capacity. If this payment succeeds, this
+       is to the mediator's advantage, since he gets to keep more tokens.
+    2. Refund the transfer, because he can't send the negative imbalance fee he
+    promised and the payment is likely to have enough tokens when reaching the
+    target.
+    This test verifies that we choose option 2.
+    """
+    # Will reward payment with the enormous amount of 1 token per transferred token!
+    imbalance_penalty = [(0, 100), (100, 0)]
+    pair, _ = _foward_transfer_pair(
+        10,
+        NettingChannelStateProperties(
+            our_state=NettingChannelEndStateProperties(balance=10),
+            fee_schedule=FeeScheduleState(flat=0, imbalance_penalty=imbalance_penalty),
+        ),
+        NettingChannelStateProperties(
+            our_state=NettingChannelEndStateProperties(balance=10),
+            fee_schedule=FeeScheduleState(flat=0, imbalance_penalty=imbalance_penalty),
+        ),
+    )
+    assert not pair
+
+
+def test_outdated_imbalance_penalty_at_transfer():
+    """
+    Test that having an outdated (for older capacity) imbalance penalty fee
+    during a transfer where we have sufficient balance does not throw an
+    UndefinedMediationFee exception from the state machine.
+
+    Regression test for https://github.com/raiden-network/raiden/issues/4835
+    """
+    payer_transfer = create(
+        LockedTransferSignedStateProperties(amount=10, initiator=HOP1, target=ADDR, expiration=50)
+    )
+
+    imbalance_penalty = calculate_imbalance_fees(
+        channel_capacity=5, proportional_imbalance_fee=4000
+    )
+    channels = make_channel_set(
+        [
+            NettingChannelStateProperties(
+                our_state=NettingChannelEndStateProperties(balance=10),
+                fee_schedule=FeeScheduleState(flat=0, imbalance_penalty=imbalance_penalty),
+            ),
+            NettingChannelStateProperties(
+                our_state=NettingChannelEndStateProperties(balance=10),
+                fee_schedule=FeeScheduleState(flat=0, imbalance_penalty=imbalance_penalty),
+            ),
+        ]
+    )
+
+    pair, _ = mediator.forward_transfer_pair(
+        payer_transfer=payer_transfer,
+        payer_channel=channels[0],
+        route_state=channels.get_route(1),
+        route_state_table=channels.get_routes(),
+        channelidentifiers_to_channels=channels.channel_map,
+        pseudo_random_generator=random.Random(),
+        block_number=2,
+    )
+    # Up for discussion: Shouldn't this transfer actually succeed? If the imbalance fee
+    # is outdated for some reason and we can't calculate it shouldn't we just
+    # omit it and mediate without it as a mediator? Or is the current behaviour
+    # from this PR, namely to not mediate the transfer, okay?
+    assert not pair
 
 
 def test_backward_transfer_pair_with_fees_deducted():
@@ -2091,7 +2244,9 @@ def test_receive_unlock():
     assert search_for_item(iteration.events, EventInvalidReceivedUnlock, {}), msg
 
     sender_state = channels[0].partner_state
-    lock = HashTimeLockState(amount=10, expiration=10, secrethash=UNIT_SECRETHASH)
+    lock = HashTimeLockState(
+        amount=UNIT_TRANSFER_AMOUNT, expiration=10, secrethash=UNIT_SECRETHASH
+    )
     sender_state.secrethashes_to_lockedlocks[factories.UNIT_SECRETHASH] = lock
     sender_state.pending_locks = factories.make_pending_locks([lock])
     sender_state.balance_proof = factories.create(

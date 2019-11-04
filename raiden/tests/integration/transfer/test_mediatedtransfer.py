@@ -1,14 +1,20 @@
 from hashlib import sha256
+from typing import List
 from unittest.mock import patch
 
-import gevent
 import pytest
 
+from raiden.app import App
 from raiden.exceptions import RaidenUnrecoverableError
 from raiden.message_handler import MessageHandler
 from raiden.messages.transfers import LockedTransfer, RevealSecret, SecretRequest
 from raiden.network.pathfinding import PFSConfig, PFSInfo
-from raiden.settings import DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS
+from raiden.routing import get_best_routes_internal
+from raiden.settings import (
+    DEFAULT_MEDIATION_FEE_MARGIN,
+    DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
+    INTERNAL_ROUTING_DEFAULT_FEE_PERC,
+)
 from raiden.storage.sqlite import RANGE_ALL_STATE_CHANGES
 from raiden.tests.utils import factories
 from raiden.tests.utils.detect_failure import raise_on_failure
@@ -18,6 +24,7 @@ from raiden.tests.utils.protocol import WaitForMessage
 from raiden.tests.utils.transfer import (
     assert_succeeding_transfer_invariants,
     assert_synced_channel_state,
+    block_timeout_for_transfer_by_secrethash,
     transfer,
     transfer_and_assert_path,
     wait_assert,
@@ -25,29 +32,15 @@ from raiden.tests.utils.transfer import (
 from raiden.transfer import views
 from raiden.transfer.mediated_transfer.mediation_fee import FeeScheduleState
 from raiden.transfer.mediated_transfer.state_change import ActionInitMediator, ActionInitTarget
-from raiden.transfer.state_change import ActionChannelUpdateFee
 from raiden.utils import sha3
-from raiden.utils.typing import BlockNumber, FeeAmount, PaymentAmount, TokenAmount
+from raiden.utils.typing import BlockNumber, FeeAmount, PaymentAmount, PaymentID, TokenAmount
 from raiden.waiting import wait_for_block
 
 
+@raise_on_failure
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 @pytest.mark.parametrize("number_of_nodes", [3])
 def test_mediated_transfer(
-    raiden_network, number_of_nodes, deposit, token_addresses, network_wait
-):
-    raise_on_failure(
-        raiden_network,
-        run_test_mediated_transfer,
-        raiden_network=raiden_network,
-        number_of_nodes=number_of_nodes,
-        deposit=deposit,
-        token_addresses=token_addresses,
-        network_wait=network_wait,
-    )
-
-
-def run_test_mediated_transfer(
     raiden_network, number_of_nodes, deposit, token_addresses, network_wait
 ):
     app0, app1, app2 = raiden_network
@@ -59,7 +52,7 @@ def run_test_mediated_transfer(
     )
 
     amount = 10
-    transfer(
+    secrethash = transfer(
         initiator_app=app0,
         target_app=app2,
         token_address=token_address,
@@ -68,7 +61,7 @@ def run_test_mediated_transfer(
         timeout=network_wait * number_of_nodes,
     )
 
-    with gevent.Timeout(network_wait):
+    with block_timeout_for_transfer_by_secrethash(app1.raiden, secrethash):
         wait_assert(
             assert_succeeding_transfer_invariants,
             token_network_address,
@@ -79,7 +72,7 @@ def run_test_mediated_transfer(
             deposit + amount,
             [],
         )
-    with gevent.Timeout(network_wait):
+    with block_timeout_for_transfer_by_secrethash(app1.raiden, secrethash):
         wait_assert(
             assert_succeeding_transfer_invariants,
             token_network_address,
@@ -92,22 +85,10 @@ def run_test_mediated_transfer(
         )
 
 
+@raise_on_failure
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 @pytest.mark.parametrize("number_of_nodes", [1])
 def test_locked_transfer_secret_registered_onchain(
-    raiden_network, token_addresses, secret_registry_address, retry_timeout
-):
-    raise_on_failure(
-        raiden_network,
-        run_test_locked_transfer_secret_registered_onchain,
-        raiden_network=raiden_network,
-        token_addresses=token_addresses,
-        secret_registry_address=secret_registry_address,
-        retry_timeout=retry_timeout,
-    )
-
-
-def run_test_locked_transfer_secret_registered_onchain(
     raiden_network, token_addresses, secret_registry_address, retry_timeout
 ):
     app0 = raiden_network[0]
@@ -123,7 +104,7 @@ def run_test_locked_transfer_secret_registered_onchain(
     identifier = 1
     transfer_secret = sha3(target + b"1")
 
-    secret_registry_proxy = app0.raiden.chain.secret_registry(secret_registry_address)
+    secret_registry_proxy = app0.raiden.proxy_manager.secret_registry(secret_registry_address)
     secret_registry_proxy.register_secret(secret=transfer_secret)
 
     # Wait until our node has processed the block that the secret registration was mined at
@@ -139,7 +120,6 @@ def run_test_locked_transfer_secret_registered_onchain(
         app0.raiden.start_mediated_transfer_with_secret(
             token_network_address=token_network_address,
             amount=amount,
-            fee=0,
             target=target,
             identifier=identifier,
             secret=transfer_secret,
@@ -166,23 +146,10 @@ def run_test_locked_transfer_secret_registered_onchain(
     assert not transfer_statechange_dispatched
 
 
+@raise_on_failure
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 @pytest.mark.parametrize("number_of_nodes", [3])
 def test_mediated_transfer_with_entire_deposit(
-    raiden_network, number_of_nodes, token_addresses, deposit, network_wait
-):
-    raise_on_failure(
-        raiden_network,
-        run_test_mediated_transfer_with_entire_deposit,
-        raiden_network=raiden_network,
-        number_of_nodes=number_of_nodes,
-        token_addresses=token_addresses,
-        deposit=deposit,
-        network_wait=network_wait,
-    )
-
-
-def run_test_mediated_transfer_with_entire_deposit(
     raiden_network, number_of_nodes, token_addresses, deposit, network_wait
 ):
     app0, app1, app2 = raiden_network
@@ -193,35 +160,61 @@ def run_test_mediated_transfer_with_entire_deposit(
         chain_state, token_network_registry_address, token_address
     )
 
-    transfer_and_assert_path(
+    fee1 = int(deposit * INTERNAL_ROUTING_DEFAULT_FEE_PERC)
+    secrethash = transfer_and_assert_path(
         path=raiden_network,
         token_address=token_address,
-        amount=deposit,
+        amount=deposit - fee1,
         identifier=1,
         timeout=network_wait * number_of_nodes,
     )
 
-    reverse_path = list(raiden_network[::-1])
-    transfer_and_assert_path(
-        path=reverse_path,
-        token_address=token_address,
-        amount=deposit * 2,
-        identifier=2,
-        timeout=network_wait * number_of_nodes,
-    )
-
-    with gevent.Timeout(network_wait):
+    with block_timeout_for_transfer_by_secrethash(app1.raiden, secrethash):
         wait_assert(
             assert_succeeding_transfer_invariants,
             token_network_address,
             app0,
-            deposit * 2,
-            [],
-            app1,
             0,
             [],
+            app1,
+            deposit * 2,
+            [],
         )
-    with gevent.Timeout(network_wait):
+    with block_timeout_for_transfer_by_secrethash(app2.raiden, secrethash):
+        wait_assert(
+            assert_succeeding_transfer_invariants,
+            token_network_address,
+            app1,
+            fee1,
+            [],
+            app2,
+            deposit * 2 - fee1,
+            [],
+        )
+
+    app2_capacity = 2 * deposit - fee1
+    fee2 = int(round(app2_capacity * INTERNAL_ROUTING_DEFAULT_FEE_PERC))
+    reverse_path = list(raiden_network[::-1])
+    transfer_and_assert_path(
+        path=reverse_path,
+        token_address=token_address,
+        amount=app2_capacity - fee2,
+        identifier=2,
+        timeout=network_wait * number_of_nodes,
+    )
+
+    with block_timeout_for_transfer_by_secrethash(app1.raiden, secrethash):
+        wait_assert(
+            assert_succeeding_transfer_invariants,
+            token_network_address,
+            app0,
+            2 * deposit - fee2,
+            [],
+            app1,
+            fee2,
+            [],
+        )
+    with block_timeout_for_transfer_by_secrethash(app2.raiden, secrethash):
         wait_assert(
             assert_succeeding_transfer_invariants,
             token_network_address,
@@ -234,22 +227,11 @@ def run_test_mediated_transfer_with_entire_deposit(
         )
 
 
+@pytest.mark.skip(reason="flaky, see https://github.com/raiden-network/raiden/issues/4804")
+@raise_on_failure
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 @pytest.mark.parametrize("number_of_nodes", [3])
 def test_mediated_transfer_messages_out_of_order(  # pylint: disable=unused-argument
-    raiden_network, deposit, token_addresses, network_wait
-):
-    raise_on_failure(
-        raiden_network,
-        run_test_mediated_transfer_messages_out_of_order,
-        raiden_network=raiden_network,
-        deposit=deposit,
-        token_addresses=token_addresses,
-        network_wait=network_wait,
-    )
-
-
-def run_test_mediated_transfer_messages_out_of_order(
     raiden_network, deposit, token_addresses, network_wait
 ):
     """Raiden must properly handle repeated locked transfer messages."""
@@ -288,7 +270,6 @@ def run_test_mediated_transfer_messages_out_of_order(
     transfer_received = app0.raiden.start_mediated_transfer_with_secret(
         token_network_address=token_network_address,
         amount=amount,
-        fee=0,
         target=app2.raiden.address,
         identifier=identifier,
         secret=secret,
@@ -308,7 +289,7 @@ def run_test_mediated_transfer_messages_out_of_order(
     )
 
     transfer_received.payment_done.wait()
-    with gevent.Timeout(network_wait):
+    with block_timeout_for_transfer_by_secrethash(app1.raiden, secrethash):
         wait_assert(
             assert_succeeding_transfer_invariants,
             token_network_address,
@@ -320,7 +301,7 @@ def run_test_mediated_transfer_messages_out_of_order(
             [],
         )
 
-    with gevent.Timeout(network_wait):
+    with block_timeout_for_transfer_by_secrethash(app2.raiden, secrethash):
         wait_assert(
             assert_succeeding_transfer_invariants,
             token_network_address,
@@ -333,18 +314,10 @@ def run_test_mediated_transfer_messages_out_of_order(
         )
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", (1,))
 @pytest.mark.parametrize("channels_per_node", (CHAIN,))
 def test_mediated_transfer_calls_pfs(raiden_network, token_addresses):
-    raise_on_failure(
-        raiden_network,
-        run_test_mediated_transfer_calls_pfs,
-        raiden_network=raiden_network,
-        token_addresses=token_addresses,
-    )
-
-
-def run_test_mediated_transfer_calls_pfs(raiden_network, token_addresses):
     app0, = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
@@ -358,7 +331,6 @@ def run_test_mediated_transfer_calls_pfs(raiden_network, token_addresses):
         app0.raiden.start_mediated_transfer_with_secret(
             token_network_address=token_network_address,
             amount=10,
-            fee=0,
             target=factories.HOP1,
             identifier=1,
             secret=b"1" * 32,
@@ -369,7 +341,7 @@ def run_test_mediated_transfer_calls_pfs(raiden_network, token_addresses):
         app0.raiden.config["pfs_config"] = PFSConfig(
             info=PFSInfo(
                 url="mock-address",
-                chain_id=app0.raiden.chain.network_id,
+                chain_id=app0.raiden.rpc_client.chain_id,
                 token_network_registry_address=token_network_registry_address,
                 payment_address=factories.make_address(),
                 message="",
@@ -385,7 +357,6 @@ def run_test_mediated_transfer_calls_pfs(raiden_network, token_addresses):
         app0.raiden.start_mediated_transfer_with_secret(
             token_network_address=token_network_address,
             amount=11,
-            fee=0,
             target=factories.HOP2,
             identifier=2,
             secret=b"2" * 32,
@@ -410,127 +381,8 @@ def run_test_mediated_transfer_calls_pfs(raiden_network, token_addresses):
         assert patched.call_count == 1
 
 
-@pytest.mark.parametrize("channels_per_node", [CHAIN])
-@pytest.mark.parametrize("number_of_nodes", [4])
-def test_mediated_transfer_with_allocated_fee(
-    raiden_network, number_of_nodes, deposit, token_addresses, network_wait
-):
-    """
-    Tests the topology of:
-    A -> B -> C -> D
-    Where C & D are mediators who gain tokens by mediating transfers.
-    The test checks that if no mediator sets the channel fee, then the fees
-    sent by the initiator will be gained completely by the target as no fees
-    will be deducted by the mediators.
-    However, if the mediator sets the fee, the channel's fee will be
-    deducted from received transfer's fee and the rest goes to
-    the mediators in the next hops and maybe eventually to the target.
-    """
-    raise_on_failure(
-        raiden_network,
-        run_test_mediated_transfer_with_allocated_fee,
-        raiden_network=raiden_network,
-        number_of_nodes=number_of_nodes,
-        deposit=deposit,
-        token_addresses=token_addresses,
-        network_wait=network_wait,
-    )
-
-
-def run_test_mediated_transfer_with_allocated_fee(
-    raiden_network, number_of_nodes, deposit, token_addresses, network_wait
-):
-    app0, app1, app2, _ = raiden_network
-    token_address = token_addresses[0]
-    chain_state = views.state_from_app(app0)
-    token_network_registry_address = app0.raiden.default_registry.address
-    token_network_address = views.get_token_network_address_by_token_address(
-        chain_state, token_network_registry_address, token_address
-    )
-    fee = FeeAmount(5)
-    amount = PaymentAmount(10)
-    timeout = network_wait * number_of_nodes
-
-    transfer_and_assert_path(
-        path=raiden_network,
-        token_address=token_address,
-        amount=amount,
-        identifier=1,
-        fee=fee,
-        timeout=timeout,
-    )
-    assert_synced_channel_state(
-        token_network_address=token_network_address,
-        app0=app0,
-        balance0=deposit - amount - fee,
-        pending_locks0=[],
-        app1=app1,
-        balance1=deposit + amount + fee,
-        pending_locks1=[],
-    )
-    assert_synced_channel_state(
-        token_network_address=token_network_address,
-        app0=app1,
-        balance0=deposit - amount - fee,
-        pending_locks0=[],
-        app1=app2,
-        balance1=deposit + amount + fee,
-        pending_locks1=[],
-    )
-
-    app1_app2_channel_state = views.get_channelstate_by_token_network_and_partner(
-        chain_state=views.state_from_raiden(app1.raiden),
-        token_network_address=token_network_address,
-        partner_address=app2.raiden.address,
-    )
-
-    # Let app1 consume all of the allocated mediation fee
-    action_update_fee = ActionChannelUpdateFee(
-        canonical_identifier=app1_app2_channel_state.canonical_identifier,
-        fee_schedule=FeeScheduleState(flat=fee),
-    )
-
-    app1.raiden.handle_state_changes(state_changes=[action_update_fee])
-
-    # app2's poor soul gets no mediation fees on the second transfer.
-    # Only the first transfer had a fee which was paid to app2 though
-    # app2 doesn't set its fee but it would still receive the complete
-    # locked amount = transfer amount + fee.
-    # However app1 received from app0 two transfers
-    # which it sent to app2. The first transfer
-    # to app2 included the fee as it did not deduct
-    # any fee (the channel's fee was 0).
-    # The second transfer's fee was deducted by
-    # app1 (provided we've set the fee of the channel)
-    transfer_and_assert_path(
-        path=raiden_network,
-        token_address=token_address,
-        amount=amount,
-        identifier=2,
-        fee=fee,
-        timeout=timeout,
-    )
-    assert_synced_channel_state(
-        token_network_address=token_network_address,
-        app0=app0,
-        balance0=deposit - 2 * (amount + fee),
-        pending_locks0=[],
-        app1=app1,
-        balance1=deposit + 2 * (amount + fee),
-        pending_locks1=[],
-    )
-    assert_synced_channel_state(
-        token_network_address=token_network_address,
-        app0=app1,
-        balance0=deposit - (2 * amount) - fee,
-        pending_locks0=[],
-        app1=app2,
-        balance1=deposit + (2 * amount) + fee,
-        pending_locks1=[],
-    )
-
-
 # pylint: disable=unused-argument
+@raise_on_failure
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 @pytest.mark.parametrize("number_of_nodes", [3])
 def test_mediated_transfer_with_node_consuming_more_than_allocated_fee(
@@ -541,20 +393,6 @@ def test_mediated_transfer_with_node_consuming_more_than_allocated_fee(
     Which means that the initiator will not reveal the secret
     to the target.
     """
-    raise_on_failure(
-        raiden_network,
-        run_test_mediated_transfer_with_node_consuming_more_than_allocated_fee,
-        raiden_network=raiden_network,
-        number_of_nodes=number_of_nodes,
-        deposit=deposit,
-        token_addresses=token_addresses,
-        network_wait=network_wait,
-    )
-
-
-def run_test_mediated_transfer_with_node_consuming_more_than_allocated_fee(
-    raiden_network, number_of_nodes, deposit, token_addresses, network_wait
-):
     app0, app1, app2 = raiden_network
     token_address = token_addresses[0]
     chain_state = views.state_from_app(app0)
@@ -563,7 +401,7 @@ def run_test_mediated_transfer_with_node_consuming_more_than_allocated_fee(
         chain_state, token_network_registry_address, token_address
     )
     fee = FeeAmount(5)
-    amount = PaymentAmount(10)
+    amount = PaymentAmount(100)
 
     app1_app2_channel_state = views.get_channelstate_by_token_network_and_partner(
         chain_state=views.state_from_raiden(app1.raiden),
@@ -572,12 +410,7 @@ def run_test_mediated_transfer_with_node_consuming_more_than_allocated_fee(
     )
 
     # Let app1 consume all of the allocated mediation fee
-    action_update_fee = ActionChannelUpdateFee(
-        canonical_identifier=app1_app2_channel_state.canonical_identifier,
-        fee_schedule=FeeScheduleState(flat=FeeAmount(fee * 2)),
-    )
-
-    app1.raiden.handle_state_changes(state_changes=[action_update_fee])
+    app1_app2_channel_state.fee_schedule = FeeScheduleState(flat=FeeAmount(fee * 2))
 
     secret = factories.make_secret(0)
     secrethash = sha256(secret).digest()
@@ -588,14 +421,20 @@ def run_test_mediated_transfer_with_node_consuming_more_than_allocated_fee(
         SecretRequest, {"secrethash": secrethash}
     )
 
-    app0.raiden.start_mediated_transfer_with_secret(
-        token_network_address=token_network_address,
-        amount=amount,
-        fee=fee,
-        target=app2.raiden.address,
-        identifier=1,
-        secret=secret,
-    )
+    def get_best_routes_with_fees(*args, **kwargs):
+        routes = get_best_routes_internal(*args, **kwargs)
+        for r in routes:
+            r.estimated_fee = fee
+        return routes
+
+    with patch("raiden.routing.get_best_routes_internal", get_best_routes_with_fees):
+        app0.raiden.start_mediated_transfer_with_secret(
+            token_network_address=token_network_address,
+            amount=amount,
+            target=app2.raiden.address,
+            identifier=1,
+            secret=secret,
+        )
 
     app0_app1_channel_state = views.get_channelstate_by_token_network_and_partner(
         chain_state=views.state_from_raiden(app0.raiden),
@@ -618,3 +457,162 @@ def run_test_mediated_transfer_with_node_consuming_more_than_allocated_fee(
     msg = "App0 should have never revealed the secret"
     transfer_state = initiator_task.manager_state.initiator_transfers[secrethash].transfer_state
     assert transfer_state != "transfer_secret_revealed", msg
+
+
+@raise_on_failure
+@pytest.mark.parametrize("case_no", range(7))
+@pytest.mark.parametrize("channels_per_node", [CHAIN])
+@pytest.mark.parametrize("number_of_nodes", [4])
+def test_mediated_transfer_with_fees(
+    raiden_network, number_of_nodes, deposit, token_addresses, network_wait, case_no
+):
+    """
+    Test mediation with a variety of fee schedules
+    """
+    apps = raiden_network
+    token_address = token_addresses[0]
+    chain_state = views.state_from_app(apps[0])
+    token_network_registry_address = apps[0].raiden.default_registry.address
+    token_network_address = views.get_token_network_address_by_token_address(
+        chain_state, token_network_registry_address, token_address
+    )
+
+    def set_fee_schedule(app: App, other_app: App, fee_schedule: FeeScheduleState):
+        channel_state = views.get_channelstate_by_token_network_and_partner(
+            chain_state=views.state_from_raiden(app.raiden),
+            token_network_address=token_network_address,
+            partner_address=other_app.raiden.address,
+        )
+        assert channel_state
+        channel_state.fee_schedule = fee_schedule
+
+    def get_best_routes_with_fees(*args, **kwargs):
+        routes = get_best_routes_internal(*args, **kwargs)
+        for r in routes:
+            r.estimated_fee = fee_without_margin
+        return routes
+
+    def assert_balances(expected_transferred_amounts=List[int]):
+        for i, transferred_amount in enumerate(expected_transferred_amounts):
+            assert_synced_channel_state(
+                token_network_address=token_network_address,
+                app0=apps[i],
+                balance0=deposit - transferred_amount,
+                pending_locks0=[],
+                app1=apps[i + 1],
+                balance1=deposit + transferred_amount,
+                pending_locks1=[],
+            )
+
+    fee_without_margin = FeeAmount(20)
+    fee = round(fee_without_margin * (1 + DEFAULT_MEDIATION_FEE_MARGIN))
+
+    amount = PaymentAmount(35)
+
+    no_fees = FeeScheduleState(flat=0, proportional=0, imbalance_penalty=None)
+    cases = [
+        # The fee is added by the initiator, but no mediator deducts fees. As a
+        # result, the target receives the fee.
+        dict(
+            fee_schedules=[no_fees, no_fees, no_fees],
+            incoming_fee_schedules=[no_fees, no_fees, no_fees],
+            expected_transferred_amounts=[amount + fee, amount + fee, amount + fee],
+        ),
+        # The first mediator claims all of the fee.
+        dict(
+            fee_schedules=[no_fees, FeeScheduleState(flat=fee), no_fees],
+            incoming_fee_schedules=[no_fees, no_fees, no_fees],
+            expected_transferred_amounts=[amount + fee, amount, amount],
+        ),
+        # The first mediator has a proportional fee of 20%
+        dict(
+            fee_schedules=[no_fees, FeeScheduleState(proportional=0.20e6), no_fees],
+            incoming_fee_schedules=[no_fees, no_fees, no_fees],
+            expected_transferred_amounts=[
+                amount + fee,
+                amount + fee - 9,  # See test_get_lock_amount_after_fees for where 9 comes from
+                amount + fee - 9,  # See test_get_lock_amount_after_fees for where 9 comes from
+            ],
+        ),
+        # Both mediators have a proportional fee of 20%
+        dict(
+            fee_schedules=[
+                no_fees,
+                FeeScheduleState(proportional=0.20e6),
+                FeeScheduleState(proportional=0.20e6),
+            ],
+            incoming_fee_schedules=[no_fees, no_fees, no_fees],
+            expected_transferred_amounts=[
+                amount + fee,
+                amount + fee - 9,  # See test_get_lock_amount_after_fees for where 9 comes from
+                # See test_get_lock_amount_after_fees for where 9 and 8 come from
+                amount + fee - 9 - 8,
+            ],
+        ),
+        # The first mediator has an imbalance fee that works like a 20%
+        # proportional fee when using the channel in this direction.
+        dict(
+            fee_schedules=[
+                no_fees,
+                FeeScheduleState(imbalance_penalty=[(0, 0), (1000, 200)]),
+                no_fees,
+            ],
+            incoming_fee_schedules=[no_fees, no_fees, no_fees],
+            expected_transferred_amounts=[
+                amount + fee,
+                amount + fee - (amount + fee) // 5 + 2,
+                amount + fee - (amount + fee) // 5 + 2,
+            ],
+        ),
+        # Using the same fee_schedules as above on the incoming channel instead
+        # of the outgoing channel of mediator 1 should yield the same result.
+        dict(
+            fee_schedules=[no_fees, no_fees, no_fees],
+            incoming_fee_schedules=[
+                FeeScheduleState(imbalance_penalty=[(0, 200), (1000, 0)]),
+                None,
+                None,
+            ],
+            expected_transferred_amounts=[
+                amount + fee,
+                amount + fee - (amount + fee) // 5,
+                amount + fee - (amount + fee) // 5,
+            ],
+        ),
+        # The first mediator has an imbalance fee which will add 1/20 token for
+        # for every token transferred as a reward for moving the channel into a
+        # better state. This causes the target to receive more than the `amount
+        # + fees` which is sent by the initiator.
+        # transferred amount is 55, so 3 token get added from imbnalance fee
+        dict(
+            fee_schedules=[
+                no_fees,
+                FeeScheduleState(imbalance_penalty=[(0, 50), (1000, 0)]),
+                no_fees,
+            ],
+            incoming_fee_schedules=[no_fees, no_fees, no_fees],
+            expected_transferred_amounts=[amount + fee, amount + fee + 3, amount + fee + 3],
+        ),
+    ]
+
+    case = cases[case_no]
+    for i, fee_schedule in enumerate(case.get("fee_schedules", [])):
+        if fee_schedule:
+            set_fee_schedule(apps[i], apps[i + 1], fee_schedule)
+    for i, fee_schedule in enumerate(case.get("incoming_fee_schedules", [])):
+        if fee_schedule:
+            set_fee_schedule(apps[i + 1], apps[i], fee_schedule)
+
+    route_patch = patch("raiden.routing.get_best_routes_internal", get_best_routes_with_fees)
+    disable_max_mediation_fee_patch = patch(
+        "raiden.transfer.mediated_transfer.initiator.MAX_MEDIATION_FEE_PERC", new=10000
+    )
+
+    with route_patch, disable_max_mediation_fee_patch:
+        transfer_and_assert_path(
+            path=raiden_network,
+            token_address=token_address,
+            amount=amount,
+            identifier=PaymentID(2),
+        )
+    assert_balances(case["expected_transferred_amounts"])

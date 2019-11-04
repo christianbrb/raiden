@@ -133,13 +133,15 @@ def geth_to_cmd(node: Dict, datadir: str, chain_id: ChainID, verbosity: str) -> 
         # can override that.
         cmd.append("--allow-insecure-unlock")
 
-    # don't use the '--dev' flag
+    # Don't use the '--dev' flag
+    # Don't use `--nodiscover`. This flag completely disables the peer
+    # discovery, even if the peers are given through the `--bootnodes`
+    # configuration flag.
     cmd.extend(
         [
-            "--nodiscover",
             "--rpc",
             "--rpcapi",
-            "eth,net,web3,personal,txpool",
+            "eth,net,web3,personal",
             "--rpcaddr",
             "127.0.0.1",
             "--networkid",
@@ -175,6 +177,7 @@ def parity_to_cmd(
         "cache-size-blocks": "cache-size-blocks",
         "cache-size-queue": "cache-size-queue",
         "cache-size": "cache-size",
+        "bootnodes": "bootnodes",
     }
 
     cmd = ["parity"]
@@ -316,16 +319,16 @@ def eth_check_balance(web3: Web3, accounts_addresses: List[Address], retries: in
 
 
 def eth_node_config(
-    miner_pkey: PrivateKey, p2p_port: Port, rpc_port: Port, **extra_config: Any
+    node_pkey: PrivateKey, p2p_port: Port, rpc_port: Port, **extra_config: Any
 ) -> Dict[str, Any]:
-    address = privatekey_to_address(miner_pkey)
-    pub = privatekey_to_publickey(miner_pkey).hex()
+    address = privatekey_to_address(node_pkey)
+    pub = privatekey_to_publickey(node_pkey).hex()
 
     config = extra_config.copy()
     config.update(
         {
-            "nodekey": miner_pkey,
-            "nodekeyhex": remove_0x_prefix(encode_hex(miner_pkey)),
+            "nodekey": node_pkey,
+            "nodekeyhex": remove_0x_prefix(encode_hex(node_pkey)),
             "pub": pub,
             "address": address,
             "port": p2p_port,
@@ -344,12 +347,12 @@ def eth_node_config_set_bootnodes(nodes_configuration: List[Dict[str, Any]]) -> 
         config["bootnodes"] = bootnodes
 
 
-def eth_node_to_datadir(nodekeyhex: str, base_datadir: str) -> str:
+def eth_node_to_datadir(node_address: bytes, base_datadir: str) -> str:
     # HACK: Use only the first 8 characters to avoid golang's issue
     # https://github.com/golang/go/issues/6895 (IPC bind fails with path
     # longer than 108 characters).
     # BSD (and therefore macOS) socket path length limit is 104 chars
-    nodekey_part = nodekeyhex[:8]
+    nodekey_part = encode_hex(node_address)[:8]
     datadir = os.path.join(base_datadir, nodekey_part)
     return datadir
 
@@ -384,7 +387,7 @@ def eth_nodes_to_cmds(
 ) -> List[Command]:
     cmds = []
     for config, node_desc in zip(nodes_configuration, eth_node_descs):
-        datadir = eth_node_to_datadir(config["nodekeyhex"], base_datadir)
+        datadir = eth_node_to_datadir(config["address"], base_datadir)
 
         if node_desc.blockchain_type == "geth":
             geth_prepare_datadir(datadir, genesis_file)
@@ -514,6 +517,8 @@ def run_private_blockchain(
 
         nodes_configuration.append(config)
 
+    eth_node_config_set_bootnodes(nodes_configuration)
+
     blockchain_type = eth_nodes[0].blockchain_type
 
     # This is not be configurable because it must be one of the running eth
@@ -521,8 +526,6 @@ def run_private_blockchain(
     seal_account = privatekey_to_address(eth_nodes[0].private_key)
 
     if blockchain_type == "geth":
-        eth_node_config_set_bootnodes(nodes_configuration)
-
         genesis_path = os.path.join(base_datadir, "custom_genesis.json")
         geth_generate_poa_genesis(
             genesis_path=genesis_path,
@@ -532,7 +535,7 @@ def run_private_blockchain(
 
         for config in nodes_configuration:
             if config.get("mine"):
-                datadir = eth_node_to_datadir(config["nodekeyhex"], base_datadir)
+                datadir = eth_node_to_datadir(config["address"], base_datadir)
                 keyfile_path = geth_keyfile(datadir, config["address"])
                 eth_create_account_file(keyfile_path, config["nodekey"])
 
@@ -546,7 +549,7 @@ def run_private_blockchain(
 
         for config in nodes_configuration:
             if config.get("mine"):
-                datadir = eth_node_to_datadir(config["nodekeyhex"], base_datadir)
+                datadir = eth_node_to_datadir(config["address"], base_datadir)
                 keyfile_path = parity_keyfile(datadir)
                 eth_create_account_file(keyfile_path, config["nodekey"])
 

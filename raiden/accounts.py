@@ -220,7 +220,7 @@ class Account:
             return None
 
     @uuid.setter
-    def uuid(self, value: str) -> None:
+    def uuid(self, value: Optional[str]) -> None:
         """Set the UUID. Set it to `None` in order to remove it."""
         if value is not None:
             self.keystore["id"] = value
