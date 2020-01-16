@@ -1,7 +1,6 @@
 import gevent
 import pytest
 import structlog
-from eth_utils import to_checksum_address
 
 from raiden.api.python import RaidenAPI
 from raiden.messages.transfers import Unlock
@@ -12,10 +11,10 @@ from raiden.tests.utils.network import CHAIN
 from raiden.tests.utils.protocol import WaitForMessage
 from raiden.tests.utils.transfer import watch_for_unlock_failures
 from raiden.transfer.events import EventPaymentReceivedSuccess
-from raiden.utils import wait_until
 from raiden.utils.echo_node import EchoNode
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.typing import MYPY_ANNOTATION, List, Optional, PaymentAmount, PaymentID
-from raiden.waiting import TransferWaitResult, wait_for_received_transfer_result
+from raiden.waiting import TransferWaitResult, wait_for_received_transfer_result, wait_until
 
 log = structlog.get_logger(__name__)
 

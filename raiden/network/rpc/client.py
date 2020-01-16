@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import gevent
 import structlog
-from eth_utils import encode_hex, is_checksum_address, to_canonical_address, to_checksum_address
+from eth_utils import encode_hex, is_checksum_address, to_canonical_address
 from gevent.lock import Semaphore
 from hexbytes import HexBytes
 from requests.exceptions import ReadTimeout
@@ -18,7 +18,6 @@ from web3.utils.contracts import prepare_transaction
 from web3.utils.empty import empty
 from web3.utils.toolz import assoc
 
-from raiden.blockchain.filters import StatelessFilter
 from raiden.constants import NO_STATE_QUERY_AFTER_BLOCKS, NULL_ADDRESS_HEX, EthClient
 from raiden.exceptions import (
     AddressWithoutCode,
@@ -29,8 +28,9 @@ from raiden.exceptions import (
 )
 from raiden.network.rpc.middleware import block_hash_cache_middleware
 from raiden.network.rpc.smartcontract_proxy import ContractProxy
-from raiden.utils import privatekey_to_address
 from raiden.utils.ethereum_clients import is_supported_client
+from raiden.utils.formatting import to_checksum_address
+from raiden.utils.keys import privatekey_to_address
 from raiden.utils.typing import (
     ABI,
     Address,
@@ -450,15 +450,15 @@ class JSONRPCClient:
             raise EthNodeInterfaceError(f"Unsupported Ethereum client {version}")
 
         address = privatekey_to_address(privkey)
-        address_checksumed = to_checksum_address(address)
+        address_checksummed = to_checksum_address(address)
 
         if eth_node is EthClient.PARITY:
             parity_assert_rpc_interfaces(web3)
-            available_nonce = parity_discover_next_available_nonce(web3, address_checksumed)
+            available_nonce = parity_discover_next_available_nonce(web3, address_checksummed)
 
         elif eth_node is EthClient.GETH:
             geth_assert_rpc_interfaces(web3)
-            available_nonce = geth_discover_next_available_nonce(web3, address_checksumed)
+            available_nonce = geth_discover_next_available_nonce(web3, address_checksummed)
 
         self.eth_node = eth_node
         self.privkey = privkey
@@ -689,20 +689,6 @@ class JSONRPCClient:
 
             gevent.sleep(1.0)
 
-    def new_filter(
-        self,
-        contract_address: Address,
-        topics: Optional[List[Optional[str]]],
-        from_block: BlockNumber,
-    ) -> StatelessFilter:
-        """ Create a filter in the ethereum node. """
-        return StatelessFilter(
-            self.web3,
-            from_block=from_block,
-            contract_address=to_checksum_address(contract_address),
-            topics=topics,
-        )
-
     def get_filter_events(
         self,
         contract_address: Address,
@@ -775,3 +761,14 @@ class JSONRPCClient:
             return False
 
         return True
+
+    def wait_until_block(
+        self, target_block_number: BlockNumber, retry_timeout: float = 0.5
+    ) -> BlockNumber:
+        current_block = self.block_number()
+
+        while current_block < target_block_number:
+            current_block = self.block_number()
+            gevent.sleep(retry_timeout)
+
+        return current_block

@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, List
 
 import gevent
 import structlog
-from eth_utils import to_canonical_address, to_checksum_address
+from eth_utils import to_canonical_address
 from gevent.lock import Semaphore
 
 from raiden import waiting
@@ -24,6 +24,7 @@ from raiden.exceptions import (
 from raiden.transfer import views
 from raiden.transfer.state import NettingChannelState
 from raiden.utils import typing
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.typing import (
     Address,
     TokenAddress,
@@ -165,7 +166,7 @@ class ConnectionManager:  # pragma: no unittest
                 views.state_from_raiden(self.raiden), self.registry_address, self.token_address
             )
 
-            if not qty_network_channels:
+            if qty_network_channels == 0:
                 log.info(
                     "Bootstrapping token network.",
                     node=to_checksum_address(self.raiden.address),
@@ -266,8 +267,8 @@ class ConnectionManager:  # pragma: no unittest
                 raise
             except RaidenUnrecoverableError as e:
                 should_crash = (
-                    self.raiden.config["environment_type"] != Environment.PRODUCTION
-                    or self.raiden.config["unrecoverable_error_should_crash"]
+                    self.raiden.config.environment_type != Environment.PRODUCTION
+                    or self.raiden.config.unrecoverable_error_should_crash
                 )
                 if should_crash:
                     raise
@@ -354,8 +355,8 @@ class ConnectionManager:  # pragma: no unittest
             )
         except RaidenUnrecoverableError:
             should_crash = (
-                self.raiden.config["environment_type"] != Environment.PRODUCTION
-                or self.raiden.config["unrecoverable_error_should_crash"]
+                self.raiden.config.environment_type != Environment.PRODUCTION
+                or self.raiden.config.unrecoverable_error_should_crash
             )
             if should_crash:
                 raise
@@ -397,15 +398,14 @@ class ConnectionManager:  # pragma: no unittest
             if channel_state not in funded_channels
         ]
         possible_new_partners = self._find_new_partners()
-        if possible_new_partners == 0:
-            return False
 
         # if we already met our target, break
         if len(funded_channels) >= self.initial_channel_target:
             return False
+
         # if we didn't, but there's no nonfunded channels and no available partners
         # it means the network is smaller than our target, so we should also break
-        if not nonfunded_channels and possible_new_partners == 0:
+        if len(nonfunded_channels) == 0 and len(possible_new_partners) == 0:
             return False
 
         n_to_join = self.initial_channel_target - len(funded_channels)

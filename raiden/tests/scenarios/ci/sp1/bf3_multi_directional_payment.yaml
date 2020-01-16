@@ -37,8 +37,6 @@ nodes:
     proportional-imbalance-fee:
       - "0x62083c80353Df771426D209eF578619EE68D5C7A"
       - 0
-    default-settle-timeout: 40
-    default-reveal-timeout: 20
 
 # This is the bf3 scenario. It sets up a topology of [0, 1, 2, 3, 4] and deposits in both directions between all nodes.
 # When all channels are opened and deposits have taken place, 100 payments are started from node0 to node4
@@ -84,12 +82,12 @@ scenario:
                 name: "Make 100 transfers from 0 to 4"
                 repeat: 100
                 tasks:
-                  - transfer: {from: 0, to: 4, amount: 1_000_000_000_000_000, lock_timeout: 30}
+                  - transfer: {from: 0, to: 4, amount: 1_000_000_000_000_000}
             - serial:
                 name: "Make 100 transfers from 4 to 0"
                 repeat: 100
                 tasks:
-                  - transfer: {from: 4, to: 0, amount: 1_000_000_000_000_000, lock_timeout: 30}
+                  - transfer: {from: 4, to: 0, amount: 1_000_000_000_000_000}
       - wait: 100
       - parallel:
           name: "Assert that all balances are the same as before the payments, since same amounts are sent in both directions"

@@ -1,9 +1,9 @@
+import time
 from enum import Enum
 from typing import TYPE_CHECKING, List
 
 import gevent
 import structlog
-from eth_utils import to_checksum_address
 
 from raiden.storage.restore import get_state_change_with_transfer_by_secrethash
 from raiden.transfer import channel, views
@@ -21,9 +21,12 @@ from raiden.transfer.state_change import (
     ContractReceiveChannelWithdraw,
     ContractReceiveSecretReveal,
 )
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.typing import (
     Address,
+    Any,
     BlockNumber,
+    Callable,
     ChannelID,
     PaymentAmount,
     PaymentID,
@@ -43,6 +46,35 @@ log = structlog.get_logger(__name__)
 
 ALARM_TASK_ERROR_MSG = "Waiting relies on alarm task polling to update the node's internal state."
 TRANSPORT_ERROR_MSG = "Waiting for protocol messages requires a running transport."
+
+
+def wait_until(func: Callable, wait_for: float = None, sleep_for: float = 0.5) -> Any:
+    """Test for a function and wait for it to return a truth value or to timeout.
+    Returns the value or None if a timeout is given and the function didn't return
+    inside time timeout
+    Args:
+        func: a function to be evaluated, use lambda if parameters are required
+        wait_for: the maximum time to wait, or None for an infinite loop
+        sleep_for: how much to gevent.sleep between calls
+    Returns:
+        func(): result of func, if truth value, or None"""
+    res = func()
+
+    if res:
+        return res
+
+    if wait_for:
+        deadline = time.time() + wait_for
+        while not res and time.time() <= deadline:
+            gevent.sleep(sleep_for)
+            res = func()
+
+    else:
+        while not res:
+            gevent.sleep(sleep_for)
+            res = func()
+
+    return res
 
 
 def wait_for_block(
@@ -474,11 +506,14 @@ def wait_for_received_transfer_result(
         This does not time out, use gevent.Timeout.
     """
     log_details = {"payment_identifier": payment_identifier, "amount": amount}
+
+    assert raiden, TRANSPORT_ERROR_MSG
+    assert raiden.wal, TRANSPORT_ERROR_MSG
+    assert raiden.transport, TRANSPORT_ERROR_MSG
+    stream = raiden.wal.storage.get_state_changes_stream(retry_timeout=retry_timeout)
+
     result = None
     while result is None:
-        assert raiden, TRANSPORT_ERROR_MSG
-        assert raiden.wal, TRANSPORT_ERROR_MSG
-        assert raiden.transport, TRANSPORT_ERROR_MSG
 
         state_events = raiden.wal.storage.get_events()
         for event in state_events:
@@ -499,7 +534,7 @@ def wait_for_received_transfer_result(
                 result = TransferWaitResult.UNLOCK_FAILED
                 break
 
-        state_changes = raiden.wal.storage.get_state_changes()
+        state_changes = next(stream)
         for state_change in state_changes:
             registered_onchain = (
                 isinstance(state_change, ContractReceiveSecretReveal)
@@ -515,8 +550,7 @@ def wait_for_received_transfer_result(
                 transfer = state_change_with_transfer.data.transfer
 
                 if raiden.get_block_number() <= transfer.lock.expiration:
-                    result = TransferWaitResult.SECRET_REGISTERED_ONCHAIN
-                    break
+                    return TransferWaitResult.SECRET_REGISTERED_ONCHAIN
 
         log.debug("wait_for_transfer_result", **log_details)
         gevent.sleep(retry_timeout)
@@ -540,21 +574,23 @@ def wait_for_withdraw_complete(
         "canonical_identifier": canonical_identifier,
         "target_total_withdraw": total_withdraw,
     }
-    found = False
-    while not found:
-        assert raiden, TRANSPORT_ERROR_MSG
-        assert raiden.wal, TRANSPORT_ERROR_MSG
-        assert raiden.transport, TRANSPORT_ERROR_MSG
+    assert raiden, TRANSPORT_ERROR_MSG
+    assert raiden.wal, TRANSPORT_ERROR_MSG
+    assert raiden.transport, TRANSPORT_ERROR_MSG
+    stream = raiden.wal.storage.get_state_changes_stream(retry_timeout=retry_timeout)
 
-        state_changes = raiden.wal.storage.get_state_changes()
+    while True:
+        state_changes = next(stream)
+
         for state_change in state_changes:
             found = (
                 isinstance(state_change, ContractReceiveChannelWithdraw)
                 and state_change.total_withdraw == total_withdraw
                 and state_change.canonical_identifier == canonical_identifier
             )
+
             if found:
-                break
+                return
 
         log.debug("wait_for_withdraw_complete", **log_details)
         gevent.sleep(retry_timeout)

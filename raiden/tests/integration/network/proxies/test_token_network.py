@@ -1,7 +1,7 @@
 import random
 
 import pytest
-from eth_utils import decode_hex, encode_hex, to_canonical_address, to_checksum_address
+from eth_utils import decode_hex, encode_hex, to_canonical_address
 
 from raiden.constants import (
     EMPTY_BALANCE_HASH,
@@ -23,6 +23,7 @@ from raiden.network.proxies.proxy_manager import ProxyManager, ProxyManagerMetad
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.tests.integration.network.proxies import BalanceProof
 from raiden.tests.utils.factories import make_address
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.signer import LocalSigner
 from raiden.utils.typing import T_ChannelID
 from raiden_contracts.constants import (
@@ -438,8 +439,8 @@ def test_token_network_proxy(
         )
         pytest.fail(msg)
 
-    c1_proxy_manager.wait_until_block(
-        target_block_number=c1_proxy_manager.client.block_number() + TEST_SETTLE_TIMEOUT_MIN
+    c1_client.wait_until_block(
+        target_block_number=c1_client.block_number() + TEST_SETTLE_TIMEOUT_MIN
     )
 
     invalid_transferred_amount = 1
@@ -661,9 +662,7 @@ def test_token_network_proxy_update_transfer(
 
         assert "cannot be settled before settlement window is over" in str(exc)
 
-    c1_proxy_manager.wait_until_block(
-        target_block_number=c1_proxy_manager.client.block_number() + 10
-    )
+    c1_client.wait_until_block(target_block_number=c1_client.block_number() + 10)
 
     # settling with an invalid amount
     with pytest.raises(BrokenPreconditionError):
@@ -743,7 +742,7 @@ def test_query_pruned_state(token_network_proxy, private_keys, web3, contract_ma
 
     # wait until state pruning kicks in
     target_block = block_number + STATE_PRUNING_AFTER_BLOCKS + 1
-    c1_proxy_manager.wait_until_block(target_block_number=target_block)
+    c1_client.wait_until_block(target_block_number=target_block)
 
     # and now query again for the old block identifier and see we can't query
     assert not c1_client.can_query_state_for_block(block_hash)
@@ -753,8 +752,8 @@ def test_token_network_actions_at_pruned_blocks(
     token_network_proxy, private_keys, token_proxy, web3, chain_id, contract_manager
 ):
     token_network_address = to_canonical_address(token_network_proxy.proxy.contract.address)
-    c1_client = JSONRPCClient(web3, private_keys[1])
 
+    c1_client = JSONRPCClient(web3, private_keys[1])
     c1_proxy_manager = ProxyManager(
         rpc_client=c1_client,
         contract_manager=contract_manager,
@@ -791,9 +790,7 @@ def test_token_network_actions_at_pruned_blocks(
 
     # Now wait until this block becomes pruned
     pruned_number = c1_proxy_manager.client.block_number()
-    c1_proxy_manager.wait_until_block(
-        target_block_number=pruned_number + STATE_PRUNING_AFTER_BLOCKS
-    )
+    c1_client.wait_until_block(target_block_number=pruned_number + STATE_PRUNING_AFTER_BLOCKS)
 
     # deposit with given block being pruned
     c1_token_network_proxy.set_total_deposit(
@@ -862,7 +859,7 @@ def test_token_network_actions_at_pruned_blocks(
         is not None
     )
 
-    c1_proxy_manager.wait_until_block(
+    c1_client.wait_until_block(
         target_block_number=close_pruned_number + STATE_PRUNING_AFTER_BLOCKS
     )
 
@@ -879,7 +876,7 @@ def test_token_network_actions_at_pruned_blocks(
     )
 
     # update transfer
-    c1_proxy_manager.wait_until_block(target_block_number=close_pruned_number + settle_timeout)
+    c1_client.wait_until_block(target_block_number=close_pruned_number + settle_timeout)
 
     # Test that settling will fail because at closed_pruned_number
     # the settlement period isn't over.
@@ -899,7 +896,7 @@ def test_token_network_actions_at_pruned_blocks(
     settle_block_number = close_pruned_number + settle_timeout
 
     # Wait until the settle block is pruned
-    c1_proxy_manager.wait_until_block(
+    c1_client.wait_until_block(
         target_block_number=settle_block_number + STATE_PRUNING_AFTER_BLOCKS + 1
     )
 

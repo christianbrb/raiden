@@ -6,7 +6,7 @@ from enum import Enum
 from random import Random
 
 import networkx
-from eth_utils import to_checksum_address, to_hex
+from eth_utils import to_hex
 
 from raiden.constants import (
     EMPTY_SECRETHASH,
@@ -25,7 +25,7 @@ from raiden.transfer.architecture import (
 )
 from raiden.transfer.identifiers import CanonicalIdentifier, QueueIdentifier
 from raiden.transfer.mediated_transfer.mediation_fee import FeeScheduleState
-from raiden.utils import lpex
+from raiden.utils.formatting import lpex, to_checksum_address
 from raiden.utils.typing import (
     Address,
     Any,
@@ -521,7 +521,6 @@ class ChainState(State):
     payment_mapping: PaymentMappingState = field(repr=False, default_factory=PaymentMappingState)
     pending_transactions: List[ContractSendEvent] = field(repr=False, default_factory=list)
     queueids_to_queues: QueueIdsToQueues = field(repr=False, default_factory=dict)
-    last_transport_authdata: Optional[str] = field(repr=False, default=None)
     tokennetworkaddresses_to_tokennetworkregistryaddresses: Dict[
         TokenNetworkAddress, TokenNetworkRegistryAddress
     ] = field(repr=False, default_factory=dict)

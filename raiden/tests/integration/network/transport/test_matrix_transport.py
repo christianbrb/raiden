@@ -1,10 +1,12 @@
 import json
 import random
+from datetime import datetime
+from functools import partial
+from typing import Any, Set
 from unittest.mock import MagicMock
 
 import gevent
 import pytest
-from eth_utils import to_checksum_address
 from gevent import Timeout
 from matrix_client.errors import MatrixRequestError
 
@@ -15,26 +17,37 @@ from raiden.constants import (
     EMPTY_SIGNATURE,
     MONITORING_BROADCASTING_ROOM,
     PATH_FINDING_BROADCASTING_ROOM,
+    Environment,
     RoutingMode,
 )
 from raiden.exceptions import InsufficientEth
-from raiden.messages.matrix import ToDevice
 from raiden.messages.path_finding_service import PFSFeeUpdate
 from raiden.messages.synchronization import Delivered, Processed
 from raiden.network.transport.matrix import AddressReachability, MatrixTransport, _RetryQueue
 from raiden.network.transport.matrix.client import Room
-from raiden.network.transport.matrix.utils import UserPresence, make_room_alias, my_place_or_yours
+from raiden.network.transport.matrix.utils import (
+    ReachabilityState,
+    UserPresence,
+    make_room_alias,
+    my_place_or_yours,
+)
+from raiden.raiden_service import RaidenService
 from raiden.services import send_pfs_update, update_monitoring_service_from_balance_proof
-from raiden.settings import MONITORING_REWARD
+from raiden.settings import MONITORING_REWARD, MatrixTransportConfig, RaidenConfig, ServiceConfig
+from raiden.storage.serialization.serializer import MessageSerializer
 from raiden.tests.utils import factories
 from raiden.tests.utils.client import burn_eth
-from raiden.tests.utils.factories import HOP1
+from raiden.tests.utils.detect_failure import expect_failure, raise_on_failure
+from raiden.tests.utils.factories import HOP1, make_privkeys_ordered
 from raiden.tests.utils.mocks import MockRaidenService
 from raiden.tests.utils.transfer import wait_assert
 from raiden.transfer import views
 from raiden.transfer.identifiers import CANONICAL_IDENTIFIER_UNORDERED_QUEUE, QueueIdentifier
-from raiden.transfer.state_change import ActionChannelClose, ActionUpdateTransportAuthData
-from raiden.utils.typing import Address, List
+from raiden.transfer.state import NetworkState
+from raiden.transfer.state_change import ActionChannelClose
+from raiden.utils.formatting import to_checksum_address
+from raiden.utils.typing import Address, Dict, List, cast
+from raiden.waiting import wait_for_network_state
 
 HOP1_BALANCE_PROOF = factories.BalanceProofSignedStateProperties(pkey=factories.HOP1_KEY)
 TIMEOUT_MESSAGE_RECEIVE = 15
@@ -44,8 +57,8 @@ class MessageHandler:
     def __init__(self, bag: set):
         self.bag = bag
 
-    def on_message(self, _, message):
-        self.bag.add(message)
+    def on_messages(self, _, messages):
+        self.bag.update(messages)
 
 
 def ping_pong_message_success(transport0, transport1):
@@ -184,14 +197,6 @@ def test_matrix_message_sync(matrix_transports):
     transport0.start(raiden_service0, [], None)
     transport1.start(raiden_service1, [], None)
 
-    latest_auth_data = f"{transport1._user_id}/{transport1._client.api.token}"
-    update_transport_auth_data = ActionUpdateTransportAuthData(latest_auth_data)
-    with gevent.Timeout(2):
-        wait_assert(
-            raiden_service1.handle_and_track_state_changes.assert_called_with,
-            [update_transport_auth_data],
-        )
-
     transport0.start_health_check(transport1._raiden_service.address)
     transport1.start_health_check(transport0._raiden_service.address)
 
@@ -231,8 +236,6 @@ def test_matrix_message_sync(matrix_transports):
 
     wait_for_peer_unreachable(transport0, transport1._raiden_service.address)
 
-    assert latest_auth_data
-
     # Send more messages while the other end is offline
     for i in range(10, 15):
         message = Processed(message_identifier=i, signature=EMPTY_SIGNATURE)
@@ -241,7 +244,7 @@ def test_matrix_message_sync(matrix_transports):
         transport0.send_async(queue_identifier, message)
 
     # Should fetch the 5 messages sent while transport1 was offline
-    transport1.start(transport1._raiden_service, [], latest_auth_data)
+    transport1.start(transport1._raiden_service, [], None)
     transport1.start_health_check(transport0._raiden_service.address)
 
     with gevent.Timeout(TIMEOUT_MESSAGE_RECEIVE):
@@ -260,6 +263,7 @@ def test_matrix_message_sync(matrix_transports):
         assert any(m.delivered_message_identifier == i for m in transport0_messages)
 
 
+@expect_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 @pytest.mark.parametrize("channels_per_node", [1])
 @pytest.mark.parametrize("number_of_tokens", [1])
@@ -307,14 +311,15 @@ def test_matrix_message_retry(
     partner_address = factories.make_address()
 
     transport = MatrixTransport(
-        {
-            "broadcast_rooms": broadcast_rooms,
-            "retries_before_backoff": retries_before_backoff,
-            "retry_interval": retry_interval,
-            "server": local_matrix_servers[0],
-            "server_name": local_matrix_servers[0].netloc,
-            "available_servers": [local_matrix_servers[0]],
-        }
+        config=MatrixTransportConfig(
+            broadcast_rooms=broadcast_rooms,
+            retries_before_backoff=retries_before_backoff,
+            retry_interval=retry_interval,
+            server=local_matrix_servers[0],
+            server_name=local_matrix_servers[0].netloc,
+            available_servers=[local_matrix_servers[0]],
+        ),
+        environment=Environment.DEVELOPMENT,
     )
     transport._send_raw = MagicMock()
     raiden_service = MockRaidenService(None)
@@ -323,9 +328,9 @@ def test_matrix_message_retry(
     transport.log = MagicMock()
 
     # Receiver is online
-    transport._address_mgr._address_to_reachability[
-        partner_address
-    ] = AddressReachability.REACHABLE
+    transport._address_mgr._address_to_reachabilitystate[partner_address] = ReachabilityState(
+        AddressReachability.REACHABLE, datetime.now()
+    )
 
     queueid = QueueIdentifier(
         recipient=partner_address, canonical_identifier=CANONICAL_IDENTIFIER_UNORDERED_QUEUE
@@ -345,9 +350,9 @@ def test_matrix_message_retry(
     assert transport._send_raw.call_count == 1
 
     # Receiver goes offline
-    transport._address_mgr._address_to_reachability[
-        partner_address
-    ] = AddressReachability.UNREACHABLE
+    transport._address_mgr._address_to_reachabilitystate[partner_address] = ReachabilityState(
+        AddressReachability.UNREACHABLE, datetime.now()
+    )
 
     with gevent.Timeout(retry_interval + 2):
         wait_assert(
@@ -361,9 +366,9 @@ def test_matrix_message_retry(
     assert transport._send_raw.call_count == 1
 
     # Receiver comes back online
-    transport._address_mgr._address_to_reachability[
-        partner_address
-    ] = AddressReachability.REACHABLE
+    transport._address_mgr._address_to_reachabilitystate[partner_address] = ReachabilityState(
+        AddressReachability.REACHABLE, datetime.now()
+    )
 
     # Retrier should send the message again
     with gevent.Timeout(retry_interval + 2):
@@ -384,14 +389,15 @@ def test_join_invalid_discovery(
     our current server should be created
     """
     transport = MatrixTransport(
-        {
-            "broadcast_rooms": broadcast_rooms,
-            "retries_before_backoff": retries_before_backoff,
-            "retry_interval": retry_interval,
-            "server": local_matrix_servers[0],
-            "server_name": local_matrix_servers[0].netloc,
-            "available_servers": ["http://invalid.server"],
-        }
+        config=MatrixTransportConfig(
+            broadcast_rooms=broadcast_rooms,
+            retries_before_backoff=retries_before_backoff,
+            retry_interval=retry_interval,
+            server=local_matrix_servers[0],
+            server_name=local_matrix_servers[0].netloc,
+            available_servers=["http://invalid.server"],
+        ),
+        environment=Environment.DEVELOPMENT,
     )
     transport._client.api.retry_timeout = 0
     transport._send_raw = MagicMock()
@@ -448,14 +454,15 @@ def test_matrix_discovery_room_offline_server(
 ):
 
     transport = MatrixTransport(
-        {
-            "broadcast_rooms": broadcast_rooms,
-            "retries_before_backoff": retries_before_backoff,
-            "retry_interval": retry_interval,
-            "server": local_matrix_servers[0],
-            "server_name": local_matrix_servers[0].netloc,
-            "available_servers": [local_matrix_servers[0], "https://localhost:1"],
-        }
+        config=MatrixTransportConfig(
+            broadcast_rooms=broadcast_rooms,
+            retries_before_backoff=retries_before_backoff,
+            retry_interval=retry_interval,
+            server=local_matrix_servers[0],
+            server_name=local_matrix_servers[0].netloc,
+            available_servers=[local_matrix_servers[0], "https://localhost:1"],
+        ),
+        environment=Environment.DEVELOPMENT,
     )
     transport.start(MockRaidenService(None), [], "")
 
@@ -475,14 +482,15 @@ def test_matrix_broadcast(
     local_matrix_servers, retries_before_backoff, retry_interval, broadcast_rooms
 ):
     transport = MatrixTransport(
-        {
-            "broadcast_rooms": broadcast_rooms,
-            "retries_before_backoff": retries_before_backoff,
-            "retry_interval": retry_interval,
-            "server": local_matrix_servers[0],
-            "server_name": local_matrix_servers[0].netloc,
-            "available_servers": [local_matrix_servers[0]],
-        }
+        config=MatrixTransportConfig(
+            broadcast_rooms=broadcast_rooms,
+            retries_before_backoff=retries_before_backoff,
+            retry_interval=retry_interval,
+            server=local_matrix_servers[0],
+            server_name=local_matrix_servers[0].netloc,
+            available_servers=[local_matrix_servers[0]],
+        ),
+        environment=Environment.DEVELOPMENT,
     )
     transport.start(MockRaidenService(None), [], "")
     gevent.idle()
@@ -522,19 +530,24 @@ def test_monitoring_broadcast_messages(
     MONITORING_BROADCASTING_ROOM room on newly received balance proofs.
     """
     transport = MatrixTransport(
-        {
-            "broadcast_rooms": broadcast_rooms + [MONITORING_BROADCASTING_ROOM],
-            "retries_before_backoff": retries_before_backoff,
-            "retry_interval": retry_interval,
-            "server": local_matrix_servers[0],
-            "server_name": local_matrix_servers[0].netloc,
-            "available_servers": [local_matrix_servers[0]],
-        }
+        config=MatrixTransportConfig(
+            broadcast_rooms=broadcast_rooms + [MONITORING_BROADCASTING_ROOM],
+            retries_before_backoff=retries_before_backoff,
+            retry_interval=retry_interval,
+            server=local_matrix_servers[0],
+            server_name=local_matrix_servers[0].netloc,
+            available_servers=[local_matrix_servers[0]],
+        ),
+        environment=Environment.DEVELOPMENT,
     )
     transport._client.api.retry_timeout = 0
     transport._send_raw = MagicMock()
     raiden_service = MockRaidenService(None)
-    raiden_service.config = dict(services=dict(monitoring_enabled=True))
+    raiden_service.config = RaidenConfig(
+        chain_id=1234,
+        environment_type=Environment.DEVELOPMENT,
+        services=ServiceConfig(monitoring_enabled=True),
+    )
 
     transport.start(raiden_service, [], None)
 
@@ -593,19 +606,20 @@ def test_pfs_broadcast_messages(
     PATH_FINDING_BROADCASTING_ROOM room on newly received balance proofs.
     """
     transport = MatrixTransport(
-        {
-            "broadcast_rooms": broadcast_rooms,
-            "retries_before_backoff": retries_before_backoff,
-            "retry_interval": retry_interval,
-            "server": local_matrix_servers[0],
-            "server_name": local_matrix_servers[0].netloc,
-            "available_servers": [local_matrix_servers[0]],
-        }
+        config=MatrixTransportConfig(
+            broadcast_rooms=broadcast_rooms,
+            retries_before_backoff=retries_before_backoff,
+            retry_interval=retry_interval,
+            server=local_matrix_servers[0],
+            server_name=local_matrix_servers[0].netloc,
+            available_servers=[local_matrix_servers[0]],
+        ),
+        environment=Environment.DEVELOPMENT,
     )
     transport._client.api.retry_timeout = 0
     transport._send_raw = MagicMock()
     raiden_service = MockRaidenService(None)
-    raiden_service.config = dict(services=dict(monitoring_enabled=True))
+    raiden_service.config.services.monitoring_enabled = True
     raiden_service.routing_mode = route_mode
 
     transport.start(raiden_service, [], None)
@@ -697,9 +711,14 @@ def test_matrix_invite_private_room_happy_case(matrix_transports):
 
 @pytest.mark.parametrize("matrix_server_count", [2])
 @pytest.mark.parametrize("number_of_transports", [2])
-def test_matrix_invite_retry_with_offline_invitee(matrix_transports):
-    raiden_service0 = MockRaidenService(None)
-    raiden_service1 = MockRaidenService(None)
+def test_matrix_invite_retry_with_offline_invitee(
+    matrix_transports: List[MatrixTransport]
+) -> None:
+    """The inviter should create the room and send the invite even if the
+    target node is offline.
+    """
+    raiden_service0: RaidenService = cast(RaidenService, MockRaidenService(None))
+    raiden_service1: RaidenService = cast(RaidenService, MockRaidenService(None))
 
     transport0, transport1 = matrix_transports
 
@@ -717,20 +736,18 @@ def test_matrix_invite_retry_with_offline_invitee(matrix_transports):
         inviter_transport = transport1
         invitee_transport = transport0
 
-    inviter_transport.start(inviter_service, [], None)
+    # Initialize the invitee and stop it before the invite happens
     invitee_transport.start(invitee_service, [], None)
-
-    inviter_transport.start_health_check(invitee_service.address)
-    invitee_transport.start_health_check(inviter_service.address)
-
-    assert is_reachable(inviter_transport, invitee_service.address)
-    assert is_reachable(invitee_transport, inviter_service.address)
-
     invitee_transport.stop()
+
+    inviter_transport.start(inviter_service, [], None)
+    inviter_transport.start_health_check(invitee_service.address)
+
     wait_for_peer_unreachable(inviter_transport, invitee_service.address)
     assert not is_reachable(inviter_transport, invitee_service.address)
 
-    room_id = inviter_transport._get_room_for_address(invitee_service.address).room_id
+    room = inviter_transport._get_room_for_address(invitee_service.address)
+    assert room, "The inviter should have created the room, even if the invitee is offline."
 
     invitee_transport.start(invitee_service, [], None)
     invitee_transport.start_health_check(inviter_service.address)
@@ -738,7 +755,7 @@ def test_matrix_invite_retry_with_offline_invitee(matrix_transports):
     with Timeout(TIMEOUT_MESSAGE_RECEIVE):
         while True:
             try:
-                room_state0 = inviter_transport._client.api.get_room_state(room_id)
+                room_state0 = inviter_transport._client.api.get_room_state(room.room_id)
                 break
             except MatrixRequestError:
                 gevent.sleep(0.1)
@@ -748,7 +765,7 @@ def test_matrix_invite_retry_with_offline_invitee(matrix_transports):
     with Timeout(TIMEOUT_MESSAGE_RECEIVE):
         while True:
             try:
-                room_state1 = invitee_transport._client.api.get_room_state(room_id)
+                room_state1 = invitee_transport._client.api.get_room_state(room.room_id)
                 break
             except MatrixRequestError as ex:
                 print(ex, transport0._client.user_id, transport1._client.user_id)
@@ -756,12 +773,18 @@ def test_matrix_invite_retry_with_offline_invitee(matrix_transports):
 
     assert room_state1 is not None
 
+    assert is_reachable(inviter_transport, invitee_service.address)
+    assert is_reachable(invitee_transport, inviter_service.address)
+
 
 @pytest.mark.parametrize("number_of_transports", [2])
 @pytest.mark.parametrize("matrix_server_count", [2])
-def test_matrix_invitee_receives_invite_on_restart(matrix_transports):
-    raiden_service0 = MockRaidenService(None)
-    raiden_service1 = MockRaidenService(None)
+def test_matrix_invitee_receives_invite_on_restart(
+    matrix_transports: List[MatrixTransport]
+) -> None:
+    """The invitee should receive the invite, even if the inviter is offline."""
+    raiden_service0: RaidenService = cast(RaidenService, MockRaidenService(None))
+    raiden_service1: RaidenService = cast(RaidenService, MockRaidenService(None))
 
     transport0, transport1 = matrix_transports
 
@@ -779,33 +802,26 @@ def test_matrix_invitee_receives_invite_on_restart(matrix_transports):
         inviter_transport = transport1
         invitee_transport = transport0
 
-    inviter_transport.start(inviter_service, [], None)
+    # Initialize the invitee and stop it before the invite happens
     invitee_transport.start(invitee_service, [], None)
-
-    inviter_transport.start_health_check(invitee_service.address)
-    invitee_transport.start_health_check(inviter_service.address)
-
-    wait_for_peer_reachable(inviter_transport, invitee_service.address)
-    wait_for_peer_reachable(invitee_transport, inviter_service.address)
-
-    assert is_reachable(invitee_transport, inviter_service.address)
-    assert is_reachable(inviter_transport, invitee_service.address)
-
     invitee_transport.stop()
 
-    wait_for_peer_unreachable(inviter_transport, invitee_service.address)
-    assert not is_reachable(inviter_transport, invitee_service.address)
+    inviter_transport.start(inviter_service, [], None)
+    inviter_transport.start_health_check(invitee_service.address)
 
-    room_id = inviter_transport._get_room_for_address(invitee_service.address).room_id
+    room = inviter_transport._get_room_for_address(invitee_service.address)
+    assert room, "The inviter should have created the room, even if the invitee is offline."
+
+    # Now stop the inviter and check the invitee received the invite
+    inviter_transport.stop()
+
     invitee_transport.start(invitee_service, [], None)
     invitee_transport.start_health_check(inviter_service.address)
-
-    inviter_transport.stop()
 
     with Timeout(TIMEOUT_MESSAGE_RECEIVE):
         while True:
             try:
-                room_state1 = invitee_transport._client.api.get_room_state(room_id)
+                room_state1 = invitee_transport._client.api.get_room_state(room.room_id)
                 break
             except MatrixRequestError:
                 gevent.sleep(0.1)
@@ -815,7 +831,11 @@ def test_matrix_invitee_receives_invite_on_restart(matrix_transports):
 
 @pytest.mark.parametrize("matrix_server_count", [3])
 @pytest.mark.parametrize("number_of_transports", [3])
-def test_matrix_user_roaming(matrix_transports):
+@pytest.mark.parametrize(
+    "roaming_peer",
+    [pytest.param("high", id="roaming_high"), pytest.param("low", id="roaming_low")],
+)
+def test_matrix_user_roaming(matrix_transports, roaming_peer):
     transport0, transport1, transport2 = matrix_transports
     received_messages0 = set()
     received_messages1 = set()
@@ -823,8 +843,11 @@ def test_matrix_user_roaming(matrix_transports):
     message_handler0 = MessageHandler(received_messages0)
     message_handler1 = MessageHandler(received_messages1)
 
-    raiden_service0 = MockRaidenService(message_handler0)
-    raiden_service1 = MockRaidenService(message_handler1)
+    reverse_privkey_order = roaming_peer == "low"
+    privkey0, privkey1 = make_privkeys_ordered(count=2, reverse=reverse_privkey_order)
+
+    raiden_service0 = MockRaidenService(message_handler0, private_key=privkey0)
+    raiden_service1 = MockRaidenService(message_handler1, private_key=privkey1)
 
     transport0.start(raiden_service0, [], "")
     transport1.start(raiden_service1, [], "")
@@ -863,7 +886,11 @@ def test_matrix_user_roaming(matrix_transports):
 
 @pytest.mark.parametrize("matrix_server_count", [3])
 @pytest.mark.parametrize("number_of_transports", [6])
-def test_matrix_multi_user_roaming(matrix_transports):
+@pytest.mark.parametrize(
+    "roaming_peer",
+    [pytest.param("high", id="roaming_high"), pytest.param("low", id="roaming_low")],
+)
+def test_matrix_multi_user_roaming(matrix_transports, roaming_peer):
     # 6 transports on 3 servers, where (0,3), (1,4), (2,5) are one the same server
     (
         transport_rs0_0,
@@ -879,8 +906,11 @@ def test_matrix_multi_user_roaming(matrix_transports):
     message_handler0 = MessageHandler(received_messages0)
     message_handler1 = MessageHandler(received_messages1)
 
-    raiden_service0 = MockRaidenService(message_handler0)
-    raiden_service1 = MockRaidenService(message_handler1)
+    reverse_privkey_order = roaming_peer == "low"
+    privkey0, privkey1 = make_privkeys_ordered(count=2, reverse=reverse_privkey_order)
+
+    raiden_service0 = MockRaidenService(message_handler0, private_key=privkey0)
+    raiden_service1 = MockRaidenService(message_handler1, private_key=privkey1)
 
     # Both nodes on the same server
     transport_rs0_0.start(raiden_service0, [], "")
@@ -1016,33 +1046,243 @@ def test_reproduce_handle_invite_send_race_issue_3588(matrix_transports):
     assert ping_pong_message_success(transport0, transport1)
 
 
-@pytest.mark.parametrize("matrix_server_count", [1])
 @pytest.mark.parametrize("number_of_transports", [2])
-def test_send_to_device(matrix_transports):
+@pytest.mark.parametrize("matrix_server_count", [1])
+@pytest.mark.parametrize("matrix_sync_timeout", [5_000])  # Shorten sync timeout to prevent timeout
+@pytest.mark.parametrize(
+    "broadcast_rooms", [[DISCOVERY_DEFAULT_ROOM, PATH_FINDING_BROADCASTING_ROOM]]
+)
+def test_matrix_ignore_messages_in_broadcast_rooms(matrix_transports):
+    """ Ensure the transport doesn't attach a message listener to broadcast rooms. """
+    raiden_service0 = MockRaidenService(None)
+    raiden_service1 = MockRaidenService(None)
+
     transport0, transport1 = matrix_transports
-    received_messages0 = set()
-    received_messages1 = set()
 
-    message_handler0 = MessageHandler(received_messages0)
-    message_handler1 = MessageHandler(received_messages1)
+    # Remove PFS broadcast room from transport1 config so it doesn't join the room
+    transport1._config.broadcast_rooms.remove(PATH_FINDING_BROADCASTING_ROOM)
 
-    raiden_service0 = MockRaidenService(message_handler0)
-    raiden_service1 = MockRaidenService(message_handler1)
-    transport1._receive_to_device = MagicMock()
+    transport0.start(raiden_service0, [], None)
+    transport1.start(raiden_service1, [], None)
 
-    transport0.start(raiden_service0, [], "")
-    transport1.start(raiden_service1, [], "")
+    # Re-add the PFS broadcast room to transport1. Since `start()` has already been called
+    # it will not be joined automatically.
+    # We use this fact to wait on the room state to know when transport1 has processed the invite.
+    transport1._config.broadcast_rooms.append(PATH_FINDING_BROADCASTING_ROOM)
 
     transport0.start_health_check(raiden_service1.address)
     transport1.start_health_check(raiden_service0.address)
 
-    message = Processed(message_identifier=1, signature=EMPTY_SIGNATURE)
-    transport0._raiden_service.sign(message)
-    transport0.send_to_device(raiden_service1.address, message)
+    pfs_broadcast_room_alias = make_room_alias(transport0.chain_id, PATH_FINDING_BROADCASTING_ROOM)
+    pfs_broadcast_room_t0 = transport0._broadcast_rooms[pfs_broadcast_room_alias]
 
-    transport1._receive_to_device.assert_not_called()
-    message = ToDevice(message_identifier=1, signature=EMPTY_SIGNATURE)
-    transport0._raiden_service.sign(message)
-    transport0.send_to_device(raiden_service1.address, message)
-    with gevent.Timeout(2):
-        wait_assert(transport1._receive_to_device.assert_called)
+    # Send a message to the broadcast room, if any transport listens on the room it will throw an
+    # exception
+    message = Processed(message_identifier=1, signature=EMPTY_SIGNATURE)
+    message_text = MessageSerializer.serialize(message)
+    pfs_broadcast_room_t0.send_text(message_text)
+
+    # Invite transport1 user. It should join the room but *not* attach a listener.
+    pfs_broadcast_room_t0.invite_user(transport1._user_id)
+
+    # Wait for transport1 to process the invite
+    with Timeout(TIMEOUT_MESSAGE_RECEIVE):
+        while True:
+            try:
+                room_state0 = transport0._client.api.get_room_state_type(
+                    pfs_broadcast_room_t0.room_id, "m.room.member", transport1._user_id
+                )
+                if room_state0["membership"] == "join":
+                    break
+            except MatrixRequestError:
+                pass
+            # Poll transport1 to ensure the message sent above did not raise an exception
+            try:
+                transport1.greenlet.get(timeout=0.1)
+            except Timeout:
+                pass
+
+    received_messages_t1_pfs: Set[str] = set()
+
+    def _handle_message_t1(_room: Room, event: Dict[str, Any]):
+        received_messages_t1_pfs.add(event["content"]["body"])
+
+    # Attach a message listener on transport1 so we know when the message has reached transport1
+    transport1._client.rooms[pfs_broadcast_room_t0.room_id].add_listener(
+        _handle_message_t1, "m.room.message"
+    )
+
+    # Send another message to the broadcast room, if transport1 listens on the room it will
+    # throw an exception
+    message = Processed(message_identifier=2, signature=EMPTY_SIGNATURE)
+    message_text = MessageSerializer.serialize(message)
+    pfs_broadcast_room_t0.send_text(message_text)
+
+    with Timeout(TIMEOUT_MESSAGE_RECEIVE):
+        while message_text not in received_messages_t1_pfs:
+            gevent.joinall({transport1.greenlet}, timeout=0.1, raise_error=True)
+        # Wait for the current transport1 sync loop to complete to ensure all server events
+        # have been processed (making sure no exception is raised late)
+        sync_iteration = transport1._client.sync_iteration
+        while sync_iteration == transport1._client.sync_iteration:
+            gevent.joinall({transport1.greenlet}, timeout=0.1, raise_error=True)
+
+
+@pytest.mark.parametrize("number_of_transports", [3])
+@pytest.mark.parametrize("matrix_server_count", [1])
+@pytest.mark.parametrize("matrix_sync_timeout", [5_000])  # Shorten sync timeout to prevent timeout
+@pytest.mark.parametrize(
+    "broadcast_rooms", [[DISCOVERY_DEFAULT_ROOM, PATH_FINDING_BROADCASTING_ROOM]]
+)
+def test_transport_does_not_receive_broadcast_rooms_updates(
+    matrix_transports, matrix_sync_timeout
+):
+    """ Ensure that matrix server-side filters take effect on sync for broadcast room content.
+
+    The test sets up 3 transports where:
+    Transport0 sends a message to the PFS broadcast room.
+    Transport1 has an active sync filter ID that filters out broadcast room messages.
+    Transport2 has NO active sync filter so it receives everything.
+
+    The test should wait for Transport0 to send a message and then
+    verify that Transport2 has received the message while Transport1
+    did not.
+    """
+    raiden_service0 = MockRaidenService(None)
+    raiden_service1 = MockRaidenService(None)
+    raiden_service2 = MockRaidenService(None)
+
+    transport0, transport1, transport2 = matrix_transports
+
+    received_sync_events: Dict[str, List[Dict[str, Any]]] = {"t1": [], "t2": []}
+
+    def _handle_response(
+        name: str, response: Dict[str, Any], first_sync: bool = False
+    ):  # pylint: disable=unused-argument
+        joined_rooms = response.get("rooms", {}).get("join", {})
+        for joined_room in joined_rooms.values():
+            timeline_events = joined_room.get("timeline").get("events", [])
+            received_sync_events[name].extend(timeline_events)
+
+    # Replace the transport's handle_response method
+    # Should be able to detect if sync delivered a message
+    transport1._client._handle_response = partial(_handle_response, "t1")
+    transport2._client._handle_response = partial(_handle_response, "t2")
+
+    transport0.start(raiden_service0, [], None)
+    transport1.start(raiden_service1, [], None)
+    transport2.start(raiden_service2, [], None)
+
+    pfs_broadcast_room_alias = make_room_alias(transport0.chain_id, PATH_FINDING_BROADCASTING_ROOM)
+    pfs_broadcast_room_t0 = transport0._broadcast_rooms[pfs_broadcast_room_alias]
+
+    transport1._client._sync_filter_id = None
+
+    # Reset transport2 sync filter identifier so that
+    # we can receive broadcast messages
+    assert transport2._client._sync_filter_id is not None
+    transport2._client._sync_filter_id = None
+
+    # Send another message to the broadcast room, if transport1 listens on the room it will
+    # throw an exception
+    message = Processed(message_identifier=1, signature=EMPTY_SIGNATURE)
+    message_text = MessageSerializer.serialize(message)
+    pfs_broadcast_room_t0.send_text(message_text)
+
+    with Timeout(matrix_sync_timeout + 2):
+        sync_iteration = transport2._client.sync_iteration
+        while sync_iteration == transport2._client.sync_iteration:
+            gevent.joinall({transport2.greenlet}, timeout=0.1, raise_error=True)
+
+        sync_iteration = transport1._client.sync_iteration
+        while sync_iteration == transport1._client.sync_iteration:
+            gevent.joinall({transport1.greenlet}, timeout=0.1, raise_error=True)
+
+    # Transport2 should have received the message
+    assert received_sync_events["t2"]
+    event_body = received_sync_events["t2"][0]["content"]["body"]
+    assert message_text == event_body
+
+    # Transport1 used the filter so nothing was received
+    assert not received_sync_events["t1"]
+
+
+@raise_on_failure
+@pytest.mark.parametrize("matrix_server_count", [3])
+@pytest.mark.parametrize("number_of_nodes", [3])
+@pytest.mark.parametrize(
+    "broadcast_rooms", [[DISCOVERY_DEFAULT_ROOM, PATH_FINDING_BROADCASTING_ROOM]]
+)
+def test_transport_presence_updates(raiden_network, retry_timeout):
+    """
+    Create transports and test that matrix delivers presence updates
+    in the presence of filters which ignore all event updates
+    from matrix for broadcast rooms except for the presence events.
+    """
+    app0, app1, app2 = raiden_network
+
+    app0.raiden.transport.start_health_check(app1.raiden.address)
+    app0.raiden.transport.start_health_check(app2.raiden.address)
+
+    app1.raiden.transport.start_health_check(app0.raiden.address)
+    app1.raiden.transport.start_health_check(app2.raiden.address)
+
+    app2.raiden.transport.start_health_check(app0.raiden.address)
+    app2.raiden.transport.start_health_check(app1.raiden.address)
+
+    wait_for_network_state(app0.raiden, app1.raiden.address, NetworkState.REACHABLE, retry_timeout)
+    wait_for_network_state(app0.raiden, app2.raiden.address, NetworkState.REACHABLE, retry_timeout)
+
+    wait_for_network_state(app1.raiden, app0.raiden.address, NetworkState.REACHABLE, retry_timeout)
+    wait_for_network_state(app1.raiden, app2.raiden.address, NetworkState.REACHABLE, retry_timeout)
+
+    wait_for_network_state(app2.raiden, app0.raiden.address, NetworkState.REACHABLE, retry_timeout)
+    wait_for_network_state(app2.raiden, app1.raiden.address, NetworkState.REACHABLE, retry_timeout)
+
+    # Stop app0
+    app0.stop()
+    wait_for_network_state(
+        app1.raiden, app0.raiden.address, NetworkState.UNREACHABLE, retry_timeout
+    )
+    wait_for_network_state(
+        app2.raiden, app0.raiden.address, NetworkState.UNREACHABLE, retry_timeout
+    )
+
+    # Restart app0
+    app0.start()
+    app0.raiden.transport.start_health_check(app1.raiden.address)
+    app0.raiden.transport.start_health_check(app2.raiden.address)
+    wait_for_network_state(app1.raiden, app0.raiden.address, NetworkState.REACHABLE, retry_timeout)
+    wait_for_network_state(app2.raiden, app0.raiden.address, NetworkState.REACHABLE, retry_timeout)
+
+    # Stop app1
+    app1.stop()
+    wait_for_network_state(
+        app0.raiden, app1.raiden.address, NetworkState.UNREACHABLE, retry_timeout
+    )
+    wait_for_network_state(
+        app2.raiden, app1.raiden.address, NetworkState.UNREACHABLE, retry_timeout
+    )
+
+    # Restart app1
+    app1.start()
+    app1.raiden.transport.start_health_check(app0.raiden.address)
+    app1.raiden.transport.start_health_check(app2.raiden.address)
+    wait_for_network_state(app0.raiden, app1.raiden.address, NetworkState.REACHABLE, retry_timeout)
+    wait_for_network_state(app2.raiden, app1.raiden.address, NetworkState.REACHABLE, retry_timeout)
+
+    # Stop app2
+    app2.stop()
+    wait_for_network_state(
+        app0.raiden, app2.raiden.address, NetworkState.UNREACHABLE, retry_timeout
+    )
+    wait_for_network_state(
+        app1.raiden, app2.raiden.address, NetworkState.UNREACHABLE, retry_timeout
+    )
+
+    # Restart app0
+    app2.start()
+    app2.raiden.transport.start_health_check(app0.raiden.address)
+    app2.raiden.transport.start_health_check(app1.raiden.address)
+    wait_for_network_state(app0.raiden, app2.raiden.address, NetworkState.REACHABLE, retry_timeout)
+    wait_for_network_state(app1.raiden, app2.raiden.address, NetworkState.REACHABLE, retry_timeout)

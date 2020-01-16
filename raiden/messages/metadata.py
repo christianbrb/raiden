@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 
 import rlp
-from eth_utils import to_checksum_address
 
-from raiden.utils import sha3
+from raiden.utils.formatting import to_checksum_address
+from raiden.utils.signing import sha3
 from raiden.utils.typing import Address, List
 
 

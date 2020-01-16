@@ -23,10 +23,10 @@ from raiden.storage.sqlite import (
 )
 from raiden.tests.utils import factories
 from raiden.transfer.mediated_transfer.events import (
-    SendBalanceProof,
     SendLockedTransfer,
     SendLockExpired,
     SendRefundTransfer,
+    SendUnlock,
 )
 from raiden.transfer.mediated_transfer.state_change import (
     ActionInitMediator,
@@ -37,7 +37,7 @@ from raiden.transfer.mediated_transfer.state_change import (
 )
 from raiden.transfer.state import BalanceProofUnsignedState, HopState, RouteState
 from raiden.transfer.state_change import Block, ReceiveUnlock
-from raiden.utils import sha3
+from raiden.utils.signing import sha3
 from raiden.utils.typing import (
     AdditionalHash,
     BlockExpiration,
@@ -308,7 +308,7 @@ def test_get_event_with_balance_proof():
         transfer=make_transfer_from_counter(counter),
         canonical_identifier=factories.make_canonical_identifier(),
     )
-    send_balance_proof = SendBalanceProof(
+    send_balance_proof = SendUnlock(
         recipient=partner_address,
         message_identifier=MessageID(next(counter)),
         payment_identifier=factories.make_payment_id(),
@@ -460,7 +460,7 @@ def test_batch_query_state_changes():
     )
 
     # Test that querying the state changes in batches of 10 works
-    state_changes_num = 87
+    state_changes_num = 86
     state_changes = []
     for state_changes_batch in storage.batch_query_state_changes(batch_size=10):
         state_changes.extend(state_changes_batch)

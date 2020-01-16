@@ -2,7 +2,6 @@ import errno
 import os
 import re
 import string
-import sys
 from enum import EnumMeta
 from itertools import groupby
 from pathlib import Path
@@ -17,8 +16,8 @@ from click.formatting import iter_rows, measure_table, wrap_text
 from pytoml import TomlError, load
 from web3.gas_strategies.time_based import fast_gas_price_strategy, medium_gas_price_strategy
 
-from raiden.exceptions import InvalidChecksummedAddress
-from raiden.utils import address_checksum_and_decode
+from raiden.exceptions import ConfigurationError, InvalidChecksummedAddress
+from raiden.utils.formatting import address_checksum_and_decode
 from raiden_contracts.constants import NETWORKNAME_TO_ID
 
 CONTEXT_KEY_DEFAULT_OPTIONS = "raiden.options_using_default"
@@ -386,11 +385,10 @@ def apply_config_file(
         if default_config_missing:
             cli_params["config_file"] = None
         else:
-            click.secho(f"Error opening config file: {ex}", fg="red")
-            sys.exit(1)
+            raise ConfigurationError(f"Error opening config file: {ex}")
+
     except TomlError as ex:
-        click.secho(f"Error loading config file: {ex}", fg="red")
-        sys.exit(1)
+        raise ConfigurationError(f"Error loading config file: {ex}")
 
     for config_name, config_value in config_file_values.items():
         config_name_int = config_name.replace("-", "_")
@@ -416,8 +414,7 @@ def apply_config_file(
                     config_value, paramname_to_param[config_name_int], ctx
                 )
             except click.BadParameter as ex:
-                click.secho(f"Invalid config file setting '{config_name}': {ex}", fg="red")
-                sys.exit(1)
+                raise ConfigurationError(f"Invalid config file setting '{config_name}': {ex}")
 
         # Only use the config file value if the option wasn't explicitly given on the command line
         option_has_default = paramname_to_param[config_name_int].default is not None

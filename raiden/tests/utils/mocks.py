@@ -3,7 +3,8 @@ import random
 from collections import defaultdict
 from unittest.mock import Mock, PropertyMock
 
-from raiden.constants import RoutingMode
+from raiden.constants import Environment, RoutingMode
+from raiden.settings import RaidenConfig
 from raiden.storage.serialization import JSONSerializer
 from raiden.storage.sqlite import SerializedSQLiteStorage
 from raiden.storage.wal import WriteAheadLog
@@ -13,7 +14,7 @@ from raiden.transfer import node
 from raiden.transfer.architecture import StateManager
 from raiden.transfer.identifiers import CanonicalIdentifier
 from raiden.transfer.state_change import ActionInitChain
-from raiden.utils import privatekey_to_address
+from raiden.utils.keys import privatekey_to_address
 from raiden.utils.signer import LocalSigner
 from raiden.utils.typing import (
     Address,
@@ -67,27 +68,62 @@ class MockPaymentChannel:
 
 
 class MockProxyManager:
-    def __init__(self, node_address: Address):
+    def __init__(self, node_address: Address, mocked_addresses: Dict[str, Address] = None):
         # let's make a single mock token network for testing
         self.client = MockJSONRPCClient(node_address)
         self.token_network = MockTokenNetworkProxy(client=self.client)
+        self.mocked_addresses = mocked_addresses or dict()
 
     def payment_channel(self, canonical_identifier: CanonicalIdentifier):
         return MockPaymentChannel(self.token_network, canonical_identifier.channel_identifier)
 
-    def token_network_registry(  # pylint: disable=unused-argument, no-self-use
-        self, address: Address
-    ):
+    def token_network_registry(self, address: Address):  # pylint: disable=no-self-use
+        registry = Mock(address=address)
+        registry.get_secret_registry_address.return_value = self.mocked_addresses.get(
+            "SecretRegistry", factories.make_address()
+        )
+        return registry
+
+    def secret_registry(self, address: Address):  # pylint: disable=no-self-use
         return Mock(address=address)
 
-    def secret_registry(self, address: Address):  # pylint: disable=unused-argument, no-self-use
-        return object()
-
     def user_deposit(self, address: Address):  # pylint: disable=unused-argument, no-self-use
-        return object()
+        user_deposit = Mock()
+        user_deposit.monitoring_service_address.return_value = self.mocked_addresses.get(
+            "MonitoringService", bytes(20)
+        )
+        user_deposit.token_address.return_value = self.mocked_addresses.get("Token", bytes(20))
+        user_deposit.one_to_n_address.return_value = self.mocked_addresses.get("OneToN", bytes(20))
+        user_deposit.service_registry_address.return_value = self.mocked_addresses.get(
+            "ServiceRegistry", bytes(20)
+        )
+        return user_deposit
 
     def service_registry(self, address: Address):  # pylint: disable=unused-argument, no-self-use
-        return object()
+        service_registry = Mock()
+        service_registry.address = self.mocked_addresses.get("ServiceRegistry", bytes(20))
+        service_registry.token_address.return_value = self.mocked_addresses.get("Token", bytes(20))
+        return service_registry
+
+    def one_to_n(self, address: Address):  # pylint: disable=unused-argument, no-self-use
+        one_to_n = Mock()
+        one_to_n.address = self.mocked_addresses.get("MonitoringService", bytes(20))
+        one_to_n.token_address.return_value = self.mocked_addresses.get("Token", bytes(20))
+        return one_to_n
+
+    def monitoring_service(self, address: Address):  # pylint: disable=unused-argument, no-self-use
+        monitoring_service = Mock()
+        monitoring_service.address = self.mocked_addresses.get("MonitoringService", bytes(20))
+        monitoring_service.token_network_registry_address.return_value = self.mocked_addresses.get(
+            "TokenNetworkRegistry", bytes(20)
+        )
+        monitoring_service.service_registry_address.return_value = self.mocked_addresses.get(
+            "ServiceRegistry", bytes(20)
+        )
+        monitoring_service.token_address.return_value = self.mocked_addresses.get(
+            "Token", bytes(20)
+        )
+        return monitoring_service
 
 
 class MockChannelState:
@@ -115,7 +151,7 @@ class MockChainState:
 
 
 class MockRaidenService:
-    def __init__(self, message_handler=None, state_transition=None, private_key=None, config=None):
+    def __init__(self, message_handler=None, state_transition=None, private_key=None):
         if private_key is None:
             self.privkey, self.address = factories.make_privkey_address()
         else:
@@ -128,7 +164,9 @@ class MockRaidenService:
 
         self.message_handler = message_handler
         self.routing_mode = RoutingMode.PRIVATE
-        self.config = config
+        self.config = RaidenConfig(
+            chain_id=self.rpc_client.chain_id, environment_type=Environment.DEVELOPMENT
+        )
 
         self.user_deposit = Mock()
         self.default_registry = Mock()
@@ -157,9 +195,9 @@ class MockRaidenService:
 
         self.wal.log_and_dispatch([state_change])
 
-    def on_message(self, message):
+    def on_messages(self, messages):
         if self.message_handler:
-            self.message_handler.on_message(self, message)
+            self.message_handler.on_messages(self, messages)
 
     def handle_and_track_state_changes(self, state_changes):
         pass
@@ -183,7 +221,7 @@ def make_raiden_service_mock(
     channel_identifier: ChannelID,
     partner: Address,
 ):
-    raiden_service = MockRaidenService(config={})
+    raiden_service = MockRaidenService()
     chain_state = MockChainState()
     wal = Mock()
     wal.state_manager.current_state = chain_state

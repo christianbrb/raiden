@@ -8,7 +8,7 @@ from http import HTTPStatus
 import gevent
 import gevent.pool
 import structlog
-from eth_utils import encode_hex, to_checksum_address
+from eth_utils import encode_hex
 from flask import Flask, Request, Response, make_response, request, send_from_directory, url_for
 from flask.json import jsonify
 from flask_cors import CORS
@@ -72,6 +72,7 @@ from raiden.exceptions import (
     InvalidBinaryAddress,
     InvalidBlockNumberInput,
     InvalidNumberInput,
+    InvalidPaymentIdentifier,
     InvalidRevealTimeout,
     InvalidSecret,
     InvalidSecretHash,
@@ -95,21 +96,19 @@ from raiden.transfer.events import (
     EventPaymentSentSuccess,
 )
 from raiden.transfer.state import ChannelState, NettingChannelState
-from raiden.utils import (
-    Endpoint,
-    create_default_identifier,
-    get_system_spec,
-    optional_address_to_string,
-    split_endpoint,
-)
+from raiden.utils.formatting import optional_address_to_string, to_checksum_address
+from raiden.utils.http import split_endpoint
 from raiden.utils.runnable import Runnable
+from raiden.utils.system import get_system_spec
 from raiden.utils.testnet import MintingMethod
+from raiden.utils.transfers import create_default_identifier
 from raiden.utils.typing import (
     Address,
     Any,
     BlockSpecification,
     BlockTimeout,
     Dict,
+    Endpoint,
     List,
     Optional,
     PaymentAmount,
@@ -401,14 +400,14 @@ class APIServer(Runnable):  # pragma: no unittest
 
             web3 = self.flask_app.config.get("WEB3_ENDPOINT")
             if "config." in file_name and file_name.endswith(".json"):
-                environment_type = self.rest_api.raiden_api.raiden.config[
-                    "environment_type"
-                ].name.lower()
+                environment_type = (
+                    self.rest_api.raiden_api.raiden.config.environment_type.name.lower()
+                )
                 config = {
                     "raiden": self._api_prefix,
                     "web3": web3,
-                    "settle_timeout": self.rest_api.raiden_api.raiden.config["settle_timeout"],
-                    "reveal_timeout": self.rest_api.raiden_api.raiden.config["reveal_timeout"],
+                    "settle_timeout": self.rest_api.raiden_api.raiden.config.settle_timeout,
+                    "reveal_timeout": self.rest_api.raiden_api.raiden.config.reveal_timeout,
                     "environment_type": environment_type,
                 }
 
@@ -471,7 +470,7 @@ class APIServer(Runnable):  # pragma: no unittest
             wsgiserver.init_socket()
         except socket.error as e:
             if e.errno == errno.EADDRINUSE:
-                raise APIServerPortInUseError()
+                raise APIServerPortInUseError(f"{self.config['host']}:{self.config['port']}")
             raise
 
         self.wsgiserver = wsgiserver
@@ -494,7 +493,13 @@ class APIServer(Runnable):  # pragma: no unittest
         )
 
         if self.wsgiserver is not None:
-            self.wsgiserver.stop()
+            # It is very important to have a timeout here, the existing endpoints only return
+            # once the operation is completed, which for a deposit it means waiting for the
+            # transaction to be mined and confirmed, which can potentially take a few minutes.
+            # If a timeout is not provided here, that would lead to a very and unpredictable
+            # shutdown timeout, which leads to problems with our scenario player tooling.
+
+            self.wsgiserver.stop(timeout=5)
             self.wsgiserver = None
 
         log.debug(
@@ -544,7 +549,7 @@ class RestAPI:  # pragma: no unittest
     def register_token(
         self, registry_address: TokenNetworkRegistryAddress, token_address: TokenAddress
     ) -> Response:
-        if self.raiden_api.raiden.config["environment_type"] == Environment.PRODUCTION:
+        if self.raiden_api.raiden.config.environment_type == Environment.PRODUCTION:
             return api_error(
                 errors="Registering a new token is currently disabled in production mode",
                 status_code=HTTPStatus.NOT_IMPLEMENTED,
@@ -588,7 +593,7 @@ class RestAPI:  # pragma: no unittest
         value: TokenAmount,
         contract_method: MintingMethod,
     ) -> Response:
-        if self.raiden_api.raiden.config["environment_type"] == Environment.PRODUCTION:
+        if self.raiden_api.raiden.config.environment_type == Environment.PRODUCTION:
             return api_error(
                 errors="Minting a token is currently disabled in production mode",
                 status_code=HTTPStatus.NOT_IMPLEMENTED,
@@ -748,7 +753,9 @@ class RestAPI:  # pragma: no unittest
         ]
         return api_response(result=closed_channels)
 
-    def get_connection_managers_info(self, registry_address: TokenNetworkRegistryAddress) -> Dict:
+    def get_connection_managers_info(
+        self, registry_address: TokenNetworkRegistryAddress
+    ) -> Response:
         """Get a dict whose keys are token addresses and whose values are
         open channels, funds of last request, sum of deposits and number of channels"""
         log.debug(
@@ -782,14 +789,18 @@ class RestAPI:  # pragma: no unittest
             )
             if connection_manager is not None and open_channels:
                 connection_managers[to_checksum_address(connection_manager.token_address)] = {
-                    "funds": connection_manager.funds,
-                    "sum_deposits": views.get_our_deposits_for_token_network(
-                        views.state_from_raiden(self.raiden_api.raiden), registry_address, token
+                    "funds": str(connection_manager.funds),
+                    "sum_deposits": str(
+                        views.get_our_deposits_for_token_network(
+                            views.state_from_raiden(self.raiden_api.raiden),
+                            registry_address,
+                            token,
+                        )
                     ),
-                    "channels": len(open_channels),
+                    "channels": str(len(open_channels)),
                 }
 
-        return connection_managers
+        return api_response(result=connection_managers)
 
     def get_channel_list(
         self,
@@ -915,13 +926,20 @@ class RestAPI:  # pragma: no unittest
             return api_error(str(e), status_code=HTTPStatus.CONFLICT)
 
         result = []
+        chain_state = views.state_from_raiden(self.raiden_api.raiden)
         for event in service_result:
             if isinstance(event.wrapped_event, EventPaymentSentSuccess):
-                serialized_event = self.sent_success_payment_schema.dump(event)
+                serialized_event = self.sent_success_payment_schema.serialize(
+                    chain_state=chain_state, event=event
+                )
             elif isinstance(event.wrapped_event, EventPaymentSentFailed):
-                serialized_event = self.failed_payment_schema.dump(event)
+                serialized_event = self.failed_payment_schema.serialize(
+                    chain_state=chain_state, event=event
+                )
             elif isinstance(event.wrapped_event, EventPaymentReceivedSuccess):
-                serialized_event = self.received_success_payment_schema.dump(event)
+                serialized_event = self.received_success_payment_schema.serialize(
+                    chain_state=chain_state, event=event
+                )
             else:
                 log.warning(
                     "Unexpected event",
@@ -934,14 +952,15 @@ class RestAPI:  # pragma: no unittest
 
     def get_raiden_internal_events_with_timestamps(
         self, limit: Optional[int], offset: Optional[int]
-    ) -> List[str]:
+    ) -> Response:
         assert self.raiden_api.raiden.wal
-        return [
+        events = [
             str(e)
             for e in self.raiden_api.raiden.wal.storage.get_events_with_timestamps(
                 limit=limit, offset=offset
             )
         ]
+        return api_response(result=events)
 
     def get_blockchain_events_channel(
         self,
@@ -1072,6 +1091,7 @@ class RestAPI:  # pragma: no unittest
             InvalidBinaryAddress,
             InvalidSecret,
             InvalidSecretHash,
+            InvalidPaymentIdentifier,
             PaymentConflict,
             UnknownTokenAddress,
         ) as e:

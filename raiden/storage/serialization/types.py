@@ -31,6 +31,7 @@ from raiden.utils.typing import (
     BlockGasLimit,
     BlockHash,
     BlockNumber,
+    BlockTimeout,
     ChainID,
     ChannelID,
     Dict,
@@ -41,22 +42,27 @@ from raiden.utils.typing import (
     LockedAmount,
     Locksroot,
     MessageID,
+    MonitoringServiceAddress,
     Nonce,
+    OneToNAddress,
     Optional,
     PaymentAmount,
     PaymentID,
     PaymentWithFeeAmount,
+    ProportionalFeeAmount,
     Secret,
     SecretHash,
     SecretRegistryAddress,
     Signature,
     TargetAddress,
     TokenAddress,
+    TokenAmount,
     TokenNetworkAddress,
     TokenNetworkRegistryAddress,
     TransactionHash,
     TransferID,
     Union,
+    UserDepositAddress,
     WithdrawAmount,
 )
 
@@ -78,7 +84,6 @@ MESSAGE_NAME_TO_QUALIFIED_NAME = {
     "SecretRequest": "raiden.messages.transfers.SecretRequest",
     "SignedMessage": "raiden.messages.abstract.SignedMessage",
     "SignedRetrieableMessage": "raiden.messages.abstract.SignedRetrieableMessage",
-    "ToDevice": "raiden.messages.matrix.ToDevice",
     "Unlock": "raiden.messages.transfers.Unlock",
     "WithdrawConfirmation": "raiden.messages.withdraw.WithdrawConfirmation",
     "WithdrawExpired": "raiden.messages.withdraw.WithdrawExpired",
@@ -164,10 +169,10 @@ def message_event_schema_deserialization(
         from raiden.transfer.mediated_transfer.events import SendSecretReveal
 
         return SchemaCache.get_or_create_schema(SendSecretReveal)
-    elif message_type.endswith("SendBalanceProof"):
-        from raiden.transfer.mediated_transfer.events import SendBalanceProof
+    elif message_type.endswith("SendUnlock"):
+        from raiden.transfer.mediated_transfer.events import SendUnlock
 
-        return SchemaCache.get_or_create_schema(SendBalanceProof)
+        return SchemaCache.get_or_create_schema(SendUnlock)
     elif message_type.endswith("SendSecretRequest"):
         from raiden.transfer.mediated_transfer.events import SendSecretRequest
 
@@ -205,11 +210,14 @@ _native_to_marshmallow.update(
         # Addresses
         Address: AddressField,
         InitiatorAddress: AddressField,
+        MonitoringServiceAddress: AddressField,
+        OneToNAddress: AddressField,
         TokenNetworkRegistryAddress: AddressField,
         SecretRegistryAddress: AddressField,
         TargetAddress: AddressField,
         TokenAddress: AddressField,
         TokenNetworkAddress: AddressField,
+        UserDepositAddress: AddressField,
         # Bytes
         EncodedData: BytesField,
         AdditionalHash: BytesField,
@@ -224,7 +232,10 @@ _native_to_marshmallow.update(
         # Ints
         BlockExpiration: IntegerToStringField,
         BlockNumber: IntegerToStringField,
+        BlockTimeout: IntegerToStringField,
+        TokenAmount: IntegerToStringField,
         FeeAmount: IntegerToStringField,
+        ProportionalFeeAmount: IntegerToStringField,
         LockedAmount: IntegerToStringField,
         BlockGasLimit: IntegerToStringField,
         MessageID: IntegerToStringField,

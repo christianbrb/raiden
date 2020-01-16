@@ -1,4 +1,4 @@
-from eth_utils import to_checksum_address, to_hex
+from eth_utils import to_hex
 
 from raiden.exceptions import RaidenUnrecoverableError
 from raiden.storage.sqlite import (
@@ -13,6 +13,7 @@ from raiden.storage.wal import restore_to_state_change
 from raiden.transfer import node, views
 from raiden.transfer.identifiers import CanonicalIdentifier
 from raiden.transfer.state import NettingChannelState
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.typing import (
     TYPE_CHECKING,
     Address,
@@ -37,7 +38,7 @@ def channel_state_until_state_change(
     """ Go through WAL state changes until a certain balance hash is found. """
     assert raiden.wal, "Raiden has not been started yet"
 
-    wal = restore_to_state_change(
+    _, _, wal = restore_to_state_change(
         transition_function=node.state_transition,
         storage=raiden.wal.storage,
         state_change_identifier=state_change_identifier,

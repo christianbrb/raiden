@@ -1,11 +1,12 @@
 import os
 import subprocess
+from pathlib import Path
 
 import gevent
 import pytest
 
 from raiden.app import App
-from raiden.constants import GENESIS_BLOCK_NUMBER, Environment, RoutingMode
+from raiden.constants import Environment, RoutingMode
 from raiden.tests.utils.network import (
     CHAIN,
     BlockchainServices,
@@ -26,10 +27,14 @@ from raiden.utils.typing import (
     ChainID,
     Iterable,
     List,
+    MonitoringServiceAddress,
+    OneToNAddress,
     Optional,
+    ServiceRegistryAddress,
     TokenAddress,
     TokenAmount,
     TokenNetworkRegistryAddress,
+    UserDepositAddress,
 )
 
 
@@ -48,7 +53,7 @@ def routing_mode():
 def raiden_chain(
     token_addresses: List[TokenAddress],
     token_network_registry_address: TokenNetworkRegistryAddress,
-    one_to_n_address: Address,
+    one_to_n_address: OneToNAddress,
     channels_per_node: int,
     deposit: TokenAmount,
     settle_timeout: BlockTimeout,
@@ -61,9 +66,9 @@ def raiden_chain(
     unrecoverable_error_should_crash: bool,
     local_matrix_servers: List[ParsedURL],
     blockchain_type: str,
-    contracts_path: str,
-    user_deposit_address: Address,
-    monitoring_service_contract_address: Address,
+    contracts_path: Path,
+    user_deposit_address: UserDepositAddress,
+    monitoring_service_contract_address: MonitoringServiceAddress,
     broadcast_rooms: List[str],
     logs_storage: str,
     routing_mode: RoutingMode,
@@ -81,7 +86,7 @@ def raiden_chain(
 
     base_datadir = os.path.join(logs_storage, "raiden_nodes")
 
-    service_registry_address: Optional[Address] = None
+    service_registry_address: Optional[ServiceRegistryAddress] = None
     if blockchain_services.service_registry:
         service_registry_address = blockchain_services.service_registry.address
     raiden_apps = create_apps(
@@ -109,15 +114,9 @@ def raiden_chain(
     )
 
     confirmed_block = raiden_apps[0].raiden.confirmation_blocks + 1
-    blockchain_services.proxy_manager.wait_until_block(target_block_number=confirmed_block)
+    blockchain_services.proxy_manager.client.wait_until_block(target_block_number=confirmed_block)
 
     parallel_start_apps(raiden_apps)
-
-    from_block = GENESIS_BLOCK_NUMBER
-    for app in raiden_apps:
-        app.raiden.install_all_blockchain_filters(
-            app.raiden.default_registry, app.raiden.default_secret_registry, from_block
-        )
 
     exception = RuntimeError("`raiden_chain` fixture setup failed, token networks unavailable")
     with gevent.Timeout(seconds=timeout(blockchain_type), exception=exception):
@@ -181,7 +180,7 @@ def resolvers(resolver_ports):
 def raiden_network(
     token_addresses: List[TokenAddress],
     token_network_registry_address: TokenNetworkRegistryAddress,
-    one_to_n_address: Address,
+    one_to_n_address: OneToNAddress,
     channels_per_node: int,
     deposit: TokenAmount,
     settle_timeout: BlockTimeout,
@@ -194,9 +193,9 @@ def raiden_network(
     unrecoverable_error_should_crash: bool,
     local_matrix_servers: List[ParsedURL],
     blockchain_type: str,
-    contracts_path: str,
-    user_deposit_address: Address,
-    monitoring_service_contract_address: Address,
+    contracts_path: Path,
+    user_deposit_address: UserDepositAddress,
+    monitoring_service_contract_address: MonitoringServiceAddress,
     broadcast_rooms: List[str],
     logs_storage: str,
     start_raiden_apps: bool,
@@ -235,7 +234,7 @@ def raiden_network(
     )
 
     confirmed_block = raiden_apps[0].raiden.confirmation_blocks + 1
-    blockchain_services.proxy_manager.wait_until_block(target_block_number=confirmed_block)
+    blockchain_services.proxy_manager.client.wait_until_block(target_block_number=confirmed_block)
 
     if start_raiden_apps:
         parallel_start_apps(raiden_apps)

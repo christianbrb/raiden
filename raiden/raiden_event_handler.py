@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import structlog
-from eth_utils import encode_hex, to_checksum_address, to_hex
+from eth_utils import encode_hex, to_hex
 
 from raiden.constants import (
     EMPTY_BALANCE_HASH,
@@ -17,7 +17,6 @@ from raiden.network.pathfinding import post_pfs_feedback
 from raiden.network.proxies.payment_channel import PaymentChannel
 from raiden.network.proxies.token_network import TokenNetwork
 from raiden.network.resolver.client import reveal_secret_with_resolver
-from raiden.services import send_pfs_update
 from raiden.storage.restore import (
     channel_state_until_state_change,
     get_event_with_balance_proof_by_balance_hash,
@@ -47,7 +46,6 @@ from raiden.transfer.events import (
     EventPaymentReceivedSuccess,
     EventPaymentSentFailed,
     EventPaymentSentSuccess,
-    SendPFSFeeUpdate,
     SendProcessed,
     SendWithdrawConfirmation,
     SendWithdrawExpired,
@@ -60,15 +58,16 @@ from raiden.transfer.mediated_transfer.events import (
     EventUnlockClaimSuccess,
     EventUnlockFailed,
     EventUnlockSuccess,
-    SendBalanceProof,
     SendLockedTransfer,
     SendLockExpired,
     SendRefundTransfer,
     SendSecretRequest,
     SendSecretReveal,
+    SendUnlock,
 )
 from raiden.transfer.state import ChainState, NettingChannelEndState
 from raiden.transfer.views import get_channelstate_by_token_network_and_partner
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.packing import pack_signed_balance_proof, pack_withdraw
 from raiden.utils.typing import MYPY_ANNOTATION, Address, BlockSpecification, Nonce
 from raiden_contracts.constants import MessageTypeId
@@ -136,8 +135,8 @@ class RaidenEventHandler(EventHandler):
         elif type(event) == SendSecretReveal:
             assert isinstance(event, SendSecretReveal), MYPY_ANNOTATION
             self.handle_send_secretreveal(raiden, event)
-        elif type(event) == SendBalanceProof:
-            assert isinstance(event, SendBalanceProof), MYPY_ANNOTATION
+        elif type(event) == SendUnlock:
+            assert isinstance(event, SendUnlock), MYPY_ANNOTATION
             self.handle_send_balanceproof(raiden, event)
         elif type(event) == SendSecretRequest:
             assert isinstance(event, SendSecretRequest), MYPY_ANNOTATION
@@ -187,9 +186,6 @@ class RaidenEventHandler(EventHandler):
         elif type(event) == ContractSendChannelWithdraw:
             assert isinstance(event, ContractSendChannelWithdraw), MYPY_ANNOTATION
             self.handle_contract_send_channelwithdraw(raiden, event)
-        elif type(event) == SendPFSFeeUpdate:
-            assert isinstance(event, SendPFSFeeUpdate), MYPY_ANNOTATION
-            self.handle_send_pfs_fee_update(raiden, event)
         elif type(event) in UNEVENTFUL_EVENTS:
             pass
         else:
@@ -198,16 +194,6 @@ class RaidenEventHandler(EventHandler):
                 event_type=str(type(event)),
                 node=to_checksum_address(raiden.address),
             )
-
-    @staticmethod
-    def handle_send_pfs_fee_update(
-        raiden: "RaidenService", event: SendPFSFeeUpdate
-    ) -> None:  # pragma: no unittest
-        send_pfs_update(
-            raiden=raiden,
-            canonical_identifier=event.canonical_identifier,
-            update_fee_schedule=True,
-        )
 
     @staticmethod
     def handle_send_lockexpired(
@@ -237,7 +223,7 @@ class RaidenEventHandler(EventHandler):
 
     @staticmethod
     def handle_send_balanceproof(
-        raiden: "RaidenService", balance_proof_event: SendBalanceProof
+        raiden: "RaidenService", balance_proof_event: SendUnlock
     ) -> None:  # pragma: no unittest
         unlock_message = message_from_sendevent(balance_proof_event)
         raiden.sign(unlock_message)
@@ -763,7 +749,7 @@ class PFSFeedbackEventHandler(RaidenEventHandler):
         raiden: "RaidenService", route_failed_event: EventRouteFailed
     ) -> None:  # pragma: no unittest
         feedback_token = raiden.route_to_feedback_token.get(tuple(route_failed_event.route))
-        pfs_config = raiden.config.get("pfs_config")
+        pfs_config = raiden.config.pfs_config
 
         if feedback_token and pfs_config:
             log.debug(
@@ -788,7 +774,7 @@ class PFSFeedbackEventHandler(RaidenEventHandler):
         feedback_token = raiden.route_to_feedback_token.get(
             tuple(payment_sent_success_event.route)
         )
-        pfs_config = raiden.config.get("pfs_config")
+        pfs_config = raiden.config.pfs_config
 
         if feedback_token and pfs_config:
             log.debug(

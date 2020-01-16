@@ -4,6 +4,7 @@ import pytest
 from raiden import routing, waiting
 from raiden.api.python import RaidenAPI
 from raiden.exceptions import InvalidAmount
+from raiden.network.rpc.client import JSONRPCClient
 from raiden.tests.utils.detect_failure import raise_on_failure
 from raiden.tests.utils.transfer import watch_for_unlock_failures
 from raiden.transfer import channel, views
@@ -62,6 +63,29 @@ def saturated_count(connection_managers, registry_address, token_address):
     ].count(True)
 
 
+def estimate_blocktime(rpc_client: JSONRPCClient, oldest: int = 256) -> float:
+    """Calculate a blocktime estimate based on some past blocks.
+    Args:
+        oldest: delta in block numbers to go back.
+    Return:
+        average block time in seconds
+    """
+    last_block_number = rpc_client.block_number()
+    # around genesis block there is nothing to estimate
+    if last_block_number < 1:
+        return 15
+    # if there are less than `oldest` blocks available, start at block 1
+    if last_block_number < oldest:
+        interval = (last_block_number - 1) or 1
+    else:
+        interval = last_block_number - oldest
+    assert interval > 0
+    last_timestamp = rpc_client.get_block(last_block_number)["timestamp"]
+    first_timestamp = rpc_client.get_block(last_block_number - interval)["timestamp"]
+    delta = last_timestamp - first_timestamp
+    return delta / interval
+
+
 # TODO: add test scenarios for
 # - subsequent `connect()` calls with different `funds` arguments
 # - `connect()` calls with preexisting channels
@@ -75,8 +99,8 @@ def test_participant_selection(raiden_network, token_addresses):
     registry_address = raiden_network[0].raiden.default_registry.address
     one_to_n_address = raiden_network[0].raiden.default_one_to_n_address
     token_address = token_addresses[0]
-
-    # connect the first node (will register the token if necessary)
+    # connect the first node - this will register the token and open the first channel
+    # Since there is no other nodes available to connect to this call will do nothing more
     RaidenAPI(raiden_network[0].raiden).token_network_connect(
         registry_address=registry_address, token_address=token_address, funds=TokenAmount(100)
     )
@@ -101,7 +125,7 @@ def test_participant_selection(raiden_network, token_addresses):
             joinable_funds_target=-1,
         )
 
-    # connect the other nodes
+    # Call the connect endpoint for all but the first node
     connect_greenlets = [
         gevent.spawn(
             RaidenAPI(app.raiden).token_network_connect, registry_address, token_address, 100
@@ -143,7 +167,7 @@ def test_participant_selection(raiden_network, token_addresses):
         for target in raiden_network:
             if target.raiden.address == app.raiden.address:
                 continue
-            routes, _ = routing.get_best_routes(
+            _, routes, _ = routing.get_best_routes(
                 chain_state=node_state,
                 token_network_address=network_state.address,
                 one_to_n_address=one_to_n_address,
@@ -151,7 +175,7 @@ def test_participant_selection(raiden_network, token_addresses):
                 to_address=target.raiden.address,
                 amount=PaymentAmount(1),
                 previous_address=None,
-                config={},
+                pfs_config=None,
                 privkey=b"",  # not used if pfs is not configured
             )
             assert routes is not None
@@ -208,7 +232,7 @@ def test_participant_selection(raiden_network, token_addresses):
 
     timeout = (
         sender_channel.settle_timeout
-        * connection_manager.raiden.proxy_manager.estimate_blocktime()
+        * estimate_blocktime(connection_manager.raiden.rpc_client)
         * 10
     )
     assert timeout > 0

@@ -2,7 +2,6 @@ from collections import defaultdict
 from unittest.mock import patch
 
 import structlog
-from eth_utils import to_checksum_address
 from gevent.event import AsyncResult
 
 from raiden.message_handler import MessageHandler
@@ -11,9 +10,10 @@ from raiden.raiden_event_handler import EventHandler
 from raiden.raiden_service import RaidenService
 from raiden.tests.utils.events import check_nested_attrs
 from raiden.transfer.architecture import Event as RaidenEvent, TransitionResult
-from raiden.transfer.mediated_transfer.events import SendBalanceProof, SendSecretRequest
+from raiden.transfer.mediated_transfer.events import SendSecretRequest, SendUnlock
 from raiden.transfer.state import ChainState
-from raiden.utils.typing import Dict, List, NamedTuple, SecretHash
+from raiden.utils.formatting import to_checksum_address
+from raiden.utils.typing import Callable, Dict, List, NamedTuple, SecretHash, Set
 
 log = structlog.get_logger(__name__)
 
@@ -50,14 +50,15 @@ class WaitForMessage(MessageHandler):
         self.waiting[message_type].append(waiting)
         return waiting.async_result
 
-    def on_message(self, raiden: RaidenService, message: Message) -> None:
+    def on_messages(self, raiden: RaidenService, messages: List[Message]) -> None:
         # First handle the message, and then set the events, to ensure the
         # expected side-effects of the message are applied
-        super().on_message(raiden, message)
+        super().on_messages(raiden, messages)
 
-        for waiting in self.waiting[type(message)]:
-            if check_nested_attrs(message, waiting.attributes):
-                waiting.async_result.set(message)
+        for message in messages:
+            for waiting in self.waiting[type(message)]:
+                if check_nested_attrs(message, waiting.attributes):
+                    waiting.async_result.set(message)
 
 
 class HoldRaidenEventHandler(EventHandler):
@@ -75,8 +76,12 @@ class HoldRaidenEventHandler(EventHandler):
         self.wrapped = wrapped_handler
         self.eventtype_to_waitingholds: Dict[type, List[HoldWait]] = defaultdict(list)
         self.eventtype_to_holdings: Dict[type, List[Holding]] = defaultdict(list)
+        self.pre_hooks: Set[Callable] = set()
 
     def on_raiden_event(self, raiden: RaidenService, chain_state: ChainState, event: RaidenEvent):
+        for hook in self.pre_hooks:
+            hook(event)
+
         event_type = type(event)
         # First check that there are no overlapping holds, otherwise the test
         # is likely flaky. It should either reuse the hold for the same event
@@ -132,7 +137,7 @@ class HoldRaidenEventHandler(EventHandler):
 
         msg = (
             "Cannot release unknown event. "
-            "Either it was never held, the event was not emited yet, "
+            "Either it was never held, or the event was not emitted yet, "
             "or it was released twice."
         )
         assert found is not None, msg
@@ -145,7 +150,7 @@ class HoldRaidenEventHandler(EventHandler):
         return self.hold(SendSecretRequest, {"secrethash": secrethash})
 
     def hold_unlock_for(self, secrethash: SecretHash):
-        return self.hold(SendBalanceProof, {"secrethash": secrethash})
+        return self.hold(SendUnlock, {"secrethash": secrethash})
 
     def release_secretrequest_for(self, raiden: RaidenService, secrethash: SecretHash):
         for hold in self.eventtype_to_holdings[SendSecretRequest]:
@@ -153,7 +158,7 @@ class HoldRaidenEventHandler(EventHandler):
                 self.release(raiden, hold.event)
 
     def release_unlock_for(self, raiden: RaidenService, secrethash: SecretHash):
-        for hold in self.eventtype_to_holdings[SendBalanceProof]:
+        for hold in self.eventtype_to_holdings[SendUnlock]:
             if hold.attributes["secrethash"] == secrethash:
                 self.release(raiden, hold.event)
 
@@ -163,7 +168,7 @@ def dont_handle_lock_expired_mock(app):
     """
 
     def do_nothing(raiden, message):  # pylint: disable=unused-argument
-        pass
+        return []
 
     return patch.object(
         app.raiden.message_handler, "handle_message_lockexpired", side_effect=do_nothing

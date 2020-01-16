@@ -1,5 +1,5 @@
 import pytest
-from eth_utils import to_canonical_address, to_checksum_address
+from eth_utils import to_canonical_address
 
 from raiden.constants import (
     EMPTY_ADDRESS,
@@ -19,7 +19,8 @@ from raiden.tests.utils.smartcontracts import (
     deploy_token,
     deploy_tokens_and_fund_accounts,
 )
-from raiden.utils import privatekey_to_address
+from raiden.utils.formatting import to_checksum_address
+from raiden.utils.keys import privatekey_to_address
 from raiden.utils.typing import (
     Address,
     ChainID,
@@ -30,6 +31,7 @@ from raiden.utils.typing import (
     TokenAddress,
     TokenAmount,
     TokenNetworkRegistryAddress,
+    UserDepositAddress,
 )
 from raiden_contracts.constants import (
     CONTRACT_CUSTOM_TOKEN,
@@ -48,6 +50,11 @@ RED_EYES_PER_TOKEN_NETWORK_LIMIT = TokenAmount(int(250 * 10 ** 18))
 @pytest.fixture
 def token_contract_name() -> str:
     return CONTRACT_CUSTOM_TOKEN
+
+
+@pytest.fixture
+def max_token_networks() -> int:
+    return UINT256_MAX
 
 
 @pytest.fixture(name="token_addresses")
@@ -158,7 +165,7 @@ def deploy_user_deposit_and_return_address(
         constructor_arguments=constructor_arguments,
     )
 
-    user_deposit = proxy_manager.user_deposit(user_deposit_address)
+    user_deposit = proxy_manager.user_deposit(UserDepositAddress(user_deposit_address))
 
     participants = [privatekey_to_address(key) for key in private_keys]
     for transfer_to in participants:
@@ -211,7 +218,7 @@ def secret_registry_proxy(
     """
     return SecretRegistry(
         jsonrpc_client=deploy_client,
-        secret_registry_address=to_canonical_address(secret_registry_address),
+        secret_registry_address=secret_registry_address,
         contract_manager=contract_manager,
     )
 
@@ -223,6 +230,7 @@ def deploy_token_network_registry_and_return_address(
     chain_id: ChainID,
     settle_timeout_min: int,
     settle_timeout_max: int,
+    max_token_networks: int,
     contract_manager: ContractManager,
 ) -> TokenNetworkRegistryAddress:
     constructor_arguments = [
@@ -230,7 +238,7 @@ def deploy_token_network_registry_and_return_address(
         chain_id,
         settle_timeout_min,
         settle_timeout_max,
-        UINT256_MAX,
+        max_token_networks,
     ]
 
     address = deploy_contract_web3(

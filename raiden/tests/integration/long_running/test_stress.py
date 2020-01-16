@@ -7,7 +7,7 @@ import gevent
 import grequests
 import pytest
 import structlog
-from eth_utils import to_canonical_address, to_checksum_address
+from eth_utils import to_canonical_address
 from flask import url_for
 
 from raiden import waiting
@@ -19,12 +19,15 @@ from raiden.message_handler import MessageHandler
 from raiden.network.transport import MatrixTransport
 from raiden.raiden_event_handler import RaidenEventHandler
 from raiden.tests.integration.api.utils import wait_for_listening_port
+from raiden.tests.utils.detect_failure import raise_on_failure
+from raiden.tests.utils.protocol import HoldRaidenEventHandler
 from raiden.tests.utils.transfer import (
     assert_synced_channel_state,
     wait_assert,
     watch_for_unlock_failures,
 )
 from raiden.transfer import views
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.typing import (
     Address,
     BlockNumber,
@@ -81,7 +84,11 @@ def start_apiserver_for_network(
 
 
 def restart_app(app: App) -> App:
-    new_transport = MatrixTransport(app.raiden.config["transport"]["matrix"])
+    new_transport = MatrixTransport(
+        config=app.raiden.config.transport, environment=app.raiden.config.environment_type
+    )
+    raiden_event_handler = RaidenEventHandler()
+    hold_handler = HoldRaidenEventHandler(raiden_event_handler)
     app = App(
         config=app.config,
         rpc_client=app.raiden.rpc_client,
@@ -93,7 +100,7 @@ def restart_app(app: App) -> App:
         default_service_registry=app.raiden.default_service_registry,
         default_msc_address=app.raiden.default_msc_address,
         transport=new_transport,
-        raiden_event_handler=RaidenEventHandler(),
+        raiden_event_handler=hold_handler,
         message_handler=MessageHandler(),
         routing_mode=RoutingMode.PRIVATE,
     )
@@ -167,7 +174,7 @@ def transfer_and_assert(
 
     assert getattr(request, "exception", None) is None
     assert response is not None
-    assert response.status_code == HTTPStatus.OK
+    assert response.status_code == HTTPStatus.OK, f"Payment failed, reason: {response.content}"
     assert response.headers["Content-Type"] == "application/json"
 
 
@@ -341,6 +348,7 @@ def assert_channels(
 
 
 @pytest.mark.skip(reason="flaky, see https://github.com/raiden-network/raiden/issues/4803")
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [3])
 @pytest.mark.parametrize("number_of_tokens", [1])
 @pytest.mark.parametrize("channels_per_node", [2])
@@ -356,7 +364,7 @@ def test_stress(
 ) -> None:
     token_address = token_addresses[0]
     rest_apis = start_apiserver_for_network(raiden_network, port_generator)
-    identifier_generator = count()
+    identifier_generator = count(start=1)
 
     token_network_address = views.get_token_network_address_by_token_address(
         views.state_from_app(raiden_network[0]),

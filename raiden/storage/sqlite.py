@@ -3,21 +3,23 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 from types import TracebackType
 from typing import Generator
 
-from typing_extensions import Literal
+import gevent
+from eth_utils import to_checksum_address, to_hex
 
+import raiden.storage.serialization.fields as fields
 from raiden.constants import RAIDEN_DB_VERSION, SQLITE_MIN_REQUIRED_VERSION
 from raiden.exceptions import InvalidDBData, InvalidNumberInput
 from raiden.storage.serialization import SerializationBase
 from raiden.storage.ulid import ULID, ULIDMonotonicFactory
 from raiden.storage.utils import DB_SCRIPT_CREATE_TABLES, TimestampedEvent
 from raiden.transfer.architecture import Event, State, StateChange
-from raiden.utils import get_system_spec
+from raiden.utils.system import get_system_spec
 from raiden.utils.typing import (
     Any,
+    DatabasePath,
     Dict,
     Generic,
     Iterator,
@@ -91,6 +93,7 @@ class StateChangeEncodedRecord(NamedTuple):
 
 class SnapshotEncodedRecord(NamedTuple):
     identifier: SnapshotID
+    state_change_qty: int
     state_change_identifier: StateChangeID
     data: str
 
@@ -108,6 +111,7 @@ class StateChangeRecord(NamedTuple):
 
 class SnapshotRecord(NamedTuple):
     identifier: SnapshotID
+    state_change_qty: int
     state_change_identifier: StateChangeID
     data: State
 
@@ -208,7 +212,7 @@ def _query_to_string(query: FilteredDBQuery) -> Tuple[str, List[str]]:
 
 
 class SQLiteStorage:
-    def __init__(self, database_path: Union[Path, Literal[":memory:"]]):
+    def __init__(self, database_path: DatabasePath):
         sqlite3.register_adapter(ULID, adapt_ulid_identifier)
         sqlite3.register_converter("ULID", convert_ulid_identifier)
 
@@ -345,11 +349,16 @@ class SQLiteStorage:
 
         return state_change_ids
 
-    def write_state_snapshot(self, snapshot: str, statechange_id: StateChangeID) -> SnapshotID:
+    def write_state_snapshot(
+        self, snapshot: str, statechange_id: StateChangeID, statechange_qty: int
+    ) -> SnapshotID:
         snapshot_id = self._ulid_factory(SnapshotID).new()
 
-        query = "INSERT INTO state_snapshot (identifier, statechange_id, data) VALUES(?, ?, ?)"
-        self.conn.execute(query, (snapshot_id, statechange_id, snapshot))
+        query = (
+            "INSERT INTO state_snapshot (identifier, statechange_id, statechange_qty, data) "
+            "VALUES(?, ?, ?, ?)"
+        )
+        self.conn.execute(query, (snapshot_id, statechange_id, statechange_qty, snapshot))
         self.maybe_commit()
 
         return snapshot_id
@@ -399,7 +408,7 @@ class SQLiteStorage:
             raise ValueError("from_identifier must be an ULID")
 
         cursor = self.conn.execute(
-            "SELECT identifier, statechange_id, data FROM state_snapshot "
+            "SELECT identifier, statechange_qty, statechange_id, data FROM state_snapshot "
             "WHERE statechange_id <= ? "
             "ORDER BY identifier DESC LIMIT 1",
             (state_change_identifier,),
@@ -411,10 +420,11 @@ class SQLiteStorage:
         if rows:
             assert len(rows) == 1, "LIMIT 1 must return one element"
             identifier = rows[0][0]
-            last_applied_state_change_id = rows[0][1]
-            snapshot_state = rows[0][2]
+            statechange_qty = rows[0][1]
+            last_applied_state_change_id = rows[0][2]
+            snapshot_state = rows[0][3]
             result = SnapshotEncodedRecord(
-                identifier, last_applied_state_change_id, snapshot_state
+                identifier, statechange_qty, last_applied_state_change_id, snapshot_state
             )
 
         return result
@@ -678,10 +688,13 @@ class SQLiteStorage:
 
     def get_snapshots(self) -> List[SnapshotEncodedRecord]:
         cursor = self.conn.cursor()
-        cursor.execute("SELECT identifier, statechange_id, data FROM state_snapshot")
+        cursor.execute(
+            "SELECT identifier, statechange_qty, statechange_id, data FROM state_snapshot"
+        )
 
         return [
-            SnapshotEncodedRecord(snapshot[0], snapshot[1], snapshot[2]) for snapshot in cursor
+            SnapshotEncodedRecord(snapshot[0], snapshot[1], snapshot[2], snapshot[3])
+            for snapshot in cursor
         ]
 
     def update_snapshot(self, identifier: SnapshotID, new_snapshot: str) -> None:
@@ -751,9 +764,7 @@ class SerializedSQLiteStorage:
     applied the automatic encoding/deconding will not work.
     """
 
-    def __init__(
-        self, database_path: Union[Path, Literal[":memory:"]], serializer: SerializationBase
-    ) -> None:
+    def __init__(self, database_path: DatabasePath, serializer: SerializationBase) -> None:
         self.database = SQLiteStorage(database_path)
         self.serializer = serializer
 
@@ -775,9 +786,17 @@ class SerializedSQLiteStorage:
         ]
         return self.database.write_state_changes(serialized_data)
 
-    def write_state_snapshot(self, snapshot: State, statechange_id: StateChangeID) -> SnapshotID:
+    def write_state_snapshot(
+        self, snapshot: State, statechange_id: StateChangeID, statechange_qty: int
+    ) -> SnapshotID:
+        # `to_checksum_address` is slow and is not necessary for our internal serialization.
+        # FIXME: We should be able to adapt the serialization without this evil
+        #        monkey patching, but right now there is no simple way to do it.
+        fields.to_checksum_address = to_hex
         serialized_data = self.serializer.serialize(snapshot)
-        return self.database.write_state_snapshot(serialized_data, statechange_id)
+        fields.to_checksum_address = to_checksum_address  # type: ignore
+
+        return self.database.write_state_snapshot(serialized_data, statechange_id, statechange_qty)
 
     def write_events(self, events: List[Tuple[StateChangeID, Event]]) -> List[EventID]:
         """ Save events.
@@ -802,7 +821,10 @@ class SerializedSQLiteStorage:
 
         if row is not None:
             result = SnapshotRecord(
-                row.identifier, row.state_change_identifier, self.serializer.deserialize(row.data)
+                row.identifier,
+                row.state_change_qty,
+                row.state_change_identifier,
+                self.serializer.deserialize(row.data),
             )
         else:
             result = None
@@ -876,9 +898,15 @@ class SerializedSQLiteStorage:
         events = self.database.get_events(limit, offset)
         return [self.serializer.deserialize(event) for event in events]
 
-    def get_state_changes(self, limit: int = None, offset: int = None) -> List[StateChange]:
-        state_changes = self.database.get_state_changes(limit, offset)
-        return [self.serializer.deserialize(state_change) for state_change in state_changes]
+    def get_state_changes_stream(
+        self, retry_timeout: float, limit: int = None, offset: int = 0
+    ) -> Iterator[List[StateChange]]:
+        while True:
+            state_changes = self.database.get_state_changes(limit, offset)
+            yield [self.serializer.deserialize(state_change) for state_change in state_changes]
+            offset += len(state_changes)
+
+            gevent.sleep(retry_timeout)
 
     def close(self) -> None:
         self.database.close()

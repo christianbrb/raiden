@@ -1,8 +1,6 @@
-import sys
+from dataclasses import dataclass
 
-import click
 import structlog
-from eth_utils import to_checksum_address
 from web3 import Web3
 
 from raiden.accounts import AccountManager
@@ -15,29 +13,45 @@ from raiden.constants import (
     SQLITE_MIN_REQUIRED_VERSION,
     Environment,
 )
-from raiden.exceptions import EthNodeInterfaceError
-from raiden.network.proxies.proxy_manager import ProxyManager
+from raiden.exceptions import EthNodeInterfaceError, RaidenError
 from raiden.network.proxies.secret_registry import SecretRegistry
-from raiden.network.proxies.service_registry import ServiceRegistry
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.settings import ETHERSCAN_API, ORACLE_BLOCKNUMBER_DRIFT_TOLERANCE
 from raiden.storage.sqlite import assert_sqlite_version
 from raiden.ui.sync import wait_for_sync
 from raiden.utils.ethereum_clients import is_supported_client
-from raiden.utils.typing import Address, ChainID, Dict, Optional, TokenNetworkRegistryAddress
+from raiden.utils.formatting import to_checksum_address
+from raiden.utils.typing import (
+    Address,
+    ChainID,
+    Dict,
+    List,
+    MonitoringServiceAddress,
+    OneToNAddress,
+    SecretRegistryAddress,
+    ServiceRegistryAddress,
+    TokenNetworkRegistryAddress,
+    UserDepositAddress,
+)
 from raiden_contracts.constants import ID_TO_NETWORKNAME
 
 log = structlog.get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class DeploymentAddresses:
+    token_network_registry_address: TokenNetworkRegistryAddress
+    secret_registry_address: SecretRegistryAddress
+    user_deposit_address: UserDepositAddress
+    service_registry_address: ServiceRegistryAddress
+    monitoring_service_address: MonitoringServiceAddress
+    one_to_n_address: OneToNAddress
+
+
 def check_sql_version() -> None:
     if not assert_sqlite_version():
-        log.error(
-            "SQLite3 should be at least version {}".format(
-                "{}.{}.{}".format(*SQLITE_MIN_REQUIRED_VERSION)
-            )
-        )
-        sys.exit(1)
+        version = "{}.{}.{}".format(*SQLITE_MIN_REQUIRED_VERSION)
+        raise RaidenError(f"SQLite3 should be at least version {version}")
 
 
 def check_ethereum_client_is_supported(web3: Web3) -> None:
@@ -52,33 +66,28 @@ def check_ethereum_client_is_supported(web3: Web3) -> None:
 
     supported, our_client, our_version = is_supported_client(node_version)
     if not supported:
-        click.secho(
+        raise RaidenError(
             f"You need a Byzantium enabled ethereum node. Parity >= "
             f"{LOWEST_SUPPORTED_PARITY_VERSION} <= {HIGHEST_SUPPORTED_PARITY_VERSION}"
             f" or Geth >= {LOWEST_SUPPORTED_GETH_VERSION} <= {HIGHEST_SUPPORTED_GETH_VERSION}"
-            f" but you have {our_version} {our_client}",
-            fg="red",
+            f" but you have {our_version} {our_client}"
         )
-        sys.exit(1)
 
 
 def check_ethereum_has_accounts(account_manager: AccountManager) -> None:
     if not account_manager.accounts:
-        msg = (
+        raise RaidenError(
             f"No Ethereum accounts found in the provided keystore directory "
             f"{account_manager.keystore_path}. Please provide a directory "
             f"containing valid ethereum account files."
         )
-        click.secho(msg, fg="red")
-        sys.exit(1)
 
 
 def check_account(account_manager: AccountManager, address_hex: Address) -> None:
     if not account_manager.address_in_keystore(to_checksum_address(address_hex)):
-        click.secho(
-            f"Account '{address_hex}' could not be found on the system. Aborting ...", fg="red"
+        raise RaidenError(
+            f"Account '{address_hex}' could not be found on the system. Aborting ..."
         )
-        sys.exit(1)
 
 
 def check_ethereum_confirmed_block_is_not_pruned(
@@ -117,14 +126,12 @@ def check_ethereum_confirmed_block_is_not_pruned(
     except ValueError:
         # If this exception is raised the Ethereum node is too aggressive with
         # the block pruning.
-        click.secho(
+        raise RaidenError(
             f"The ethereum client does not have the necessary data available. "
             f"The client can not operate because the prunning strategy is too "
             f"agressive. Please make sure that at very minimum "
-            f"{minimum_available_history} blocks of history are available.",
-            fg="red",
+            f"{minimum_available_history} blocks of history are available."
         )
-        sys.exit(1)
 
 
 def check_ethereum_network_id(given_network_id: ChainID, web3: Web3) -> None:
@@ -143,13 +150,15 @@ def check_ethereum_network_id(given_network_id: ChainID, web3: Web3) -> None:
         given_description = f'{given_name or "Unknown"} (id {given_network_id})'
         network_description = f'{network_name or "Unknown"} (id {node_network_id})'
 
-        msg = (
+        # TODO: fix cyclic import
+        from raiden.ui.cli import ETH_NETWORKID_OPTION
+
+        raise RaidenError(
             f"The configured network {given_description} differs "
-            f"from the Ethereum client's network {network_description}. "
+            f"from the Ethereum client's network {network_description}. The "
+            f"network_id can be configured using the flag {ETH_NETWORKID_OPTION}"
             f"Please check your settings."
         )
-        click.secho(msg, fg="red")
-        sys.exit(1)
 
 
 def check_raiden_environment(network_id: ChainID, environment_type: Environment) -> None:
@@ -157,66 +166,56 @@ def check_raiden_environment(network_id: ChainID, environment_type: Environment)
         network_id == 1 and environment_type == Environment.DEVELOPMENT
     )
     if warn:
-        click.secho(
+        raise RaidenError(
             f"The chosen network ({ID_TO_NETWORKNAME[network_id]}) is not a testnet, "
             f'but the "development" environment was selected.\n'
             f"This crashes the node often. Please start again with a safe environment setting "
-            f"(--environment production).",
-            fg="red",
+            f"(--environment production)."
         )
 
 
-def check_smart_contract_addresses(
+def check_deployed_contracts_data(
     environment_type: Environment,
     node_network_id: ChainID,
-    tokennetwork_registry_contract_address: TokenNetworkRegistryAddress,
-    secret_registry_contract_address: Address,
     contracts: Dict[str, Address],
+    required_contracts: List[str],
 ) -> None:
-    contract_addresses_given = (
-        tokennetwork_registry_contract_address is not None
-        and secret_registry_contract_address is not None
-    )
+    """ This function only checks if all necessary contracts are indeed in the deployment JSON
+    from Raiden Contracts. It does not check anything else, especially not if those contracts
+    are consistent or in fact Raiden contracts.
+    """
+    for name in required_contracts:
+        if name not in contracts:
+            raise RaidenError(
+                f"There are no known contract addresses for network id '{node_network_id}'. and "
+                f"environment type {environment_type} for contract {name}."
+            )
 
-    if not contract_addresses_given and not bool(contracts):
-        click.secho(
-            f"There are no known contract addresses for network id '{node_network_id}'. and "
-            f"environment type {environment_type}. Please provide them on the command line or "
-            f"in the configuration file.",
-            fg="red",
+
+def check_pfs_configuration(pathfinding_service_address: str) -> None:
+    if not pathfinding_service_address:
+        raise RaidenError(
+            "Requested PFS routing mode but no specific pathfinding "
+            "service address is provided. Please provide it via the "
+            "--pathfinding-service-address argument"
         )
-        sys.exit(1)
 
 
-def check_pfs_configuration(
-    service_registry: Optional[ServiceRegistry], pathfinding_service_address: str
-) -> None:
-    if not service_registry and not pathfinding_service_address:
-        click.secho(
-            "Requested PFS routing mode but no service registry or no specific pathfinding "
-            " service address is provided. Please provide it via either the "
-            "--service-registry-contract-address or the --pathfinding-service-address "
-            "argument",
-            fg="red",
-        )
-        sys.exit(1)
-
-
-def check_synced(proxy_manager: ProxyManager) -> None:
-    network_id = ChainID(int(proxy_manager.client.web3.version.network))
+def check_synced(rpc_client: JSONRPCClient) -> None:
+    network_id = ChainID(int(rpc_client.web3.version.network))
     network_name = ID_TO_NETWORKNAME.get(network_id)
 
     if network_name is None:
-        msg = (
+        raise RaidenError(
             f"Your ethereum client is connected to a non-recognized private "
             f"network with network-ID {network_id}. Since we can not check if the "
             f"client is synced please restart raiden with the --no-sync-check "
             f"argument."
         )
-        click.secho(msg, fg="red")
-        sys.exit(1)
 
     url = ETHERSCAN_API.format(
         network=network_name if network_id != 1 else "api", action="eth_blockNumber"
     )
-    wait_for_sync(proxy_manager, url=url, tolerance=ORACLE_BLOCKNUMBER_DRIFT_TOLERANCE, sleep=3)
+    wait_for_sync(
+        rpc_client=rpc_client, url=url, tolerance=ORACLE_BLOCKNUMBER_DRIFT_TOLERANCE, sleep=3
+    )

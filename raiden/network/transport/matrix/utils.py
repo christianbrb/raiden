@@ -2,9 +2,11 @@ import json
 import re
 from binascii import Error as DecodeError
 from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from operator import attrgetter, itemgetter
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Sequence, Set
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -32,11 +34,12 @@ from raiden.exceptions import (
 from raiden.messages.abstract import Message, SignedMessage
 from raiden.network.transport.matrix.client import (
     GMatrixClient,
+    MatrixSyncMessages,
     Room,
     User,
     node_address_from_userid,
 )
-from raiden.network.utils import get_http_rtt
+from raiden.network.utils import get_average_http_response_time
 from raiden.storage.serialization.serializer import MessageSerializer
 from raiden.utils.signer import Signer, recover
 from raiden.utils.typing import Address, ChainID, Signature
@@ -49,6 +52,9 @@ USERID_RE = re.compile(r"^@(0x[0-9a-f]{40})(?:\.[0-9a-f]{8})?(?::.+)?$")
 DISPLAY_NAME_HEX_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")
 ROOM_NAME_SEPARATOR = "_"
 ROOM_NAME_PREFIX = "raiden"
+# The maximum matrix event size is 65 kB. Since events are larger than just the message
+# content we chose a conservative value
+MATRIX_MAX_BATCH_SIZE = 50_000
 
 
 class UserPresence(Enum):
@@ -62,6 +68,16 @@ class AddressReachability(Enum):
     REACHABLE = 1
     UNREACHABLE = 2
     UNKNOWN = 3
+
+
+@dataclass
+class ReachabilityState:
+    reachability: AddressReachability
+    time: datetime
+
+
+EPOCH = datetime(1970, 1, 1)
+UNKNOWN_REACHABILITY_STATE = ReachabilityState(AddressReachability.UNKNOWN, EPOCH)
 
 
 USER_PRESENCE_REACHABLE_STATES = {UserPresence.ONLINE, UserPresence.UNAVAILABLE}
@@ -86,12 +102,12 @@ def address_from_userid(user_id: str) -> Optional[Address]:
 
 class DisplayNameCache:
     def __init__(self) -> None:
-        self._userid_to_displayname: Dict[str, str] = dict()
+        self.userid_to_displayname: Dict[str, str] = dict()
 
     def warm_users(self, users: List[User]) -> None:
         for user in users:
             user_id = user.user_id
-            cached_displayname = self._userid_to_displayname.get(user_id)
+            cached_displayname = self.userid_to_displayname.get(user_id)
 
             if cached_displayname is None:
                 # The cache is cold, query and warm it.
@@ -107,7 +123,7 @@ class DisplayNameCache:
                         return
 
                 if user.displayname is not None:
-                    self._userid_to_displayname[user.user_id] = user.displayname
+                    self.userid_to_displayname[user.user_id] = user.displayname
 
             elif user.displayname is None:
                 user.displayname = cached_displayname
@@ -118,7 +134,7 @@ class DisplayNameCache:
                     cached=cached_displayname,
                     current=user.displayname,
                 )
-                self._userid_to_displayname[user.user_id] = user.displayname
+                self.userid_to_displayname[user.user_id] = user.displayname
 
 
 class UserAddressManager:
@@ -220,7 +236,13 @@ class UserAddressManager:
 
     def get_address_reachability(self, address: Address) -> AddressReachability:
         """ Return the current reachability state for ``address``. """
-        return self._address_to_reachability.get(address, AddressReachability.UNKNOWN)
+        return self._address_to_reachabilitystate.get(
+            address, UNKNOWN_REACHABILITY_STATE
+        ).reachability
+
+    def get_address_reachability_state(self, address: Address) -> ReachabilityState:
+        """ Return the current reachability state for ``address``. """
+        return self._address_to_reachabilitystate.get(address, UNKNOWN_REACHABILITY_STATE)
 
     def force_user_presence(self, user: User, presence: UserPresence) -> None:
         """ Forcibly set the ``user`` presence to ``presence``.
@@ -248,7 +270,7 @@ class UserAddressManager:
 
     def track_address_presence(self, address: Address, user_ids: Set[str]) -> None:
         """
-        Update synthesized address presence state from cached user presence states.
+        Update synthesized address presence state.
 
         Triggers callback (if any) in case the state has changed.
 
@@ -260,7 +282,10 @@ class UserAddressManager:
         for uid in user_ids:
             presence = self._fetch_user_presence(uid)
             userids_to_presence[uid] = presence
-            self._set_user_presence(uid, presence)
+            # We assume that this is only used when no presence has been set,
+            # yet. So let's use a presence_update_id that's smaller than the
+            # usual ones, which start at 0.
+            self._set_user_presence(uid, presence, presence_update_id=-1)
 
         log.debug(
             "Fetched user presences",
@@ -287,21 +312,28 @@ class UserAddressManager:
 
         new_address_reachability = USER_PRESENCE_TO_ADDRESS_REACHABILITY[new_presence]
 
-        prev_addresss_reachability = self.get_address_reachability(address)
-        if new_address_reachability == prev_addresss_reachability:
+        prev_reachability_state = self.get_address_reachability_state(address)
+        if new_address_reachability == prev_reachability_state.reachability:
             return
+
+        now = datetime.now()
 
         self.log.debug(
             "Changing address reachability state",
             address=to_checksum_address(address),
-            prev_state=prev_addresss_reachability,
+            prev_state=prev_reachability_state.reachability,
             state=new_address_reachability,
+            last_change=prev_reachability_state.time,
+            change_after=now - prev_reachability_state.time,
         )
 
-        self._address_to_reachability[address] = new_address_reachability
+        self._address_to_reachabilitystate[address] = ReachabilityState(
+            new_address_reachability, now
+        )
+
         self._address_reachability_changed_callback(address, new_address_reachability)
 
-    def _presence_listener(self, event: Dict[str, Any]) -> None:
+    def _presence_listener(self, event: Dict[str, Any], presence_update_id: int) -> None:
         """
         Update cached user presence state from Matrix presence events.
 
@@ -333,23 +365,24 @@ class UserAddressManager:
         if not user:
             return
 
+        self._displayname_cache.warm_users([user])
+
         address = self._validate_userid_signature(user)
         if not address:
             return
-
-        self._displayname_cache.warm_users([user])
 
         self.add_userid_for_address(address, user_id)
 
         new_state = UserPresence(event["content"]["presence"])
 
-        self._set_user_presence(user_id, new_state)
+        self._set_user_presence(user_id, new_state, presence_update_id)
         self._maybe_address_reachability_changed(address)
 
     def _reset_state(self) -> None:
         self._address_to_userids: Dict[Address, Set[str]] = defaultdict(set)
-        self._address_to_reachability: Dict[Address, AddressReachability] = dict()
+        self._address_to_reachabilitystate: Dict[Address, ReachabilityState] = dict()
         self._userid_to_presence: Dict[str, UserPresence] = dict()
+        self._userid_to_presence_update_id: Dict[str, int] = dict()
 
     @property
     def _user_id(self) -> str:
@@ -378,22 +411,35 @@ class UserAddressManager:
 
         return presence
 
-    def _set_user_presence(self, user_id: str, presence: UserPresence) -> None:
+    def _set_user_presence(
+        self, user_id: str, presence: UserPresence, presence_update_id: int
+    ) -> None:
         user = self._user_from_id(user_id)
         if not user:
             return
 
+        # -1 is used in track_address_presence, so we use -2 as a default.
+        if self._userid_to_presence_update_id.get(user_id, -2) >= presence_update_id:
+            # We've already received a more recent presence (or the same one)
+            return
+
         old_presence = self._userid_to_presence.get(user_id)
-        if old_presence != presence:
-            self._userid_to_presence[user_id] = presence
-            self.log.debug(
-                "Changing user presence state",
-                user_id=user_id,
-                prev_state=old_presence,
-                state=presence,
-            )
-            if self._user_presence_changed_callback:
-                self._user_presence_changed_callback(user, presence)
+        if old_presence == presence:
+            # This can happen when force_user_presence is used. For most other
+            # cased the presence_update_id check will return first.
+            return
+
+        self._userid_to_presence[user_id] = presence
+        self._userid_to_presence_update_id[user_id] = presence_update_id
+        self.log.debug(
+            "Changing user presence state",
+            user_id=user_id,
+            prev_state=old_presence,
+            state=presence,
+        )
+        if self._user_presence_changed_callback:
+            self._displayname_cache.warm_users([user])
+            self._user_presence_changed_callback(user, presence)
 
     @staticmethod
     def _validate_userid_signature(user: User) -> Optional[Address]:
@@ -441,7 +487,17 @@ def join_broadcast_room(client: GMatrixClient, broadcast_room_alias: str) -> Roo
 
 
 def first_login(client: GMatrixClient, signer: Signer, username: str) -> User:
-    """Login for the first time.
+    """Login within a server.
+
+    There are multiple cases where a previous auth token can become invalid and
+    a new login is necessary:
+
+    - The server is configured to automatically invalidate tokens after a while
+      (not the default)
+    - A server operator may manually wipe or invalidate existing access tokens
+    - A node may have roamed to a different server (e.g. because the original
+      server was temporarily unavailable) and is now 'returning' to the
+      previously used server.
 
     This relies on the Matrix server having the `eth_auth_provider` plugin
     installed, the plugin will automatically create the user on the first
@@ -460,7 +516,7 @@ def first_login(client: GMatrixClient, signer: Signer, username: str) -> User:
     # For a honest matrix server:
     #
     # - This prevents impersonation attacks / name squatting, since the plugin
-    # will validate the username by recovering the adddress from the signature
+    # will validate the username by recovering the address from the signature
     # and check the recovered address and the username matches.
     #
     # For a badly configured server (one without the plugin):
@@ -493,7 +549,7 @@ def first_login(client: GMatrixClient, signer: Signer, username: str) -> User:
     user.set_display_name(signature_hex)
 
     log.debug(
-        "Logged to a new server",
+        "Logged in",
         node=to_checksum_address(username),
         homeserver=server_name,
         server_url=server_url,
@@ -516,7 +572,7 @@ def login_with_token(client: GMatrixClient, user_id: str, access_token: str) -> 
     client.set_access_token(user_id=user_id, token=access_token)
 
     try:
-        # Test the credentional. Any API that requries authentication
+        # Test the credentials. Any API that requries authentication
         # would be enough.
         client.api.get_devices()
     except MatrixRequestError as ex:
@@ -576,11 +632,18 @@ def validate_userid_signature(user: User) -> Optional[Address]:
     if not match:
         return None
 
+    msg = (
+        "The User instance provided to validate_userid_signature must have the "
+        "displayname attribute set. Make sure to warm the value using the "
+        "DisplayNameCache."
+    )
+    displayname = user.displayname
+    assert displayname is not None, msg
+
     encoded_address = match.group(1)
     address: Address = to_canonical_address(encoded_address)
 
     try:
-        displayname = user.get_display_name()
         if DISPLAY_NAME_HEX_RE.match(displayname):
             signature_bytes = decode_hex(displayname)
         else:
@@ -599,31 +662,65 @@ def validate_userid_signature(user: User) -> Optional[Address]:
     return address
 
 
-def sort_servers_closest(servers: Sequence[str]) -> Dict[str, float]:
+def sort_servers_closest(
+    servers: Sequence[str],
+    max_timeout: float = 3.0,
+    samples_per_server: int = 3,
+    sample_delay: float = 0.125,
+) -> Dict[str, float]:
     """Sorts a list of servers by http round-trip time
 
     Params:
         servers: sequence of http server urls
     Returns:
-        sequence of pairs of url,rtt in seconds, sorted by rtt, excluding failed servers
-        (possibly empty)
+        sequence of pairs of url,rtt in seconds, sorted by rtt, excluding failed and excessively
+        slow servers (possibly empty)
+
+    The default timeout was chosen after measuring the long tail of the development matrix servers.
+    Under no stress, servers will have a very long tail of up to 2.5 seconds (measured 15/01/2020),
+    which can lead to failure during startup if the timeout is too low.
+    This increases the timeout so that the network hiccups won't cause Raiden startup failures.
     """
     if not {urlparse(url).scheme for url in servers}.issubset({"http", "https"}):
         raise TransportError("Invalid server urls")
 
-    get_rtt_jobs = set(
-        gevent.spawn(lambda url: (url, get_http_rtt(url)), server_url) for server_url in servers
+    rtt_greenlets = set(
+        gevent.spawn(
+            get_average_http_response_time,
+            url=server_url,
+            samples=samples_per_server,
+            sample_delay=sample_delay,
+        )
+        for server_url in servers
     )
-    # these tasks should never raise, returns None on errors
-    gevent.joinall(get_rtt_jobs, raise_error=False)  # block and wait tasks
-    sorted_servers: Dict[str, float] = dict(
-        sorted((job.value for job in get_rtt_jobs if job.value[1] is not None), key=itemgetter(1))
-    )
-    log.debug("Matrix homeserver RTTs", rtts=sorted_servers)
-    return sorted_servers
+
+    total_timeout = samples_per_server * (max_timeout + sample_delay)
+
+    results = []
+    for greenlet in gevent.iwait(rtt_greenlets, timeout=total_timeout):
+        result = greenlet.get()
+        if result is not None:
+            results.append(result)
+
+    gevent.killall(rtt_greenlets)
+
+    if not results:
+        raise TransportError(
+            f"No Matrix server available with good latency, requests takes more "
+            f"than {max_timeout} seconds."
+        )
+
+    server_url_to_rtt = dict(sorted(results, key=itemgetter(1)))
+    log.debug("Available Matrix homeservers", servers=server_url_to_rtt)
+    return server_url_to_rtt
 
 
-def make_client(servers: List[str], *args: Any, **kwargs: Any) -> GMatrixClient:
+def make_client(
+    handle_messages_callback: Callable[[MatrixSyncMessages], bool],
+    servers: List[str],
+    *args: Any,
+    **kwargs: Any,
+) -> GMatrixClient:
     """Given a list of possible servers, chooses the closest available and create a GMatrixClient
 
     Params:
@@ -642,25 +739,36 @@ def make_client(servers: List[str], *args: Any, **kwargs: Any) -> GMatrixClient:
 
     last_ex = None
     for server_url, rtt in sorted_servers.items():
-        client = GMatrixClient(server_url, *args, **kwargs)
-        try:
-            client.api._send("GET", "/versions", api_path="/_matrix/client")
-        except MatrixError as ex:
-            log.warning("Selected server not usable", server_url=server_url, _exception=ex)
-            last_ex = ex
-        else:
-            log.info(
-                "Using Matrix server",
-                server_url=server_url,
-                server_ident=client.api.server_ident,
-                average_rtt=rtt,
-            )
-            break
-    else:
-        raise TransportError(
-            "Unable to find a reachable Matrix server. Please check your network connectivity."
-        ) from last_ex
-    return client
+        client = GMatrixClient(handle_messages_callback, server_url, *args, **kwargs)
+
+        retries = 3
+        while retries:
+            retries -= 1
+            try:
+                client.api._send("GET", "/versions", api_path="/_matrix/client")
+            except MatrixRequestError as ex:
+                log.warning(
+                    "Matrix server returned an error, retrying",
+                    server_url=server_url,
+                    _exception=ex,
+                )
+                last_ex = ex
+            except MatrixError as ex:
+                log.warning("Selected server not usable", server_url=server_url, _exception=ex)
+                last_ex = ex
+                retries = 0
+            else:
+                log.info(
+                    "Using Matrix server",
+                    server_url=server_url,
+                    server_ident=client.api.server_ident,
+                    average_rtt=rtt,
+                )
+                return client
+
+    raise TransportError(
+        "Unable to find a reachable Matrix server. Please check your network connectivity."
+    ) from last_ex
 
 
 def make_room_alias(chain_id: ChainID, *suffixes: str) -> str:
@@ -733,3 +841,26 @@ def my_place_or_yours(our_address: Address, partner_address: Address) -> Address
         raise ValueError("Addresses to compare must differ")
     sorted_addresses = sorted([our_address, partner_address])
     return sorted_addresses[0]
+
+
+def make_message_batches(
+    message_texts: Iterable[str], _max_batch_size: int = MATRIX_MAX_BATCH_SIZE
+) -> Generator[str, None, None]:
+    """ Group messages into newline separated batches not exceeding ``_max_batch_size``. """
+    current_batch: List[str] = []
+    size = 0
+    for message_text in message_texts:
+        if size + len(message_text) > _max_batch_size:
+            if size == 0:
+                # A single message exceeds the maximum batch size. This should not happen.
+                raise TransportError(
+                    f"Message exceeds batch size. Size: {len(message_text)}, "
+                    f"Max: {MATRIX_MAX_BATCH_SIZE}, Message: {message_text}"
+                )
+            yield "\n".join(current_batch)
+            current_batch = []
+            size = 0
+        current_batch.append(message_text)
+        size += len(message_text)
+    if current_batch:
+        yield "\n".join(current_batch)

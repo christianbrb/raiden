@@ -1,7 +1,9 @@
+from pathlib import Path
 from typing import *  # NOQA pylint:disable=wildcard-import,unused-wildcard-import
 from typing import TYPE_CHECKING, Any, Dict, List, NewType, Tuple, Type, Union
 
 from eth_typing import Address, ChecksumAddress
+from typing_extensions import Literal
 
 from raiden_contracts.contract_manager import CompiledContract  # NOQA pylint:disable=unused-import
 from raiden_contracts.utils.type_aliases import (  # NOQA pylint:disable=unused-import
@@ -141,6 +143,18 @@ TargetAddress = NewType("TargetAddress", T_TargetAddress)
 T_TokenAddress = bytes
 TokenAddress = NewType("TokenAddress", T_TokenAddress)
 
+T_UserDepositAddress = bytes
+UserDepositAddress = NewType("UserDepositAddress", T_UserDepositAddress)
+
+T_MonitoringServiceAddress = bytes
+MonitoringServiceAddress = NewType("MonitoringServiceAddress", T_MonitoringServiceAddress)
+
+T_ServiceRegistryAddress = bytes
+ServiceRegistryAddress = NewType("ServiceRegistryAddress", T_ServiceRegistryAddress)
+
+T_OneToNAddress = bytes
+OneToNAddress = NewType("OneToNAddress", T_OneToNAddress)
+
 T_TokenNetworkAddress = bytes
 TokenNetworkAddress = NewType("TokenNetworkAddress", T_TokenNetworkAddress)
 
@@ -183,3 +197,5 @@ Endpoint = NewType("Endpoint", str)
 LockType = Union["HashTimeLockState", "UnlockPartialProofState"]
 ErrorType = Union[Type["RaidenRecoverableError"], Type["RaidenUnrecoverableError"]]
 LockedTransferType = Union["LockedTransferUnsignedState", "LockedTransferSignedState"]
+
+DatabasePath = Union[Path, Literal[":memory:"]]

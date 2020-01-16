@@ -1,17 +1,10 @@
 from typing import Any, List, Optional
 
 import structlog
-from eth_utils import (
-    encode_hex,
-    event_abi_to_log_topic,
-    is_same_address,
-    to_canonical_address,
-    to_checksum_address,
-)
+from eth_utils import to_canonical_address, to_checksum_address
 from web3.exceptions import BadFunctionCallOutput
-from web3.utils.contracts import find_matching_event_abi
 
-from raiden.constants import NULL_ADDRESS_BYTES, NULL_ADDRESS_HEX
+from raiden.constants import NULL_ADDRESS_BYTES
 from raiden.exceptions import (
     BrokenPreconditionError,
     InvalidChannelParticipantDepositLimit,
@@ -23,13 +16,12 @@ from raiden.exceptions import (
 )
 from raiden.network.proxies.metadata import SmartContractMetadata
 from raiden.network.proxies.utils import log_transaction, raise_on_call_returned_empty
-from raiden.network.rpc.client import JSONRPCClient, StatelessFilter, check_address_has_code
+from raiden.network.rpc.client import JSONRPCClient, check_address_has_code
 from raiden.network.rpc.transactions import check_transaction_threw
-from raiden.utils import safe_gas_limit
+from raiden.utils.smart_contracts import safe_gas_limit
 from raiden.utils.typing import (
     TYPE_CHECKING,
     Address,
-    BlockNumber,
     BlockSpecification,
     Dict,
     SecretRegistryAddress,
@@ -40,7 +32,7 @@ from raiden.utils.typing import (
     TokenNetworkRegistryAddress,
     typecheck,
 )
-from raiden_contracts.constants import CONTRACT_TOKEN_NETWORK_REGISTRY, EVENT_TOKEN_NETWORK_CREATED
+from raiden_contracts.constants import CONTRACT_TOKEN_NETWORK_REGISTRY
 
 if TYPE_CHECKING:
     # pylint: disable=unused-import
@@ -90,7 +82,7 @@ class TokenNetworkRegistry:
         ).call(block_identifier=block_identifier)
         address = to_canonical_address(address)
 
-        if is_same_address(address, NULL_ADDRESS_HEX):
+        if address == NULL_ADDRESS_BYTES:
             return None
 
         return address
@@ -150,7 +142,7 @@ class TokenNetworkRegistry:
         except BadFunctionCallOutput:
             raise_on_call_returned_empty(block_identifier)
         else:
-            if token_networks_created + 1 >= max_token_networks:
+            if token_networks_created >= max_token_networks:
                 raise BrokenPreconditionError(
                     f"Number of token networks will exceed the max of {max_token_networks}"
                 )
@@ -165,7 +157,7 @@ class TokenNetworkRegistry:
                     "The token is already registered in the TokenNetworkRegistry."
                 )
 
-            if deprecation_executor == NULL_ADDRESS_HEX:
+            if deprecation_executor == NULL_ADDRESS_BYTES:
                 raise BrokenPreconditionError(
                     "The deprecation executor property for the TokenNetworkRegistry is invalid."
                 )
@@ -175,7 +167,7 @@ class TokenNetworkRegistry:
                     "The chain ID property for the TokenNetworkRegistry is invalid."
                 )
 
-            if secret_registry_address == NULL_ADDRESS_HEX:
+            if secret_registry_address == NULL_ADDRESS_BYTES:
                 raise BrokenPreconditionError(
                     "The secret registry address for the token network is invalid."
                 )
@@ -287,7 +279,7 @@ class TokenNetworkRegistry:
                         "The token was already registered in the TokenNetworkRegistry."
                     )
 
-                if deprecation_executor == NULL_ADDRESS_HEX:
+                if deprecation_executor == NULL_ADDRESS_BYTES:
                     raise RaidenUnrecoverableError(
                         "The deprecation executor property for the "
                         "TokenNetworkRegistry is invalid."
@@ -298,7 +290,7 @@ class TokenNetworkRegistry:
                         "The chain ID property for the TokenNetworkRegistry is invalid."
                     )
 
-                if secret_registry_address == NULL_ADDRESS_HEX:
+                if secret_registry_address == NULL_ADDRESS_BYTES:
                     raise RaidenUnrecoverableError(
                         "The secret registry address for the token network is invalid."
                     )
@@ -385,7 +377,7 @@ class TokenNetworkRegistry:
                     "The token was already registered in the TokenNetworkRegistry."
                 )
 
-            if deprecation_executor == NULL_ADDRESS_HEX:
+            if deprecation_executor == NULL_ADDRESS_BYTES:
                 raise RaidenUnrecoverableError(
                     "The deprecation executor property for the " "TokenNetworkRegistry is invalid."
                 )
@@ -401,7 +393,7 @@ class TokenNetworkRegistry:
                     f"network Raiden is running on: {self.rpc_client.chain_id}."
                 )
 
-            if secret_registry_address == NULL_ADDRESS_HEX:
+            if secret_registry_address == NULL_ADDRESS_BYTES:
                 raise RaidenUnrecoverableError(
                     "The secret registry address for the token network is invalid."
                 )
@@ -432,21 +424,6 @@ class TokenNetworkRegistry:
             raise RaidenUnrecoverableError("createERC20TokenNetwork failed for an unknown reason")
         return token_network_address
 
-    def tokenadded_filter(self, from_block: Optional[BlockNumber] = None) -> StatelessFilter:
-        event_abi = find_matching_event_abi(
-            abi=self.metadata.abi, event_name=EVENT_TOKEN_NETWORK_CREATED
-        )
-
-        topics: List[Optional[str]] = [encode_hex(event_abi_to_log_topic(event_abi))]
-
-        if from_block is None:
-            from_block = self.metadata.filters_start_at
-
-        registry_address_bin = self.proxy.contract_address
-        return self.rpc_client.new_filter(
-            contract_address=registry_address_bin, topics=topics, from_block=from_block
-        )
-
     def filter_token_added_events(self) -> List[Dict[str, Any]]:
         filter_ = self.proxy.contract.events.TokenNetworkCreated.createFilter(
             fromBlock=self.metadata.filters_start_at
@@ -464,15 +441,19 @@ class TokenNetworkRegistry:
         self, block_identifier: BlockSpecification
     ) -> SecretRegistryAddress:
         return SecretRegistryAddress(
-            self.proxy.contract.functions.secret_registry_address().call(
-                block_identifier=block_identifier
+            to_canonical_address(
+                self.proxy.contract.functions.secret_registry_address().call(
+                    block_identifier=block_identifier
+                )
             )
         )
 
     def get_deprecation_executor(self, block_identifier: BlockSpecification) -> Address:
         return Address(
-            self.proxy.contract.functions.deprecation_executor().call(
-                block_identifier=block_identifier
+            to_canonical_address(
+                self.proxy.contract.functions.deprecation_executor().call(
+                    block_identifier=block_identifier
+                )
             )
         )
 

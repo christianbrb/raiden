@@ -18,7 +18,7 @@ from gevent import subprocess
 from synapse.handlers.auth import AuthHandler
 from twisted.internet import defer
 
-from raiden.network.transport.matrix.client import GMatrixClient
+from raiden.network.transport.matrix.client import GMatrixClient, MatrixSyncMessages
 from raiden.tests.utils.factories import make_signer
 from raiden.utils.http import EXECUTOR_IO, HTTPExecutor
 from raiden.utils.signer import recover
@@ -32,25 +32,31 @@ SynapseConfig = Tuple[str, Path]
 SynapseConfigGenerator = Callable[[int], SynapseConfig]
 
 
-def new_client(server: "ParsedURL") -> GMatrixClient:
+def new_client(
+    handle_messages_callback: Callable[[MatrixSyncMessages], bool], server: "ParsedURL"
+) -> GMatrixClient:
     server_name = server.netloc
 
     signer = make_signer()
     username = str(to_normalized_address(signer.address))
     password = encode_hex(signer.sign(server_name.encode()))
 
-    client = GMatrixClient(server)
+    client = GMatrixClient(handle_messages_callback, server)
     client.login(username, password, sync=False)
 
     return client
 
 
+def ignore_messages(_matrix_messages: MatrixSyncMessages) -> bool:
+    return True
+
+
 def setup_broadcast_room(servers: List["ParsedURL"], broadcast_room_name: str) -> None:
-    client = new_client(servers[0])
+    client = new_client(ignore_messages, servers[0])
     room = client.create_room(alias=broadcast_room_name, is_public=True)
 
     for server in servers[1:]:
-        client = new_client(server)
+        client = new_client(ignore_messages, server)
 
         # A user must join the room to create the room in the federated server
         room = client.join_room(room.aliases[0])
@@ -74,7 +80,7 @@ def setup_broadcast_room(servers: List["ParsedURL"], broadcast_room_name: str) -
             "Leaving the room failed. This is done otherwise there would be "
             "a ghost user in the broadcast room"
         )
-        assert room.leave(), msg
+        assert room.leave() is None, msg
 
 
 class ParsedURL(str):
@@ -259,17 +265,16 @@ def matrix_server_starter(
     count: int = 1,
     config_generator: SynapseConfigGenerator = None,
     log_context: str = None,
-) -> Iterator[List[ParsedURL]]:
+) -> Iterator[List[Tuple[ParsedURL, HTTPExecutor]]]:
     with ExitStack() as exit_stack:
 
         if config_generator is None:
             config_generator = exit_stack.enter_context(generate_synapse_config())
 
-        server_urls: List[ParsedURL] = []
+        servers: List[Tuple[ParsedURL, HTTPExecutor]] = []
         for _, port in zip(range(count), free_port_generator):
             server_name, config_file = config_generator(port)
             server_url = ParsedURL(f"http://{server_name}")
-            server_urls.append(server_url)
 
             synapse_cmd = [
                 sys.executable,
@@ -329,7 +334,9 @@ def matrix_server_starter(
             # must poke at the private member and overwrite it.
             executor._timeout = teardown_timeout
 
-        for broadcast_room_alias in broadcast_rooms_aliases:
-            setup_broadcast_room(server_urls, broadcast_room_alias)
+            servers.append((server_url, executor))
 
-        yield server_urls
+        for broadcast_room_alias in broadcast_rooms_aliases:
+            setup_broadcast_room([url for url, _ in servers], broadcast_room_alias)
+
+        yield servers

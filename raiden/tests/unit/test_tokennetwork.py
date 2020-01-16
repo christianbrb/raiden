@@ -29,7 +29,7 @@ from raiden.transfer.state_change import (
     ContractReceiveRouteClosed,
     ContractReceiveRouteNew,
 )
-from raiden.utils import sha3
+from raiden.utils.signing import sha3
 
 
 @pytest.fixture
@@ -842,7 +842,7 @@ def test_routing_issue2663(chain_state, token_network_state, one_to_n_address, o
         address4: NetworkState.REACHABLE,
     }
 
-    routes1, _ = get_best_routes(
+    error_msg, routes1, _ = get_best_routes(
         chain_state=chain_state,
         token_network_address=token_network_state.address,
         one_to_n_address=one_to_n_address,
@@ -850,11 +850,12 @@ def test_routing_issue2663(chain_state, token_network_state, one_to_n_address, o
         to_address=address4,
         amount=50,
         previous_address=None,
-        config={},
+        pfs_config=None,
         privkey=b"",  # not used if pfs is not configured
     )
-    assert routes1[0].next_hop_address == address1
-    assert routes1[1].next_hop_address == address2
+    assert routes1, error_msg
+    assert routes1[0].next_hop_address == address1, error_msg
+    assert routes1[1].next_hop_address == address2, error_msg
 
     # test routing with node 2 offline
     chain_state.nodeaddresses_to_networkstates = {
@@ -864,7 +865,7 @@ def test_routing_issue2663(chain_state, token_network_state, one_to_n_address, o
         address4: NetworkState.REACHABLE,
     }
 
-    routes1, _ = get_best_routes(
+    _, routes1, _ = get_best_routes(
         chain_state=chain_state,
         token_network_address=token_network_state.address,
         one_to_n_address=one_to_n_address,
@@ -872,7 +873,7 @@ def test_routing_issue2663(chain_state, token_network_state, one_to_n_address, o
         to_address=address4,
         amount=50,
         previous_address=None,
-        config={},
+        pfs_config=None,
         privkey=b"",
     )
     assert routes1[0].next_hop_address == address1
@@ -886,7 +887,7 @@ def test_routing_issue2663(chain_state, token_network_state, one_to_n_address, o
         address4: NetworkState.REACHABLE,
     }
 
-    routes1, _ = get_best_routes(
+    _, routes1, _ = get_best_routes(
         chain_state=chain_state,
         token_network_address=token_network_state.address,
         one_to_n_address=one_to_n_address,
@@ -894,7 +895,7 @@ def test_routing_issue2663(chain_state, token_network_state, one_to_n_address, o
         to_address=address4,
         amount=50,
         previous_address=None,
-        config={},
+        pfs_config=None,
         privkey=b"",
     )
     assert routes1[0].next_hop_address == address1
@@ -908,7 +909,7 @@ def test_routing_issue2663(chain_state, token_network_state, one_to_n_address, o
         address4: NetworkState.REACHABLE,
     }
 
-    routes1, _ = get_best_routes(
+    _, routes1, _ = get_best_routes(
         chain_state=chain_state,
         token_network_address=token_network_state.address,
         one_to_n_address=one_to_n_address,
@@ -916,7 +917,7 @@ def test_routing_issue2663(chain_state, token_network_state, one_to_n_address, o
         to_address=address3,
         amount=50,
         previous_address=None,
-        config={},
+        pfs_config=None,
         privkey=b"",
     )
     # right now the channel to 1 gets filtered out as it is offline
@@ -1074,7 +1075,7 @@ def test_routing_priority(chain_state, token_network_state, one_to_n_address, ou
         address3: NetworkState.REACHABLE,
     }
 
-    routes, _ = get_best_routes(
+    error_msg, routes, _ = get_best_routes(
         chain_state=chain_state,
         token_network_address=token_network_state.address,
         one_to_n_address=one_to_n_address,
@@ -1082,11 +1083,12 @@ def test_routing_priority(chain_state, token_network_state, one_to_n_address, ou
         to_address=address3,
         amount=1,
         previous_address=None,
-        config={},
+        pfs_config=None,
         privkey=b"",
     )
-    assert routes[0].next_hop_address == address1
-    assert routes[1].next_hop_address == address2
+    assert routes, error_msg
+    assert routes[0].next_hop_address == address1, error_msg
+    assert routes[1].next_hop_address == address2, error_msg
 
     # number of hops overwrites refunding capacity (route over node 2 involves less hops)
     chain_state.nodeaddresses_to_networkstates = {
@@ -1096,7 +1098,7 @@ def test_routing_priority(chain_state, token_network_state, one_to_n_address, ou
         address4: NetworkState.REACHABLE,
     }
 
-    routes, _ = get_best_routes(
+    _, routes, _ = get_best_routes(
         chain_state=chain_state,
         token_network_address=token_network_state.address,
         one_to_n_address=one_to_n_address,
@@ -1104,7 +1106,7 @@ def test_routing_priority(chain_state, token_network_state, one_to_n_address, ou
         to_address=address4,
         amount=1,
         previous_address=None,
-        config={},
+        pfs_config=None,
         privkey=b"",
     )
     assert routes[0].next_hop_address == address2
@@ -1177,7 +1179,7 @@ def test_internal_routing_mediation_fees(
     }
 
     # Routing to our direct partner would require 0 mediation fees.x
-    routes, _ = get_best_routes(
+    _, routes, _ = get_best_routes(
         chain_state=chain_state,
         token_network_address=token_network_state.address,
         one_to_n_address=one_to_n_address,
@@ -1185,13 +1187,13 @@ def test_internal_routing_mediation_fees(
         to_address=address1,
         amount=50,
         previous_address=None,
-        config={},
+        pfs_config=None,
         privkey=b"",  # not used if pfs is not configured
     )
     assert routes[0].estimated_fee == 0
 
     # Routing to our address2 through address1 would charge 2%
-    routes, _ = get_best_routes(
+    error_msg, routes, _ = get_best_routes(
         chain_state=chain_state,
         token_network_address=token_network_state.address,
         one_to_n_address=one_to_n_address,
@@ -1199,7 +1201,8 @@ def test_internal_routing_mediation_fees(
         to_address=address2,
         amount=50,
         previous_address=None,
-        config={},
+        pfs_config=None,
         privkey=b"",  # not used if pfs is not configured
     )
-    assert routes[0].estimated_fee == round(INTERNAL_ROUTING_DEFAULT_FEE_PERC * 50)
+    assert routes, error_msg
+    assert routes[0].estimated_fee == round(INTERNAL_ROUTING_DEFAULT_FEE_PERC * 50), error_msg

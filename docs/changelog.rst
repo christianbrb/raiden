@@ -2,6 +2,11 @@
 Changelog
 =========
 
+* :feature:`5589` The Rest API now includes the token address in all returned payment related events.
+* :bug:`5591` Rest API payment events can now be properly filtered by token address.
+* :bug:`5395` Convert and return big integers as strings in the API response body.
+* :feature:`-` Update WebUI to version 0.11.0 https://github.com/raiden-network/webui/releases/tag/v0.11.0
+
 * :release:`0.200.0-rc2 <2019-11-25>`
 * :feature:`5050` Raiden's argument --debug-logfile-name has been renamed to --debug-logfile-path to better reflect the argument's function.
 * :bug:`5050` Raiden now works on OSX Catalina. Debug logfile is no longer written in the current directory.

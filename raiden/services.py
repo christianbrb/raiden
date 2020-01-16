@@ -1,7 +1,4 @@
-from typing import Union
-
 import structlog
-from eth_utils import to_checksum_address
 
 from raiden import constants
 from raiden.constants import RoutingMode
@@ -9,10 +6,11 @@ from raiden.messages.monitoring_service import RequestMonitoring
 from raiden.messages.path_finding_service import PFSCapacityUpdate, PFSFeeUpdate
 from raiden.settings import MONITORING_REWARD
 from raiden.transfer import views
-from raiden.transfer.architecture import BalanceProofSignedState, BalanceProofUnsignedState
+from raiden.transfer.architecture import BalanceProofSignedState
 from raiden.transfer.identifiers import CanonicalIdentifier
 from raiden.transfer.state import ChainState
-from raiden.utils import to_rdn
+from raiden.utils.formatting import to_checksum_address
+from raiden.utils.transfers import to_rdn
 from raiden.utils.typing import TYPE_CHECKING, Address
 
 if TYPE_CHECKING:
@@ -20,22 +18,6 @@ if TYPE_CHECKING:
 
 
 log = structlog.get_logger(__name__)
-
-
-def update_services_from_balance_proof(
-    raiden: "RaidenService",
-    chain_state: ChainState,
-    balance_proof: Union[BalanceProofSignedState, BalanceProofUnsignedState],
-    non_closing_participant: Address,
-) -> None:
-    send_pfs_update(raiden=raiden, canonical_identifier=balance_proof.canonical_identifier)
-    if isinstance(balance_proof, BalanceProofSignedState):
-        update_monitoring_service_from_balance_proof(
-            raiden=raiden,
-            chain_state=chain_state,
-            new_balance_proof=balance_proof,
-            non_closing_participant=non_closing_participant,
-        )
 
 
 def send_pfs_update(
@@ -72,8 +54,11 @@ def update_monitoring_service_from_balance_proof(
     new_balance_proof: BalanceProofSignedState,
     non_closing_participant: Address,
 ) -> None:
-    if raiden.config["services"]["monitoring_enabled"] is False:
+    if raiden.config.services.monitoring_enabled is False:
         return
+
+    msg = f"Monitoring is enabled but the default monitoring service address is None."
+    assert raiden.default_msc_address is not None, msg
 
     channel_state = views.get_channelstate_by_canonical_identifier(
         chain_state=chain_state, canonical_identifier=new_balance_proof.canonical_identifier

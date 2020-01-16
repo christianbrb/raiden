@@ -1,12 +1,15 @@
 # pylint: disable=too-few-public-methods
-from copy import deepcopy
+import pickle
+import time
 from dataclasses import dataclass, field
 
-from eth_utils import to_checksum_address, to_hex
+import structlog
+from eth_utils import to_hex
 
 from raiden.constants import EMPTY_BALANCE_HASH, UINT64_MAX, UINT256_MAX
 from raiden.transfer.identifiers import CanonicalIdentifier, QueueIdentifier
 from raiden.transfer.utils import hash_balance_data
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.typing import (
     AdditionalHash,
     Address,
@@ -38,6 +41,8 @@ from raiden.utils.typing import (
     TypeVar,
     typecheck,
 )
+
+log = structlog.get_logger(__name__)
 
 # Quick overview
 # --------------
@@ -254,7 +259,9 @@ class StateManager(Generic[ST]):
 
         # The state objects must be treated as immutable, so make a copy of the
         # current state and pass the copy to the state machine to be modified.
-        next_state = deepcopy(self.current_state)
+        before_copy = time.time()
+        next_state = pickle.loads(pickle.dumps(self.current_state, pickle.HIGHEST_PROTOCOL))
+        log.debug("Copied state before applying state changes", duration=time.time() - before_copy)
 
         # Update the current state by applying the state changes
         events: List[List[Event]] = list()

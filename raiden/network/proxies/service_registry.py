@@ -2,19 +2,21 @@ from urllib.parse import urlparse
 
 import structlog
 import web3
-from eth_utils import decode_hex, is_binary_address, to_canonical_address, to_checksum_address
+from eth_utils import decode_hex, is_binary_address, to_canonical_address
 from web3.exceptions import BadFunctionCallOutput
 
 from raiden.exceptions import BrokenPreconditionError, RaidenUnrecoverableError
 from raiden.network.proxies.utils import log_transaction
 from raiden.network.rpc.client import JSONRPCClient, check_address_has_code
 from raiden.network.rpc.transactions import check_transaction_threw
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.typing import (
     Address,
     Any,
     BlockSpecification,
     Dict,
     Optional,
+    ServiceRegistryAddress,
     TokenAddress,
     TokenAmount,
 )
@@ -28,7 +30,7 @@ class ServiceRegistry:
     def __init__(
         self,
         jsonrpc_client: JSONRPCClient,
-        service_registry_address: Address,
+        service_registry_address: ServiceRegistryAddress,
         contract_manager: ContractManager,
     ):
         if not is_binary_address(service_registry_address):
@@ -37,7 +39,7 @@ class ServiceRegistry:
         self.contract_manager = contract_manager
         check_address_has_code(
             client=jsonrpc_client,
-            address=service_registry_address,
+            address=Address(service_registry_address),
             contract_name=CONTRACT_SERVICE_REGISTRY,
             expected_code=decode_hex(
                 contract_manager.get_runtime_hexcode(CONTRACT_SERVICE_REGISTRY)
@@ -46,7 +48,7 @@ class ServiceRegistry:
 
         proxy = jsonrpc_client.new_contract_proxy(
             abi=self.contract_manager.get_contract_abi(CONTRACT_SERVICE_REGISTRY),
-            contract_address=service_registry_address,
+            contract_address=Address(service_registry_address),
         )
 
         self.address = service_registry_address

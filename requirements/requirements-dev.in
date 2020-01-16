@@ -28,13 +28,11 @@ pytest-xdist
 grequests
 pexpect
 hypothesis
+responses
 
 # Debugging
 pdbpp
 colour
-
-# Profilling
-objgraph
 
 # Continuous Integration
 coverage

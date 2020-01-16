@@ -1,11 +1,10 @@
 """ Utilities to set-up a Raiden network. """
 from collections import namedtuple
-from copy import deepcopy
 from itertools import product
+from pathlib import Path
 
 import gevent
 import structlog
-from eth_utils import to_checksum_address
 from web3 import Web3
 
 from raiden import waiting
@@ -19,7 +18,11 @@ from raiden.raiden_service import RaidenService
 from raiden.settings import (
     DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
     DEFAULT_RETRY_TIMEOUT,
+    BlockchainConfig,
+    MatrixTransportConfig,
     MediationFeeConfig,
+    RaidenConfig,
+    ServiceConfig,
 )
 from raiden.tests.utils.app import database_from_privatekey
 from raiden.tests.utils.factories import UNIT_CHAIN_ID
@@ -28,7 +31,7 @@ from raiden.tests.utils.transport import ParsedURL
 from raiden.transfer import views
 from raiden.transfer.identifiers import CanonicalIdentifier
 from raiden.transfer.views import state_from_raiden
-from raiden.utils import merge_dict
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.typing import (
     Address,
     BlockNumber,
@@ -38,14 +41,18 @@ from raiden.utils.typing import (
     ChannelID,
     Iterable,
     List,
+    MonitoringServiceAddress,
+    OneToNAddress,
     Optional,
     PrivateKey,
     SecretRegistryAddress,
+    ServiceRegistryAddress,
     TokenAddress,
     TokenAmount,
     TokenNetworkAddress,
     TokenNetworkRegistryAddress,
     Tuple,
+    UserDepositAddress,
 )
 from raiden.waiting import wait_for_token_network
 from raiden_contracts.contract_manager import ContractManager
@@ -338,14 +345,14 @@ def create_sequential_channels(raiden_apps: List[App], channels_per_node: int) -
 
 def create_apps(
     chain_id: ChainID,
-    contracts_path: str,
+    contracts_path: Path,
     blockchain_services: BlockchainServices,
     token_network_registry_address: TokenNetworkRegistryAddress,
-    one_to_n_address: Optional[Address],
+    one_to_n_address: Optional[OneToNAddress],
     secret_registry_address: SecretRegistryAddress,
-    service_registry_address: Optional[Address],
-    user_deposit_address: Address,
-    monitoring_service_contract_address: Address,
+    service_registry_address: Optional[ServiceRegistryAddress],
+    user_deposit_address: UserDepositAddress,
+    monitoring_service_contract_address: MonitoringServiceAddress,
     reveal_timeout: BlockTimeout,
     settle_timeout: BlockTimeout,
     database_basedir: str,
@@ -369,47 +376,37 @@ def create_apps(
         assert len(resolver_ports) > idx
         resolver_port = resolver_ports[idx]
 
-        config = {
-            "chain_id": chain_id,
-            "environment_type": environment_type,
-            "unrecoverable_error_should_crash": unrecoverable_error_should_crash,
-            "reveal_timeout": reveal_timeout,
-            "settle_timeout": settle_timeout,
-            "contracts_path": contracts_path,
-            "database_path": database_path,
-            "blockchain": {
-                "confirmation_blocks": DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
-                "query_interval": blockchain_query_interval,
-            },
-            "transport": {},
-            "rpc": True,
-            "console": False,
-            "mediation_fees": MediationFeeConfig(),
-        }
+        config = RaidenConfig(
+            chain_id=chain_id,
+            environment_type=environment_type,
+            unrecoverable_error_should_crash=unrecoverable_error_should_crash,
+            reveal_timeout=reveal_timeout,
+            settle_timeout=settle_timeout,
+            contracts_path=contracts_path,
+            database_path=database_path,
+            blockchain=BlockchainConfig(
+                confirmation_blocks=DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
+                query_interval=blockchain_query_interval,
+            ),
+            mediation_fees=MediationFeeConfig(),
+            services=ServiceConfig(monitoring_enabled=False),
+            rpc=True,
+            console=False,
+            transport_type="matrix",
+        )
 
         if local_matrix_url is not None:
-            merge_dict(
-                config,
-                {
-                    "transport_type": "matrix",
-                    "transport": {
-                        "matrix": {
-                            "broadcast_rooms": broadcast_rooms,
-                            "retries_before_backoff": retries_before_backoff,
-                            "retry_interval": retry_interval,
-                            "server": local_matrix_url,
-                            "server_name": local_matrix_url.netloc,
-                            "available_servers": [],
-                        }
-                    },
-                },
+            config.transport = MatrixTransportConfig(
+                broadcast_rooms=broadcast_rooms,
+                retries_before_backoff=retries_before_backoff,
+                retry_interval=retry_interval,
+                server=local_matrix_url,
+                server_name=local_matrix_url.netloc,
+                available_servers=[],
             )
 
         if resolver_port is not None:
-            merge_dict(config, {"resolver_endpoint": "http://localhost:" + str(resolver_port)})
-
-        config_copy = deepcopy(App.DEFAULT_CONFIG)
-        config_copy.update(config)
+            config.resolver_endpoint = f"http://localhost:{resolver_port}"
 
         registry = proxy_manager.token_network_registry(token_network_registry_address)
         secret_registry = proxy_manager.secret_registry(secret_registry_address)
@@ -422,14 +419,14 @@ def create_apps(
         if user_deposit_address:
             user_deposit = proxy_manager.user_deposit(user_deposit_address)
 
-        transport = MatrixTransport(config["transport"]["matrix"])
+        transport = MatrixTransport(config=config.transport, environment=environment_type)
 
         raiden_event_handler = RaidenEventHandler()
         hold_handler = HoldRaidenEventHandler(raiden_event_handler)
         message_handler = WaitForMessage()
 
         app = App(
-            config=config_copy,
+            config=config,
             rpc_client=proxy_manager.client,
             proxy_manager=proxy_manager,
             query_start_block=BlockNumber(0),
@@ -469,8 +466,8 @@ def parallel_start_apps(raiden_apps: List[App]) -> None:
 def jsonrpc_services(
     proxy_manager: ProxyManager,
     private_keys: List[PrivateKey],
-    secret_registry_address: Address,
-    service_registry_address: Address,
+    secret_registry_address: SecretRegistryAddress,
+    service_registry_address: ServiceRegistryAddress,
     token_network_registry_address: TokenNetworkRegistryAddress,
     web3: Web3,
     contract_manager: ContractManager,

@@ -1,11 +1,11 @@
 import gevent
 import structlog
-from eth_utils import is_binary_address, to_checksum_address
+from eth_utils import is_binary_address
 
 import raiden.blockchain.events as blockchain_events
 from raiden import waiting
 from raiden.api.exceptions import ChannelNotFound, NonexistingChannel
-from raiden.constants import GENESIS_BLOCK_NUMBER, NULL_ADDRESS_BYTES, UINT256_MAX
+from raiden.constants import GENESIS_BLOCK_NUMBER, NULL_ADDRESS_BYTES, UINT64_MAX, UINT256_MAX
 from raiden.exceptions import (
     AlreadyRegisteredTokenAddress,
     DepositMismatch,
@@ -15,6 +15,7 @@ from raiden.exceptions import (
     InsufficientGasReserve,
     InvalidAmount,
     InvalidBinaryAddress,
+    InvalidPaymentIdentifier,
     InvalidRevealTimeout,
     InvalidSecret,
     InvalidSecretHash,
@@ -40,14 +41,17 @@ from raiden.transfer.events import (
 from raiden.transfer.mediated_transfer.tasks import InitiatorTask, MediatorTask, TargetTask
 from raiden.transfer.state import (
     BalanceProofSignedState,
+    ChainState,
     ChannelState,
     NettingChannelState,
     NetworkState,
 )
 from raiden.transfer.state_change import ActionChannelClose
-from raiden.utils import create_default_identifier
+from raiden.transfer.views import get_token_network_by_address
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.gas_reserve import has_enough_gas_reserve
 from raiden.utils.testnet import MintingMethod, call_minting_method, token_minting_proxy
+from raiden.utils.transfers import create_default_identifier
 from raiden.utils.typing import (
     TYPE_CHECKING,
     Address,
@@ -72,7 +76,6 @@ from raiden.utils.typing import (
     TokenNetworkAddress,
     TokenNetworkRegistryAddress,
     TransactionHash,
-    Tuple,
     WithdrawAmount,
 )
 
@@ -88,23 +91,41 @@ EVENTS_PAYMENT_HISTORY_RELATED = (
 )
 
 
-def event_filter_for_payments(event: Event, partner_address: Address = None) -> bool:
-    """Filters payment history related events depending on partner_address argument
+def event_filter_for_payments(
+    event: Event,
+    chain_state: Optional[ChainState] = None,
+    partner_address: Optional[Address] = None,
+    token_address: Optional[TokenAddress] = None,
+) -> bool:
+    """Filters payment history related events depending on given arguments
 
-    - If no other args are given, all payment related events match
-    - If a token network identifier is given then only payment events for that match
+    - If no other args are given, all payment related events match.
+    - If a token network identifier is given then only payment events for that match.
     - If a partner is also given then if the event is a payment sent event and the
-      target matches it's returned. If it's a payment received and the initiator matches
+      target matches it's returned. If it's a payment received and the initiator matches.
       then it's returned.
+    - If a token address is given then all events are filtered to be about that token.
     """
-
     sent_and_target_matches = isinstance(
         event, (EventPaymentSentFailed, EventPaymentSentSuccess)
     ) and (partner_address is None or event.target == partner_address)
     received_and_initiator_matches = isinstance(event, EventPaymentReceivedSuccess) and (
         partner_address is None or event.initiator == partner_address
     )
-    return sent_and_target_matches or received_and_initiator_matches
+
+    token_address_matches = True
+    if token_address:
+        assert chain_state, "Filtering for token_address without a chain state is an error"
+        token_network = get_token_network_by_address(
+            chain_state=chain_state,
+            token_network_address=event.token_network_address,  # type: ignore
+        )
+        if not token_network:
+            token_address_matches = False
+        else:
+            token_address_matches = token_address == token_network.token_address
+
+    return token_address_matches and (sent_and_target_matches or received_and_initiator_matches)
 
 
 def flatten_transfer(transfer: LockedTransferType, role: str) -> Dict[str, Any]:
@@ -123,23 +144,26 @@ def flatten_transfer(transfer: LockedTransferType, role: str) -> Dict[str, Any]:
 
 def get_transfer_from_task(
     secrethash: SecretHash, transfer_task: TransferTask
-) -> Tuple[LockedTransferType, str]:
-    role = views.role_from_transfer_task(transfer_task)
-    transfer: LockedTransferType
+) -> Optional[LockedTransferType]:
     if isinstance(transfer_task, InitiatorTask):
-        transfer = transfer_task.manager_state.initiator_transfers[secrethash].transfer
+        # Work around for https://github.com/raiden-network/raiden/issues/5480,
+        # can be removed when
+        # https://github.com/raiden-network/raiden/issues/5515 is done.
+        if secrethash not in transfer_task.manager_state.initiator_transfers:
+            return None
+
+        return transfer_task.manager_state.initiator_transfers[secrethash].transfer
     elif isinstance(transfer_task, MediatorTask):
         pairs = transfer_task.mediator_state.transfers_pair
         if pairs:
-            transfer = pairs[-1].payer_transfer
-        elif transfer_task.mediator_state.waiting_transfer:
-            transfer = transfer_task.mediator_state.waiting_transfer.transfer
-    elif isinstance(transfer_task, TargetTask):
-        transfer = transfer_task.target_state.transfer
-    else:  # pragma: no unittest
-        raise ValueError("get_transfer_from_task for a non TransferTask argument")
+            return pairs[-1].payer_transfer
 
-    return transfer, role
+        assert transfer_task.mediator_state.waiting_transfer, "Invalid mediator_state"
+        return transfer_task.mediator_state.waiting_transfer.transfer
+    elif isinstance(transfer_task, TargetTask):
+        return transfer_task.target_state.transfer
+
+    raise ValueError("get_transfer_from_task for a non TransferTask argument")
 
 
 def transfer_tasks_view(
@@ -150,7 +174,7 @@ def transfer_tasks_view(
     view = list()
 
     for secrethash, transfer_task in transfer_tasks.items():
-        transfer, role = get_transfer_from_task(secrethash, transfer_task)
+        transfer = get_transfer_from_task(secrethash, transfer_task)
 
         if transfer is None:
             continue
@@ -161,6 +185,7 @@ def transfer_tasks_view(
                 if transfer.balance_proof.channel_identifier != channel_id:
                     continue
 
+        role = views.role_from_transfer_task(transfer_task)
         view.append(flatten_transfer(transfer, role))
 
     return view
@@ -370,10 +395,10 @@ class RaidenAPI:  # pragma: no unittest
         with the given `token_address`.
         """
         if settle_timeout is None:
-            settle_timeout = self.raiden.config["settle_timeout"]
+            settle_timeout = self.raiden.config.settle_timeout
 
         if reveal_timeout is None:
-            reveal_timeout = self.raiden.config["reveal_timeout"]
+            reveal_timeout = self.raiden.config.reveal_timeout
 
         if reveal_timeout <= 0:
             raise InvalidRevealTimeout("reveal_timeout should be larger than zero")
@@ -1051,6 +1076,12 @@ class RaidenAPI:  # pragma: no unittest
         if identifier is None:
             identifier = create_default_identifier()
 
+        if identifier <= 0:
+            raise InvalidPaymentIdentifier("Payment identifier cannot be 0 or negative")
+
+        if identifier > UINT64_MAX:
+            raise InvalidPaymentIdentifier("Payment identifier is too large")
+
         log.debug(
             "Initiating transfer",
             initiator=to_checksum_address(self.raiden.address),
@@ -1113,10 +1144,16 @@ class RaidenAPI:  # pragma: no unittest
             logical_and=False,
         )
 
+        chain_state = views.state_from_raiden(self.raiden)
         events = [
             e
             for e in events
-            if event_filter_for_payments(event=e.wrapped_event, partner_address=target_address)
+            if event_filter_for_payments(
+                event=e.wrapped_event,
+                chain_state=chain_state,
+                partner_address=target_address,
+                token_address=token_address,
+            )
         ]
 
         return events
@@ -1244,6 +1281,10 @@ class RaidenAPI:  # pragma: no unittest
         - claim the `reward_amount` from the UDC.
         """
         # create RequestMonitoring message from the above + `reward_amount`
+
+        msg = "Default monitoring service address should not be None"
+        assert self.raiden.default_msc_address is not None, msg
+
         monitor_request = RequestMonitoring.from_balance_proof_signed_state(
             balance_proof=balance_proof,
             non_closing_participant=self.raiden.address,
@@ -1260,7 +1301,7 @@ class RaidenAPI:  # pragma: no unittest
         chain_state = views.state_from_raiden(self.raiden)
         transfer_tasks = views.get_all_transfer_tasks(chain_state)
         channel_id = None
-        confirmed_block_identifier = views.state_from_raiden(self.raiden).block_hash
+        confirmed_block_identifier = chain_state.block_hash
         if token_address is not None:
             token_network = self.raiden.default_registry.get_token_network(
                 token_address=token_address, block_identifier=confirmed_block_identifier
@@ -1268,11 +1309,14 @@ class RaidenAPI:  # pragma: no unittest
             if token_network is None:
                 raise UnknownTokenAddress(f"Token {token_address} not found.")
             if partner_address is not None:
-                partner_channel = self.get_channel(
-                    registry_address=self.raiden.default_registry.address,
+                partner_channel = views.get_channelstate_for(
+                    chain_state=chain_state,
+                    token_network_registry_address=self.raiden.default_registry.address,
                     token_address=token_address,
                     partner_address=partner_address,
                 )
+                if not partner_channel:
+                    raise ChannelNotFound(f"Channel with partner `partner_address not found.`")
                 channel_id = partner_channel.identifier
 
         return transfer_tasks_view(transfer_tasks, token_address, channel_id)

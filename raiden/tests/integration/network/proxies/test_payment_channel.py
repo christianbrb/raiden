@@ -2,6 +2,7 @@ import pytest
 from eth_utils import encode_hex
 from web3 import Web3
 
+from raiden.blockchain.events import get_all_netting_channel_events
 from raiden.constants import (
     EMPTY_BALANCE_HASH,
     EMPTY_MESSAGE_HASH,
@@ -20,7 +21,7 @@ from raiden.network.proxies.token_network import TokenNetwork
 from raiden.network.rpc.client import JSONRPCClient
 from raiden.tests.integration.network.proxies import BalanceProof
 from raiden.transfer.identifiers import CanonicalIdentifier
-from raiden.utils import privatekey_to_address
+from raiden.utils.keys import privatekey_to_address
 from raiden.utils.signer import LocalSigner
 from raiden.utils.typing import BlockNumber, ChainID, List, Nonce, PrivateKey, TokenAmount
 from raiden_contracts.constants import TEST_SETTLE_TIMEOUT_MIN, MessageTypeId
@@ -38,9 +39,9 @@ def test_payment_channel_proxy_basics(
     token_network_address = token_network_proxy.address
     partner = privatekey_to_address(private_keys[0])
 
-    client = JSONRPCClient(web3, private_keys[1])
+    rpc_client = JSONRPCClient(web3, private_keys[1])
     proxy_manager = ProxyManager(
-        rpc_client=client,
+        rpc_client=rpc_client,
         contract_manager=contract_manager,
         metadata=ProxyManagerMetadata(
             token_network_registry_deployed_at=GENESIS_BLOCK_NUMBER,
@@ -68,15 +69,21 @@ def test_payment_channel_proxy_basics(
 
     # Test deposit
     initial_token_balance = TokenAmount(100)
-    token_proxy.transfer(client.address, initial_token_balance)
-    assert token_proxy.balance_of(client.address) == initial_token_balance
+    token_proxy.transfer(rpc_client.address, initial_token_balance)
+    assert token_proxy.balance_of(rpc_client.address) == initial_token_balance
     assert token_proxy.balance_of(partner) == 0
     channel_proxy_1.set_total_deposit(total_deposit=TokenAmount(10), block_identifier="latest")
 
     # ChannelOpened, ChannelNewDeposit
-    channel_events = channel_proxy_1.all_events_filter(from_block=start_block).get_new_entries(
-        web3.eth.blockNumber
+    channel_events = get_all_netting_channel_events(
+        proxy_manager=proxy_manager,
+        token_network_address=token_network_address,
+        netting_channel_identifier=channel_proxy_1.channel_identifier,
+        contract_manager=contract_manager,
+        from_block=start_block,
+        to_block=web3.eth.blockNumber,
     )
+
     assert len(channel_events) == 2
 
     block_before_close = web3.eth.blockNumber
@@ -101,8 +108,13 @@ def test_payment_channel_proxy_basics(
     )
     assert channel_proxy_1.closed("latest") is True
     # ChannelOpened, ChannelNewDeposit, ChannelClosed
-    channel_events = channel_proxy_1.all_events_filter(from_block=start_block).get_new_entries(
-        web3.eth.blockNumber
+    channel_events = get_all_netting_channel_events(
+        proxy_manager=proxy_manager,
+        token_network_address=token_network_address,
+        netting_channel_identifier=channel_proxy_1.channel_identifier,
+        contract_manager=contract_manager,
+        from_block=start_block,
+        to_block=web3.eth.blockNumber,
     )
     assert len(channel_events) == 3
 
@@ -112,8 +124,8 @@ def test_payment_channel_proxy_basics(
     # update transfer -- we need to wait on +1 since we use the latest block on parity for
     # estimate gas and at the time the latest block is the settle timeout block.
     # More info: https://github.com/raiden-network/raiden/pull/3699#discussion_r270477227
-    proxy_manager.wait_until_block(
-        target_block_number=BlockNumber(client.block_number() + TEST_SETTLE_TIMEOUT_MIN + 1)
+    rpc_client.wait_until_block(
+        target_block_number=BlockNumber(rpc_client.block_number() + TEST_SETTLE_TIMEOUT_MIN + 1)
     )
 
     channel_proxy_1.settle(
@@ -127,8 +139,13 @@ def test_payment_channel_proxy_basics(
     )
     assert channel_proxy_1.settled("latest") is True
     # ChannelOpened, ChannelNewDeposit, ChannelClosed, ChannelSettled
-    channel_events = channel_proxy_1.all_events_filter(from_block=start_block).get_new_entries(
-        web3.eth.blockNumber
+    channel_events = get_all_netting_channel_events(
+        proxy_manager=proxy_manager,
+        token_network_address=token_network_address,
+        netting_channel_identifier=channel_proxy_1.channel_identifier,
+        contract_manager=contract_manager,
+        from_block=start_block,
+        to_block=web3.eth.blockNumber,
     )
     assert len(channel_events) == 4
 

@@ -12,17 +12,17 @@ pytestmark = [
     pytest.mark.parametrize(
         "cli_tests_contracts_version", [RAIDEN_CONTRACT_VERSION], scope="module"
     ),
-    pytest.mark.parametrize("environment_type", [Environment.DEVELOPMENT.value], scope="module"),
+    pytest.mark.parametrize("environment_type", [Environment.DEVELOPMENT], scope="module"),
 ]
 
 
-@pytest.mark.timeout(45)
+@pytest.mark.timeout(60)
 def test_cli_full_init_dev(cli_args, raiden_spawner):
     child = raiden_spawner(cli_args)
     expect_cli_normal_startup(child, Environment.DEVELOPMENT.value)
 
 
-@pytest.mark.timeout(45)
+@pytest.mark.timeout(60)
 @pytest.mark.parametrize("removed_args", [["address"]])
 def test_cli_manual_account_selection(cli_args, raiden_spawner):
     child = raiden_spawner(cli_args)

@@ -17,7 +17,13 @@ from flask import url_for
 
 from raiden.api.rest import APIServer
 from raiden.api.v1.encoding import AddressField, HexAddressConverter
-from raiden.constants import GENESIS_BLOCK_NUMBER, NULL_ADDRESS_HEX, SECRET_LENGTH, Environment
+from raiden.constants import (
+    GENESIS_BLOCK_NUMBER,
+    NULL_ADDRESS_HEX,
+    SECRET_LENGTH,
+    UINT64_MAX,
+    Environment,
+)
 from raiden.messages.transfers import LockedTransfer, Unlock
 from raiden.settings import (
     DEFAULT_NUMBER_OF_BLOCK_CONFIRMATIONS,
@@ -27,6 +33,7 @@ from raiden.tests.integration.api.utils import create_api_server
 from raiden.tests.integration.fixtures.smartcontracts import RED_EYES_PER_CHANNEL_PARTICIPANT_LIMIT
 from raiden.tests.utils import factories
 from raiden.tests.utils.client import burn_eth
+from raiden.tests.utils.detect_failure import expect_failure, raise_on_failure
 from raiden.tests.utils.events import check_dict_nested_attrs, must_have_event, must_have_events
 from raiden.tests.utils.network import CHAIN
 from raiden.tests.utils.protocol import WaitForMessage
@@ -35,8 +42,8 @@ from raiden.tests.utils.transfer import watch_for_unlock_failures
 from raiden.transfer import views
 from raiden.transfer.mediated_transfer.initiator import calculate_fee_margin
 from raiden.transfer.state import ChannelState
-from raiden.utils import get_system_spec
 from raiden.utils.secrethash import sha256_secrethash
+from raiden.utils.system import get_system_spec
 from raiden.utils.typing import FeeAmount, PaymentAmount, PaymentID, TokenAmount
 from raiden.waiting import (
     TransferWaitResult,
@@ -101,6 +108,28 @@ def assert_proper_response(response, status_code=HTTPStatus.OK):
     )
 
 
+def assert_payment_secret_and_hash(response, payment):
+    # make sure that payment key/values are part of the response.
+    assert len(response) == 7
+    assert "secret" in response
+    assert "secret_hash" in response
+
+    secret = to_bytes(hexstr=response["secret"])
+    assert len(secret) == SECRET_LENGTH
+    assert payment["amount"] == response["amount"]
+
+    assert to_bytes(hexstr=response["secret_hash"]) == sha256_secrethash(secret)
+
+
+def assert_payment_conflict(responses):
+    assert all(response is not None for response in responses)
+    assert any(
+        resp.status_code == HTTPStatus.CONFLICT
+        and get_json_response(resp)["errors"] == "Another payment with the same id is in flight"
+        for resp in responses
+    )
+
+
 def api_url_for(api_server, endpoint, **kwargs):
     # url_for() expects binary address so we have to convert here
     for key, val in kwargs.items():
@@ -151,6 +180,7 @@ def test_address_field():
     assert field._deserialize("0x414D72a6f6E28F4950117696081450d63D56C354", attr, data) == address
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_payload_with_invalid_addresses(api_server_test_instance: APIServer, rest_api_port_number):
@@ -159,7 +189,7 @@ def test_payload_with_invalid_addresses(api_server_test_instance: APIServer, res
     channel_data_obj = {
         "partner_address": invalid_address,
         "token_address": "0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8",
-        "settle_timeout": 10,
+        "settle_timeout": "10",
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -182,6 +212,7 @@ def test_payload_with_invalid_addresses(api_server_test_instance: APIServer, res
 @pytest.mark.xfail(
     strict=True, reason="Crashed app also crashes on teardown", raises=CustomException
 )
+@expect_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_crash_on_unhandled_exception(api_server_test_instance: APIServer) -> None:
@@ -199,6 +230,7 @@ def test_crash_on_unhandled_exception(api_server_test_instance: APIServer) -> No
     api_server_test_instance.greenlet.get(timeout=10)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_payload_with_address_invalid_chars(api_server_test_instance: APIServer):
@@ -207,7 +239,7 @@ def test_payload_with_address_invalid_chars(api_server_test_instance: APIServer)
     channel_data_obj = {
         "partner_address": invalid_address,
         "token_address": "0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8",
-        "settle_timeout": 10,
+        "settle_timeout": "10",
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -216,6 +248,7 @@ def test_payload_with_address_invalid_chars(api_server_test_instance: APIServer)
     assert_response_with_error(response, HTTPStatus.BAD_REQUEST)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_payload_with_address_invalid_length(api_server_test_instance: APIServer):
@@ -224,7 +257,7 @@ def test_payload_with_address_invalid_length(api_server_test_instance: APIServer
     channel_data_obj = {
         "partner_address": invalid_address,
         "token_address": "0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8",
-        "settle_timeout": 10,
+        "settle_timeout": "10",
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -233,6 +266,7 @@ def test_payload_with_address_invalid_length(api_server_test_instance: APIServer
     assert_response_with_error(response, HTTPStatus.BAD_REQUEST)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_payload_with_address_not_eip55(api_server_test_instance: APIServer):
@@ -241,7 +275,7 @@ def test_payload_with_address_not_eip55(api_server_test_instance: APIServer):
     channel_data_obj = {
         "partner_address": invalid_address,
         "token_address": "0xEA674fdDe714fd979de3EdF0F56AA9716B898ec8",
-        "settle_timeout": 90,
+        "settle_timeout": "90",
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -250,6 +284,7 @@ def test_payload_with_address_not_eip55(api_server_test_instance: APIServer):
     assert_response_with_error(response, HTTPStatus.BAD_REQUEST)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_api_query_our_address(api_server_test_instance: APIServer):
@@ -261,6 +296,7 @@ def test_api_query_our_address(api_server_test_instance: APIServer):
     assert get_json_response(response) == {"our_address": to_checksum_address(our_address)}
 
 
+@raise_on_failure
 def test_api_get_raiden_version(api_server_test_instance: APIServer):
     request = grequests.get(api_url_for(api_server_test_instance, "versionresource"))
     response = request.send().response
@@ -271,6 +307,7 @@ def test_api_get_raiden_version(api_server_test_instance: APIServer):
     assert get_json_response(response) == {"version": raiden_version}
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_api_get_channel_list(
@@ -291,8 +328,8 @@ def test_api_get_channel_list(
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
     }
 
     request = grequests.put(
@@ -309,10 +346,11 @@ def test_api_get_channel_list(
     channel_info = json_response[0]
     assert channel_info["partner_address"] == partner_address
     assert channel_info["token_address"] == to_checksum_address(token_address)
-    assert channel_info["total_deposit"] == 0
+    assert channel_info["total_deposit"] == "0"
     assert "token_network_address" in channel_info
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_api_channel_status_channel_nonexistant(
@@ -338,6 +376,7 @@ def test_api_channel_status_channel_nonexistant(
     )
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_api_open_and_deposit_channel(
@@ -351,8 +390,8 @@ def test_api_open_and_deposit_channel(
     channel_data_obj = {
         "partner_address": first_partner_address,
         "token_address": token_address_hex,
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
     }
     # First let's try to create channel with the null address and see error is handled
     channel_data_obj["partner_address"] = NULL_ADDRESS_HEX
@@ -374,10 +413,10 @@ def test_api_open_and_deposit_channel(
     expected_response = channel_data_obj.copy()
     expected_response.update(
         {
-            "balance": 0,
+            "balance": "0",
             "state": ChannelState.STATE_OPENED.value,
-            "channel_identifier": 1,
-            "total_deposit": 0,
+            "channel_identifier": "1",
+            "total_deposit": "0",
         }
     )
     assert check_dict_nested_attrs(json_response, expected_response)
@@ -400,9 +439,9 @@ def test_api_open_and_deposit_channel(
     channel_data_obj = {
         "partner_address": second_partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
-        "total_deposit": total_deposit,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
+        "total_deposit": str(total_deposit),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -415,11 +454,11 @@ def test_api_open_and_deposit_channel(
     expected_response = channel_data_obj.copy()
     expected_response.update(
         {
-            "balance": total_deposit,
+            "balance": str(total_deposit),
             "state": ChannelState.STATE_OPENED.value,
-            "channel_identifier": second_channel_id,
+            "channel_identifier": str(second_channel_id),
             "token_network_address": token_network_address,
-            "total_deposit": total_deposit,
+            "total_deposit": str(total_deposit),
         }
     )
     assert check_dict_nested_attrs(json_response, expected_response)
@@ -432,7 +471,7 @@ def test_api_open_and_deposit_channel(
             token_address=token_address,
             partner_address=second_partner_address,
         ),
-        json={"total_deposit": 99},
+        json={"total_deposit": "99"},
     )
     response = request.send().response
     assert_proper_response(response, HTTPStatus.CONFLICT)
@@ -445,7 +484,7 @@ def test_api_open_and_deposit_channel(
             token_address=token_address,
             partner_address=first_partner_address,
         ),
-        json={"total_deposit": -1000},
+        json={"total_deposit": "-1000"},
     )
     response = request.send().response
     assert_proper_response(response, HTTPStatus.CONFLICT)
@@ -458,20 +497,20 @@ def test_api_open_and_deposit_channel(
             token_address=token_address,
             partner_address=first_partner_address,
         ),
-        json={"total_deposit": total_deposit},
+        json={"total_deposit": str(total_deposit)},
     )
     response = request.send().response
     assert_proper_response(response)
     json_response = get_json_response(response)
     expected_response = {
-        "channel_identifier": first_channel_id,
+        "channel_identifier": str(first_channel_id),
         "partner_address": first_partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
         "state": ChannelState.STATE_OPENED.value,
-        "balance": total_deposit,
-        "total_deposit": total_deposit,
+        "balance": str(total_deposit),
+        "total_deposit": str(total_deposit),
         "token_network_address": token_network_address,
     }
     assert check_dict_nested_attrs(json_response, expected_response)
@@ -490,14 +529,14 @@ def test_api_open_and_deposit_channel(
     assert_proper_response(response)
     json_response = get_json_response(response)
     expected_response = {
-        "channel_identifier": second_channel_id,
+        "channel_identifier": str(second_channel_id),
         "partner_address": second_partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
         "state": ChannelState.STATE_OPENED.value,
-        "balance": total_deposit,
-        "total_deposit": total_deposit,
+        "balance": str(total_deposit),
+        "total_deposit": str(total_deposit),
         "token_network_address": token_network_address,
     }
     assert check_dict_nested_attrs(json_response, expected_response)
@@ -507,9 +546,9 @@ def test_api_open_and_deposit_channel(
     channel_data_obj = {
         "partner_address": "0xf3AF96F89b3d7CdcBE0C083690A28185Feb0b3CE",
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
-        "balance": 1,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
+        "balance": "1",
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -520,6 +559,7 @@ def test_api_open_and_deposit_channel(
     assert "The account balance is below the estimated amount" in json_response["errors"]
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_api_open_and_deposit_race(
@@ -546,8 +586,8 @@ def test_api_open_and_deposit_race(
     channel_data_obj = {
         "partner_address": first_partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
     }
 
     request = grequests.put(
@@ -560,10 +600,10 @@ def test_api_open_and_deposit_race(
     expected_response = channel_data_obj.copy()
     expected_response.update(
         {
-            "balance": 0,
+            "balance": "0",
             "state": ChannelState.STATE_OPENED.value,
-            "channel_identifier": 1,
-            "total_deposit": 0,
+            "channel_identifier": "1",
+            "total_deposit": "0",
         }
     )
     assert check_dict_nested_attrs(json_response, expected_response)
@@ -577,7 +617,7 @@ def test_api_open_and_deposit_race(
             token_address=token_address,
             partner_address=first_partner_address,
         ),
-        json={"total_deposit": deposit_amount},
+        json={"total_deposit": str(deposit_amount)},
     )
 
     # Spawn two greenlets doing the same deposit request
@@ -587,7 +627,9 @@ def test_api_open_and_deposit_race(
     g1_response = greenlets[0].get().response
     assert_proper_response(g1_response, HTTPStatus.OK)
     json_response = get_json_response(g1_response)
-    expected_response.update({"total_deposit": deposit_amount, "balance": deposit_amount})
+    expected_response.update(
+        {"total_deposit": str(deposit_amount), "balance": str(deposit_amount)}
+    )
     assert check_dict_nested_attrs(json_response, expected_response)
     g2_response = greenlets[0].get().response
     assert_proper_response(g2_response, HTTPStatus.OK)
@@ -614,9 +656,10 @@ def test_api_open_and_deposit_race(
     json_response = get_json_response(response)
     channel_info = json_response[0]
     assert channel_info["token_address"] == to_checksum_address(token_address)
-    assert channel_info["total_deposit"] == deposit_amount
+    assert channel_info["total_deposit"] == str(deposit_amount)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_api_open_close_and_settle_channel(
@@ -629,7 +672,7 @@ def test_api_open_close_and_settle_channel(
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
+        "settle_timeout": str(settle_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -643,11 +686,11 @@ def test_api_open_close_and_settle_channel(
     expected_response = channel_data_obj.copy()
     expected_response.update(
         {
-            "balance": balance,
+            "balance": str(balance),
             "state": ChannelState.STATE_OPENED.value,
-            "reveal_timeout": reveal_timeout,
-            "channel_identifier": channel_identifier,
-            "total_deposit": 0,
+            "reveal_timeout": str(reveal_timeout),
+            "channel_identifier": str(channel_identifier),
+            "total_deposit": "0",
         }
     )
     assert check_dict_nested_attrs(json_response, expected_response)
@@ -668,14 +711,14 @@ def test_api_open_close_and_settle_channel(
     assert_proper_response(response)
     expected_response = {
         "token_network_address": token_network_address,
-        "channel_identifier": channel_identifier,
+        "channel_identifier": str(channel_identifier),
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
         "state": ChannelState.STATE_CLOSED.value,
-        "balance": balance,
-        "total_deposit": balance,
+        "balance": str(balance),
+        "total_deposit": str(balance),
     }
     assert check_dict_nested_attrs(get_json_response(response), expected_response)
 
@@ -701,7 +744,7 @@ def test_api_open_close_and_settle_channel(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(partner_address),
         ),
-        json={"amount": 1},
+        json={"amount": "1"},
     )
     # Payment should not work since channel is closing
     response = request.send().response
@@ -716,6 +759,7 @@ def test_api_open_close_and_settle_channel(
     assert_proper_response(response, HTTPStatus.CONFLICT)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_api_close_insufficient_eth(
@@ -729,7 +773,7 @@ def test_api_close_insufficient_eth(
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
+        "settle_timeout": str(settle_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -743,11 +787,11 @@ def test_api_close_insufficient_eth(
     expected_response = channel_data_obj.copy()
     expected_response.update(
         {
-            "balance": balance,
+            "balance": str(balance),
             "state": ChannelState.STATE_OPENED.value,
-            "reveal_timeout": reveal_timeout,
-            "channel_identifier": channel_identifier,
-            "total_deposit": 0,
+            "reveal_timeout": str(reveal_timeout),
+            "channel_identifier": str(channel_identifier),
+            "total_deposit": "0",
         }
     )
     assert check_dict_nested_attrs(json_response, expected_response)
@@ -769,6 +813,7 @@ def test_api_close_insufficient_eth(
     assert "insufficient ETH" in json_response["errors"]
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_api_open_channel_invalid_input(
@@ -780,8 +825,8 @@ def test_api_open_channel_invalid_input(
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -789,14 +834,14 @@ def test_api_open_channel_invalid_input(
     response = request.send().response
     assert_response_with_error(response, status_code=HTTPStatus.CONFLICT)
 
-    channel_data_obj["settle_timeout"] = TEST_SETTLE_TIMEOUT_MAX + 1
+    channel_data_obj["settle_timeout"] = str(TEST_SETTLE_TIMEOUT_MAX + 1)
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
     )
     response = request.send().response
     assert_response_with_error(response, status_code=HTTPStatus.CONFLICT)
 
-    channel_data_obj["settle_timeout"] = TEST_SETTLE_TIMEOUT_MAX - 1
+    channel_data_obj["settle_timeout"] = str(TEST_SETTLE_TIMEOUT_MAX - 1)
     channel_data_obj["token_address"] = to_checksum_address(factories.make_address())
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -805,6 +850,7 @@ def test_api_open_channel_invalid_input(
     assert_response_with_error(response, status_code=HTTPStatus.CONFLICT)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_api_channel_state_change_errors(
@@ -816,8 +862,8 @@ def test_api_channel_state_change_errors(
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -846,7 +892,7 @@ def test_api_channel_state_change_errors(
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(state=ChannelState.STATE_CLOSED.value, total_deposit=200),
+        json=dict(state=ChannelState.STATE_CLOSED.value, total_deposit="200"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
@@ -859,7 +905,7 @@ def test_api_channel_state_change_errors(
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(state=ChannelState.STATE_CLOSED.value, total_withdraw=200),
+        json=dict(state=ChannelState.STATE_CLOSED.value, total_withdraw="200"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
@@ -872,7 +918,7 @@ def test_api_channel_state_change_errors(
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(total_deposit=500, total_withdraw=200),
+        json=dict(total_deposit="500", total_withdraw="200"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
@@ -885,7 +931,7 @@ def test_api_channel_state_change_errors(
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(state=ChannelState.STATE_CLOSED.value, reveal_timeout=50),
+        json=dict(state=ChannelState.STATE_CLOSED.value, reveal_timeout="50"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
@@ -898,7 +944,7 @@ def test_api_channel_state_change_errors(
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(total_deposit=500, reveal_timeout=50),
+        json=dict(total_deposit="500", reveal_timeout="50"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
@@ -911,7 +957,7 @@ def test_api_channel_state_change_errors(
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(total_withdraw=500, reveal_timeout=50),
+        json=dict(total_withdraw="500", reveal_timeout="50"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
@@ -949,12 +995,13 @@ def test_api_channel_state_change_errors(
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(total_deposit=500),
+        json=dict(total_deposit="500"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 @pytest.mark.parametrize("number_of_tokens", [2])
@@ -968,7 +1015,7 @@ def test_api_tokens(api_server_test_instance: APIServer, blockchain_services, to
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address1),
-        "settle_timeout": settle_timeout,
+        "settle_timeout": str(settle_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -981,7 +1028,7 @@ def test_api_tokens(api_server_test_instance: APIServer, blockchain_services, to
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address2),
-        "settle_timeout": settle_timeout,
+        "settle_timeout": str(settle_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -998,6 +1045,7 @@ def test_api_tokens(api_server_test_instance: APIServer, blockchain_services, to
     assert set(json_response) == set(expected_response)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_query_partners_by_token(
@@ -1010,7 +1058,7 @@ def test_query_partners_by_token(
     channel_data_obj = {
         "partner_address": first_partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
+        "settle_timeout": str(settle_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -1064,6 +1112,7 @@ def test_query_partners_by_token(
     assert all(r in json_response for r in expected_response)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_payments_target_error(
     api_server_test_instance: APIServer, raiden_network, token_addresses
@@ -1084,13 +1133,14 @@ def test_api_payments_target_error(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier},
+        json={"amount": str(amount), "identifier": str(identifier)},
     )
     response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.CONFLICT)
     app1.start()
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_payments(
     api_server_test_instance: APIServer, raiden_network, token_addresses, deposit
@@ -1107,8 +1157,8 @@ def test_api_payments(
         "initiator_address": to_checksum_address(our_address),
         "target_address": to_checksum_address(target_address),
         "token_address": to_checksum_address(token_address),
-        "amount": amount,
-        "identifier": identifier,
+        "amount": str(amount),
+        "identifier": str(identifier),
     }
 
     # Test a normal payment
@@ -1119,7 +1169,7 @@ def test_api_payments(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier},
+        json={"amount": str(amount), "identifier": str(identifier)},
     )
     with watch_for_unlock_failures(*raiden_network):
         response = request.send().response
@@ -1128,7 +1178,7 @@ def test_api_payments(
     assert_payment_secret_and_hash(json_response, payment)
 
     # Test a payment without providing an identifier
-    payment["amount"] = 1
+    payment["amount"] = "1"
     request = grequests.post(
         api_url_for(
             api_server_test_instance,
@@ -1136,7 +1186,7 @@ def test_api_payments(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": 1},
+        json={"amount": "1"},
     )
     with watch_for_unlock_failures(*raiden_network):
         response = request.send().response
@@ -1145,7 +1195,7 @@ def test_api_payments(
     assert_payment_secret_and_hash(json_response, payment)
 
     # Test that trying out a payment with an amount higher than what is available returns an error
-    payment["amount"] = deposit
+    payment["amount"] = str(deposit)
     request = grequests.post(
         api_url_for(
             api_server_test_instance,
@@ -1153,12 +1203,26 @@ def test_api_payments(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": deposit},
+        json={"amount": str(deposit)},
     )
     response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.CONFLICT)
 
+    # Test that querying the internal events resource works
+    limit = 5
+    request = grequests.get(
+        api_url_for(
+            api_server_test_instance, "raideninternaleventsresource", limit=limit, offset=0
+        )
+    )
+    response = request.send().response
+    assert_proper_response(response)
+    events = response.json()
+    assert len(events) == limit
+    assert all("TimestampedEvent" in event for event in events)
 
+
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_timestamp_format(
     api_server_test_instance: APIServer, raiden_network, token_addresses
@@ -1177,7 +1241,7 @@ def test_api_timestamp_format(
     )
 
     # Make payment
-    grequests.post(payment_url, json={"amount": amount, "identifier": identifier}).send()
+    grequests.post(payment_url, json={"amount": str(amount), "identifier": str(identifier)}).send()
 
     json_response = get_json_response(grequests.get(payment_url).send().response)
 
@@ -1195,6 +1259,7 @@ def test_api_timestamp_format(
     assert log_timestamp_iso == log_timestamp, "log_time is not a valid ISO8601 string"
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_payments_secret_hash_errors(
     api_server_test_instance: APIServer, raiden_network, token_addresses
@@ -1217,7 +1282,7 @@ def test_api_payments_secret_hash_errors(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret": short_secret},
+        json={"amount": str(amount), "identifier": str(identifier), "secret": short_secret},
     )
     response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.BAD_REQUEST)
@@ -1229,7 +1294,7 @@ def test_api_payments_secret_hash_errors(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret": bad_secret},
+        json={"amount": str(amount), "identifier": str(identifier), "secret": bad_secret},
     )
     response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.BAD_REQUEST)
@@ -1241,7 +1306,11 @@ def test_api_payments_secret_hash_errors(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret_hash": short_secret_hash},
+        json={
+            "amount": str(amount),
+            "identifier": str(identifier),
+            "secret_hash": short_secret_hash,
+        },
     )
     response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.BAD_REQUEST)
@@ -1253,7 +1322,11 @@ def test_api_payments_secret_hash_errors(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret_hash": bad_secret_hash},
+        json={
+            "amount": str(amount),
+            "identifier": str(identifier),
+            "secret_hash": bad_secret_hash,
+        },
     )
     response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.BAD_REQUEST)
@@ -1265,12 +1338,18 @@ def test_api_payments_secret_hash_errors(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret": secret, "secret_hash": secret},
+        json={
+            "amount": str(amount),
+            "identifier": str(identifier),
+            "secret": secret,
+            "secret_hash": secret,
+        },
     )
     response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.CONFLICT)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_payments_with_secret_no_hash(
     api_server_test_instance: APIServer, raiden_network, token_addresses
@@ -1288,8 +1367,8 @@ def test_api_payments_with_secret_no_hash(
         "initiator_address": to_checksum_address(our_address),
         "target_address": to_checksum_address(target_address),
         "token_address": to_checksum_address(token_address),
-        "amount": amount,
-        "identifier": identifier,
+        "amount": str(amount),
+        "identifier": str(identifier),
     }
 
     request = grequests.post(
@@ -1299,7 +1378,7 @@ def test_api_payments_with_secret_no_hash(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret": secret},
+        json={"amount": str(amount), "identifier": str(identifier), "secret": secret},
     )
     with watch_for_unlock_failures(*raiden_network):
         response = request.send().response
@@ -1309,6 +1388,7 @@ def test_api_payments_with_secret_no_hash(
     assert secret == json_response["secret"]
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_payments_with_hash_no_secret(
     api_server_test_instance, raiden_network, token_addresses
@@ -1327,8 +1407,8 @@ def test_api_payments_with_hash_no_secret(
         "initiator_address": to_checksum_address(our_address),
         "target_address": to_checksum_address(target_address),
         "token_address": to_checksum_address(token_address),
-        "amount": amount,
-        "identifier": identifier,
+        "amount": str(amount),
+        "identifier": str(identifier),
     }
 
     request = grequests.post(
@@ -1338,14 +1418,14 @@ def test_api_payments_with_hash_no_secret(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret_hash": secret_hash},
+        json={"amount": str(amount), "identifier": str(identifier), "secret_hash": secret_hash},
     )
-    with watch_for_unlock_failures(*raiden_network):
-        response = request.send().response
+    response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.CONFLICT)
     assert payment == payment
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 @pytest.mark.parametrize("resolver_ports", [[None, 8000]])
 def test_api_payments_with_resolver(
@@ -1366,8 +1446,8 @@ def test_api_payments_with_resolver(
         "initiator_address": to_checksum_address(our_address),
         "target_address": to_checksum_address(target_address),
         "token_address": to_checksum_address(token_address),
-        "amount": amount,
-        "identifier": identifier,
+        "amount": str(amount),
+        "identifier": str(identifier),
     }
 
     # payment with secret_hash when both resolver and initiator don't have the secret
@@ -1379,7 +1459,7 @@ def test_api_payments_with_resolver(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret_hash": secret_hash},
+        json={"amount": str(amount), "identifier": str(identifier), "secret_hash": secret_hash},
     )
     response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.CONFLICT)
@@ -1394,10 +1474,9 @@ def test_api_payments_with_resolver(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret": secret},
+        json={"amount": str(amount), "identifier": str(identifier), "secret": secret},
     )
-    with watch_for_unlock_failures(*raiden_network):
-        response = request.send().response
+    response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.OK)
     assert payment == payment
 
@@ -1413,7 +1492,7 @@ def test_api_payments_with_resolver(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "secret_hash": secret_hash},
+        json={"amount": str(amount), "identifier": str(identifier), "secret_hash": secret_hash},
     )
     with watch_for_unlock_failures(*raiden_network):
         response = request.send().response
@@ -1421,6 +1500,7 @@ def test_api_payments_with_resolver(
     assert payment == payment
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_payments_with_secret_and_hash(
     api_server_test_instance: APIServer, raiden_network, token_addresses
@@ -1439,8 +1519,8 @@ def test_api_payments_with_secret_and_hash(
         "initiator_address": to_checksum_address(our_address),
         "target_address": to_checksum_address(target_address),
         "token_address": to_checksum_address(token_address),
-        "amount": amount,
-        "identifier": identifier,
+        "amount": str(amount),
+        "identifier": str(identifier),
     }
 
     request = grequests.post(
@@ -1451,8 +1531,8 @@ def test_api_payments_with_secret_and_hash(
             target_address=to_checksum_address(target_address),
         ),
         json={
-            "amount": amount,
-            "identifier": identifier,
+            "amount": str(amount),
+            "identifier": str(identifier),
             "secret": secret,
             "secret_hash": secret_hash,
         },
@@ -1466,28 +1546,7 @@ def test_api_payments_with_secret_and_hash(
     assert secret_hash == json_response["secret_hash"]
 
 
-def assert_payment_secret_and_hash(response, payment):
-    # make sure that payment key/values are part of the response.
-    assert len(response) == 7
-    assert "secret" in response
-    assert "secret_hash" in response
-
-    secret = to_bytes(hexstr=response["secret"])
-    assert len(secret) == SECRET_LENGTH
-    assert payment["amount"] == response["amount"]
-
-    assert to_bytes(hexstr=response["secret_hash"]) == sha256_secrethash(secret)
-
-
-def assert_payment_conflict(responses):
-    assert all(response is not None for response in responses)
-    assert any(
-        resp.status_code == HTTPStatus.CONFLICT
-        and get_json_response(resp)["errors"] == "Another payment with the same id is in flight"
-        for resp in responses
-    )
-
-
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_payments_conflicts(
     api_server_test_instance: APIServer, raiden_network, token_addresses
@@ -1507,8 +1566,8 @@ def test_api_payments_conflicts(
     # payment conflict
     responses = grequests.map(
         [
-            grequests.post(payment_url, json={"amount": 10, "identifier": 11}),
-            grequests.post(payment_url, json={"amount": 11, "identifier": 11}),
+            grequests.post(payment_url, json={"amount": "10", "identifier": "11"}),
+            grequests.post(payment_url, json={"amount": "11", "identifier": "11"}),
         ]
     )
     assert_payment_conflict(responses)
@@ -1516,13 +1575,14 @@ def test_api_payments_conflicts(
     # same request sent twice, e. g. when it is retried: no conflict
     responses = grequests.map(
         [
-            grequests.post(payment_url, json={"amount": 10, "identifier": 73}),
-            grequests.post(payment_url, json={"amount": 10, "identifier": 73}),
+            grequests.post(payment_url, json={"amount": "10", "identifier": "73"}),
+            grequests.post(payment_url, json={"amount": "10", "identifier": "73"}),
         ]
     )
     assert all(response.status_code == HTTPStatus.OK for response in responses)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_tokens", [0])
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
@@ -1552,6 +1612,7 @@ def test_register_token_mainnet(
     assert response is not None and response.status_code == HTTPStatus.NOT_IMPLEMENTED
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_tokens", [0])
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
@@ -1629,6 +1690,7 @@ def test_register_token(
     assert_response_with_error(poor_response, HTTPStatus.PAYMENT_REQUIRED)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_tokens", [0])
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
@@ -1694,6 +1756,7 @@ def test_get_token_network_for_token(
     assert token_network_address == get_json_response(token_response)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 @pytest.mark.parametrize("number_of_tokens", [1])
@@ -1753,6 +1816,7 @@ def test_get_connection_managers_info(api_server_test_instance: APIServer, token
     # assert set(result[token_address2].keys()) == {'funds', 'sum_deposits', 'channels'}
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 @pytest.mark.parametrize("number_of_tokens", [1])
@@ -1773,6 +1837,7 @@ def test_connect_insufficient_reserve(api_server_test_instance: APIServer, token
     assert "The account balance is below the estimated amount" in json_response["errors"]
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_network_events(api_server_test_instance: APIServer, token_addresses):
@@ -1783,7 +1848,7 @@ def test_network_events(api_server_test_instance: APIServer, token_addresses):
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
+        "settle_timeout": str(settle_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -1804,6 +1869,7 @@ def test_network_events(api_server_test_instance: APIServer, token_addresses):
     assert len(get_json_response(response)) > 0
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_token_events(api_server_test_instance: APIServer, token_addresses):
@@ -1814,7 +1880,7 @@ def test_token_events(api_server_test_instance: APIServer, token_addresses):
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
+        "settle_timeout": str(settle_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -1836,6 +1902,7 @@ def test_token_events(api_server_test_instance: APIServer, token_addresses):
     assert len(get_json_response(response)) > 0
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_channel_events(api_server_test_instance: APIServer, token_addresses):
@@ -1846,7 +1913,7 @@ def test_channel_events(api_server_test_instance: APIServer, token_addresses):
     channel_data_obj = {
         "partner_address": partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
+        "settle_timeout": str(settle_timeout),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -1861,7 +1928,7 @@ def test_channel_events(api_server_test_instance: APIServer, token_addresses):
             "tokenchanneleventsresourceblockchain",
             partner_address=partner_address,
             token_address=token_address,
-            from_block=GENESIS_BLOCK_NUMBER,
+            from_block=str(GENESIS_BLOCK_NUMBER),
         )
     )
     response = request.send().response
@@ -1869,6 +1936,7 @@ def test_channel_events(api_server_test_instance: APIServer, token_addresses):
     assert len(get_json_response(response)) > 0
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 def test_token_events_errors_for_unregistered_token(api_server_test_instance):
@@ -1877,8 +1945,8 @@ def test_token_events_errors_for_unregistered_token(api_server_test_instance):
             api_server_test_instance,
             "tokenchanneleventsresourceblockchain",
             token_address="0x61C808D82A3Ac53231750daDc13c777b59310bD9",
-            from_block=5,
-            to_block=20,
+            from_block="5",
+            to_block="20",
         )
     )
     response = request.send().response
@@ -1890,14 +1958,15 @@ def test_token_events_errors_for_unregistered_token(api_server_test_instance):
             "channelblockchaineventsresource",
             token_address="0x61C808D82A3Ac53231750daDc13c777b59310bD9",
             partner_address="0x61C808D82A3Ac53231750daDc13c777b59313bD9",
-            from_block=5,
-            to_block=20,
+            from_block="5",
+            to_block="20",
         )
     )
     response = request.send().response
     assert_response_with_error(response, status_code=HTTPStatus.NOT_FOUND)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 @pytest.mark.parametrize("deposit", [DEPOSIT_FOR_TEST_API_DEPOSIT_LIMIT])
@@ -1921,9 +1990,9 @@ def test_api_deposit_limit(
     channel_data_obj = {
         "partner_address": first_partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
-        "total_deposit": deposit_limit,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
+        "total_deposit": str(deposit_limit),
     }
 
     request = grequests.put(
@@ -1937,10 +2006,10 @@ def test_api_deposit_limit(
     expected_response = channel_data_obj.copy()
     expected_response.update(
         {
-            "balance": deposit_limit,
+            "balance": str(deposit_limit),
             "state": ChannelState.STATE_OPENED.value,
-            "channel_identifier": first_channel_identifier,
-            "total_deposit": deposit_limit,
+            "channel_identifier": str(first_channel_identifier),
+            "total_deposit": str(deposit_limit),
         }
     )
     assert check_dict_nested_attrs(json_response, expected_response)
@@ -1951,9 +2020,9 @@ def test_api_deposit_limit(
     channel_data_obj = {
         "partner_address": second_partner_address,
         "token_address": to_checksum_address(token_address),
-        "settle_timeout": settle_timeout,
-        "reveal_timeout": reveal_timeout,
-        "total_deposit": balance_failing,
+        "settle_timeout": str(settle_timeout),
+        "reveal_timeout": str(reveal_timeout),
+        "total_deposit": str(balance_failing),
     }
     request = grequests.put(
         api_url_for(api_server_test_instance, "channelsresource"), json=channel_data_obj
@@ -1968,6 +2037,7 @@ def test_api_deposit_limit(
     )
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [3])
 def test_payment_events_endpoints(
     api_server_test_instance: APIServer, raiden_network, token_addresses
@@ -1993,7 +2063,7 @@ def test_payment_events_endpoints(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target1_address),
         ),
-        json={"amount": amount1, "identifier": identifier1, "secret": to_hex(secret1)},
+        json={"amount": str(amount1), "identifier": str(identifier1), "secret": to_hex(secret1)},
     )
     request.send()
 
@@ -2008,7 +2078,7 @@ def test_payment_events_endpoints(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target2_address),
         ),
-        json={"amount": amount2, "identifier": identifier2, "secret": to_hex(secret2)},
+        json={"amount": str(amount2), "identifier": str(identifier2), "secret": to_hex(secret2)},
     )
     request.send()
 
@@ -2023,7 +2093,7 @@ def test_payment_events_endpoints(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target2_address),
         ),
-        json={"amount": amount3, "identifier": identifier3, "secret": to_hex(secret3)},
+        json={"amount": str(amount3), "identifier": str(identifier3), "secret": to_hex(secret3)},
     )
     request.send()
 
@@ -2057,16 +2127,18 @@ def test_payment_events_endpoints(
         json_response,
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier1,
+            "identifier": str(identifier1),
             "target": to_checksum_address(target1_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
     assert must_have_event(
         json_response,
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier2,
+            "identifier": str(identifier2),
             "target": to_checksum_address(target2_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
 
@@ -2076,10 +2148,20 @@ def test_payment_events_endpoints(
     assert_proper_response(response, HTTPStatus.OK)
     json_response = get_json_response(response)
     assert must_have_event(
-        json_response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier1}
+        json_response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier1),
+            "token_address": to_checksum_address(token_address),
+        },
     )
     assert must_have_event(
-        json_response, {"event": "EventPaymentSentSuccess", "identifier": identifier3}
+        json_response,
+        {
+            "event": "EventPaymentSentSuccess",
+            "identifier": str(identifier3),
+            "token_address": to_checksum_address(token_address),
+        },
     )
     # test endpoint without (partner and token) for target2
     request = grequests.get(api_url_for(app2_server, "paymentresource"))
@@ -2087,10 +2169,20 @@ def test_payment_events_endpoints(
     assert_proper_response(response, HTTPStatus.OK)
     json_response = get_json_response(response)
     assert must_have_event(
-        json_response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier2}
+        json_response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier2),
+            "token_address": to_checksum_address(token_address),
+        },
     )
     assert must_have_event(
-        json_response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier3}
+        json_response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier3),
+            "token_address": to_checksum_address(token_address),
+        },
     )
 
     # test endpoint without partner for app0
@@ -2104,16 +2196,18 @@ def test_payment_events_endpoints(
         json_response,
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier1,
+            "identifier": str(identifier1),
             "target": to_checksum_address(target1_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
     assert must_have_event(
         json_response,
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier2,
+            "identifier": str(identifier2),
             "target": to_checksum_address(target2_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
 
@@ -2135,8 +2229,9 @@ def test_payment_events_endpoints(
         json_response,
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier1,
+            "identifier": str(identifier1),
             "target": to_checksum_address(target1_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
     assert len(json_response) == 1
@@ -2157,8 +2252,9 @@ def test_payment_events_endpoints(
         json_response,
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier2,
+            "identifier": str(identifier2),
             "target": to_checksum_address(target2_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
 
@@ -2171,11 +2267,16 @@ def test_payment_events_endpoints(
     json_response = get_json_response(response)
     assert must_have_events(
         json_response,
-        {"event": "EventPaymentReceivedSuccess", "identifier": identifier1},
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier1),
+            "token_address": to_checksum_address(token_address),
+        },
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier3,
+            "identifier": str(identifier3),
             "target": to_checksum_address(target2_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
     # test endpoint without partner for target2
@@ -2187,8 +2288,16 @@ def test_payment_events_endpoints(
     json_response = get_json_response(response)
     assert must_have_events(
         json_response,
-        {"event": "EventPaymentReceivedSuccess", "identifier": identifier2},
-        {"event": "EventPaymentReceivedSuccess", "identifier": identifier3},
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier2),
+            "token_address": to_checksum_address(token_address),
+        },
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier3),
+            "token_address": to_checksum_address(token_address),
+        },
     )
 
     # test endpoint for token and partner for app0
@@ -2207,16 +2316,18 @@ def test_payment_events_endpoints(
         json_response,
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier1,
+            "identifier": str(identifier1),
             "target": to_checksum_address(target1_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
     assert not must_have_event(
         json_response,
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier2,
+            "identifier": str(identifier2),
             "target": to_checksum_address(target2_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
     # test endpoint for token and partner for target1. Check both partners
@@ -2236,12 +2347,18 @@ def test_payment_events_endpoints(
         json_response,
         {
             "event": "EventPaymentSentSuccess",
-            "identifier": identifier3,
+            "identifier": str(identifier3),
             "target": to_checksum_address(target2_address),
+            "token_address": to_checksum_address(token_address),
         },
     )
     assert not must_have_event(
-        response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier1}
+        response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier1),
+            "token_address": to_checksum_address(token_address),
+        },
     )
     request = grequests.get(
         api_url_for(
@@ -2268,13 +2385,28 @@ def test_payment_events_endpoints(
     assert_proper_response(response, HTTPStatus.OK)
     json_response = get_json_response(response)
     assert must_have_events(
-        json_response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier2}
+        json_response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier2),
+            "token_address": to_checksum_address(token_address),
+        },
     )
     assert not must_have_event(
-        json_response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier1}
+        json_response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier1),
+            "token_address": to_checksum_address(token_address),
+        },
     )
     assert not must_have_event(
-        json_response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier3}
+        json_response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier3),
+            "token_address": to_checksum_address(token_address),
+        },
     )
     request = grequests.get(
         api_url_for(
@@ -2288,19 +2420,49 @@ def test_payment_events_endpoints(
     assert_proper_response(response, HTTPStatus.OK)
     json_response = get_json_response(response)
     assert must_have_events(
-        json_response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier3}
+        json_response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier3),
+            "token_address": to_checksum_address(token_address),
+        },
     )
     assert not must_have_event(
-        json_response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier2}
+        json_response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier2),
+            "token_address": to_checksum_address(token_address),
+        },
     )
     assert not must_have_event(
-        json_response, {"event": "EventPaymentReceivedSuccess", "identifier": identifier1}
+        json_response,
+        {
+            "event": "EventPaymentReceivedSuccess",
+            "identifier": str(identifier1),
+            "token_address": to_checksum_address(token_address),
+        },
     )
+
+    # also add a test for filtering by wrong token address
+    request = grequests.get(
+        api_url_for(
+            app2_server,
+            "token_target_paymentresource",
+            token_address=target1_address,
+            target_address=target1_address,
+        )
+    )
+    response = request.send().response
+    assert_proper_response(response, HTTPStatus.OK)
+    json_response = get_json_response(response)
+    assert len(json_response) == 0
 
     app1_server.stop()
     app2_server.stop()
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_channel_events_raiden(
     api_server_test_instance: APIServer, raiden_network, token_addresses
@@ -2318,12 +2480,13 @@ def test_channel_events_raiden(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier},
+        json={"amount": str(amount), "identifier": str(identifier)},
     )
     response = request.send().response
     assert_proper_response(response)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [3])
 @pytest.mark.parametrize("channels_per_node", [CHAIN])
 def test_pending_transfers_endpoint(raiden_network, token_addresses):
@@ -2420,6 +2583,7 @@ def test_pending_transfers_endpoint(raiden_network, token_addresses):
     assert response.status_code == 404 and b"Channel" in response.content
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 @pytest.mark.parametrize("deposit", [1000])
 def test_api_withdraw(api_server_test_instance: APIServer, raiden_network, token_addresses):
@@ -2435,7 +2599,7 @@ def test_api_withdraw(api_server_test_instance: APIServer, raiden_network, token
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(total_withdraw=0),
+        json=dict(total_withdraw="0"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
@@ -2448,7 +2612,7 @@ def test_api_withdraw(api_server_test_instance: APIServer, raiden_network, token
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(total_withdraw=1500),
+        json=dict(total_withdraw="1500"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
@@ -2461,7 +2625,7 @@ def test_api_withdraw(api_server_test_instance: APIServer, raiden_network, token
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(total_withdraw=750),
+        json=dict(total_withdraw="750"),
     )
     response = request.send().response
     assert_response_with_code(response, HTTPStatus.OK)
@@ -2474,12 +2638,13 @@ def test_api_withdraw(api_server_test_instance: APIServer, raiden_network, token
             token_address=token_address,
             partner_address=partner_address,
         ),
-        json=dict(total_withdraw=750),
+        json=dict(total_withdraw="750"),
     )
     response = request.send().response
     assert_response_with_error(response, HTTPStatus.CONFLICT)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [1])
 @pytest.mark.parametrize("channels_per_node", [0])
 @pytest.mark.parametrize("number_of_tokens", [1])
@@ -2521,6 +2686,7 @@ def test_api_testnet_token_mint(api_server_test_instance: APIServer, token_addre
     assert_response_with_error(response, HTTPStatus.BAD_REQUEST)
 
 
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 def test_api_payments_with_lock_timeout(
     api_server_test_instance: APIServer, raiden_network, token_addresses
@@ -2542,7 +2708,11 @@ def test_api_payments_with_lock_timeout(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "lock_timeout": reveal_timeout},
+        json={
+            "amount": str(amount),
+            "identifier": str(identifier),
+            "lock_timeout": str(reveal_timeout),
+        },
     )
     response = request.send().response
     assert_response_with_error(response, status_code=HTTPStatus.CONFLICT)
@@ -2555,7 +2725,11 @@ def test_api_payments_with_lock_timeout(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "lock_timeout": 2 * reveal_timeout},
+        json={
+            "amount": str(amount),
+            "identifier": str(identifier),
+            "lock_timeout": str(2 * reveal_timeout),
+        },
     )
     with watch_for_unlock_failures(*raiden_network):
         response = request.send().response
@@ -2569,7 +2743,11 @@ def test_api_payments_with_lock_timeout(
             token_address=to_checksum_address(token_address),
             target_address=to_checksum_address(target_address),
         ),
-        json={"amount": amount, "identifier": identifier, "lock_timeout": settle_timeout},
+        json={
+            "amount": str(amount),
+            "identifier": str(identifier),
+            "lock_timeout": str(settle_timeout),
+        },
     )
     response = request.send().response
     assert_proper_response(response, status_code=HTTPStatus.OK)
@@ -2588,6 +2766,60 @@ def test_api_payments_with_lock_timeout(
     assert_response_with_error(response, status_code=HTTPStatus.CONFLICT)
 
 
+@raise_on_failure
+@pytest.mark.parametrize("number_of_nodes", [2])
+def test_api_payments_with_invalid_input(
+    api_server_test_instance: APIServer, raiden_network, token_addresses
+):
+    _, app1 = raiden_network
+    amount = 100
+    token_address = token_addresses[0]
+    target_address = app1.raiden.address
+    settle_timeout = 39
+
+    # Invalid identifier being 0 or negative
+    request = grequests.post(
+        api_url_for(
+            api_server_test_instance,
+            "token_target_paymentresource",
+            token_address=to_checksum_address(token_address),
+            target_address=to_checksum_address(target_address),
+        ),
+        json={"amount": str(amount), "identifier": "0", "lock_timeout": str(settle_timeout)},
+    )
+    response = request.send().response
+    assert_response_with_error(response, status_code=HTTPStatus.CONFLICT)
+
+    request = grequests.post(
+        api_url_for(
+            api_server_test_instance,
+            "token_target_paymentresource",
+            token_address=to_checksum_address(token_address),
+            target_address=to_checksum_address(target_address),
+        ),
+        json={"amount": str(amount), "identifier": "-1", "lock_timeout": str(settle_timeout)},
+    )
+    response = request.send().response
+    assert_response_with_error(response, status_code=HTTPStatus.CONFLICT)
+
+    request = grequests.post(
+        api_url_for(
+            api_server_test_instance,
+            "token_target_paymentresource",
+            token_address=to_checksum_address(token_address),
+            target_address=to_checksum_address(target_address),
+        ),
+        json={
+            "amount": str(amount),
+            "identifier": str(UINT64_MAX + 1),
+            "lock_timeout": str(settle_timeout),
+        },
+    )
+    response = request.send().response
+    assert_response_with_error(response, status_code=HTTPStatus.CONFLICT)
+
+
+@raise_on_failure
 @pytest.mark.parametrize("number_of_nodes", [2])
 @pytest.mark.parametrize("deposit", [0])
 def test_api_set_reveal_timeout(

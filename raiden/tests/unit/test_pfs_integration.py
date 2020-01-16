@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import requests
-from eth_utils import is_checksum_address, is_hex, is_hex_address, to_checksum_address
+from eth_utils import is_checksum_address, is_hex, is_hex_address
 
 from raiden.constants import RoutingMode
 from raiden.exceptions import ServiceRequestFailed, ServiceRequestIOURejected
@@ -26,11 +26,14 @@ from raiden.routing import get_best_routes
 from raiden.tests.utils import factories
 from raiden.tests.utils.mocks import mocked_failed_response, mocked_json_response
 from raiden.transfer.state import NettingChannelState, NetworkState, TokenNetworkState
-from raiden.utils import privatekey_to_address, typing
+from raiden.utils import typing
+from raiden.utils.formatting import to_checksum_address
+from raiden.utils.keys import privatekey_to_address
 from raiden.utils.typing import (
     Address,
     Any,
     BlockNumber,
+    BlockTimeout,
     ChainID,
     Dict,
     PaymentAmount,
@@ -103,13 +106,14 @@ PFS_CONFIG = PFSConfig(
         price=TokenAmount(12),
         chain_id=ChainID(42),
         token_network_registry_address=factories.make_token_network_registry_address(),
+        user_deposit_address=factories.make_address(),
         payment_address=factories.make_address(),
         message="",
         operator="",
         version="",
     ),
     maximum_fee=TokenAmount(100),
-    iou_timeout=BlockNumber(100),
+    iou_timeout=BlockTimeout(100),
     max_paths=5,
 )
 CONFIG = {"pfs_config": PFS_CONFIG}
@@ -139,7 +143,7 @@ def get_best_routes_with_iou_request_mocked(
         return mocked_json_response(response_data=iou_json_data)
 
     with patch.object(requests, "get", side_effect=iou_side_effect) as patched:
-        best_routes, feedback_token = get_best_routes(
+        _, best_routes, feedback_token = get_best_routes(
             chain_state=chain_state,
             token_network_address=token_network_state.address,
             one_to_n_address=one_to_n_address,
@@ -147,7 +151,7 @@ def get_best_routes_with_iou_request_mocked(
             to_address=to_address,
             amount=amount,
             previous_address=None,
-            config=CONFIG,
+            pfs_config=PFS_CONFIG,
             privkey=PRIVKEY,
         )
         assert_checksum_address_in_url(patched.call_args[0][0])
@@ -637,8 +641,8 @@ def test_routing_in_direct_channel(happy_path_fixture, our_address, one_to_n_add
     # with the transfer of 50 the direct channel should be returned,
     # so there must be not a pfs call
     with patch("raiden.routing.get_best_routes_pfs") as pfs_request:
-        pfs_request.return_value = True, [], "feedback_token"
-        routes, _ = get_best_routes(
+        pfs_request.return_value = None, [], "feedback_token"
+        _, routes, _ = get_best_routes(
             chain_state=chain_state,
             token_network_address=token_network_state.address,
             one_to_n_address=one_to_n_address,
@@ -646,7 +650,7 @@ def test_routing_in_direct_channel(happy_path_fixture, our_address, one_to_n_add
             to_address=address1,
             amount=PaymentAmount(50),
             previous_address=None,
-            config=CONFIG,
+            pfs_config=PFS_CONFIG,
             privkey=PRIVKEY,
         )
         assert routes[0].next_hop_address == address1
@@ -656,7 +660,7 @@ def test_routing_in_direct_channel(happy_path_fixture, our_address, one_to_n_add
     # with the transfer of 51 the direct channel should not be returned,
     # so there must be a pfs call
     with patch("raiden.routing.get_best_routes_pfs") as pfs_request:
-        pfs_request.return_value = True, [], "feedback_token"
+        pfs_request.return_value = None, [], "feedback_token"
         get_best_routes(
             chain_state=chain_state,
             token_network_address=token_network_state.address,
@@ -665,7 +669,7 @@ def test_routing_in_direct_channel(happy_path_fixture, our_address, one_to_n_add
             to_address=address1,
             amount=PaymentAmount(51),
             previous_address=None,
-            config=CONFIG,
+            pfs_config=PFS_CONFIG,
             privkey=PRIVKEY,
         )
 
@@ -863,7 +867,8 @@ def test_no_iou_when_pfs_price_0(query_paths_args):
             url="abc",
             price=TokenAmount(0),
             chain_id=ChainID(42),
-            token_network_registry_address=factories.make_token_network_address(),
+            token_network_registry_address=factories.make_token_network_registry_address(),
+            user_deposit_address=factories.make_address(),
             payment_address=factories.make_address(),
             message="",
             operator="",

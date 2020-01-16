@@ -1,8 +1,9 @@
 import math
 from enum import Enum
 
-from eth_utils import keccak, to_canonical_address, to_checksum_address
+from eth_utils import keccak, to_canonical_address
 
+from raiden.utils.formatting import to_checksum_address
 from raiden.utils.secrethash import sha256_secrethash
 from raiden.utils.typing import (
     AdditionalHash,
@@ -24,7 +25,7 @@ LATEST = "https://api.github.com/repos/raiden-network/raiden/releases/latest"
 RELEASE_PAGE = "https://github.com/raiden-network/raiden/releases"
 SECURITY_EXPRESSION = r"\[CRITICAL UPDATE.*?\]"
 
-RAIDEN_DB_VERSION = RaidenDBVersion(23)
+RAIDEN_DB_VERSION = RaidenDBVersion(25)
 SQLITE_MIN_REQUIRED_VERSION = (3, 9, 0)
 PROTOCOL_VERSION = RaidenProtocolVersion(1)
 
